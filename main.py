@@ -2723,7 +2723,8 @@ def pairs_screen(req: PairsScreenRequest):
         screener = PairsScreener()
         screener.engine.z_entry = req.z_entry
         screener.engine.z_exit  = req.z_exit
-        pairs = screener.find_best_pairs(price_dict, timestamps)
+        pairs = screener.find_best_pairs(price_dict, timestamps,
+                                         min_correlation=req.min_correlation)
         return _sanitize({"pairs": pairs, "symbols_screened": len(price_dict)})
     except Exception as e:
         logger.exception("Pairs screen failed")

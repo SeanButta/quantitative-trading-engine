@@ -338,11 +338,17 @@ class PairsEngine:
             ols = OLS(spread_diff, X).fit()
             lam = float(ols.params[1])   # AR(1) coefficient on lagged spread
 
-            # lam should be negative for mean-reversion
+            # lam should be negative for mean-reversion; guard against explosive/unit-root
             if lam >= 0 or not math.isfinite(lam):
                 return float("inf")
 
-            half_life = -math.log(2) / math.log(abs(lam))
+            # Correct discrete OU half-life: hl = log(0.5) / log(1 + λ)
+            # 1 + λ must be in (0, 1) for stationary mean-reversion
+            persistence = 1.0 + lam
+            if persistence <= 0 or persistence >= 1:
+                return float("inf")
+
+            half_life = -math.log(2) / math.log(persistence)
 
             if not math.isfinite(half_life) or half_life <= 0:
                 return float("inf")
@@ -713,6 +719,7 @@ class PairsScreener:
         self,
         symbol_prices: dict[str, list[float]],
         timestamps: list[str],
+        min_correlation: float = 0.7,
     ) -> list[dict]:
         """
         Screen all pairs and return the top 10 cointegrated pairs with
@@ -748,7 +755,7 @@ class PairsScreener:
 
         # Screen universe
         try:
-            cointegrated = self.engine.screen_universe(np_prices)
+            cointegrated = self.engine.screen_universe(np_prices, min_correlation=min_correlation)
         except Exception as exc:
             logger.error("screen_universe failed: %s", exc)
             return []
@@ -797,6 +804,15 @@ class PairsScreener:
                 else bt.get("half_life") or 0.0
             )
 
+            # Build spread series for chart (last 90 rows)
+            spread_cols = ["timestamp", "spread", "z_score"]
+            available_cols = [c for c in spread_cols if c in signals_df.columns]
+            spread_series = (
+                signals_df.select(available_cols).tail(90).to_dicts()
+                if available_cols
+                else []
+            )
+
             output.append(
                 {
                     "symbol_a": sym_a,
@@ -808,6 +824,8 @@ class PairsScreener:
                     "current_zscore": round(current_zscore, 4),
                     "signal_a": current_sig_a,
                     "signal_b": current_sig_b,
+                    "position": _pos_label(current_sig_a, current_sig_b),
+                    "spread_series": spread_series,
                     "recent_return": bt.get("total_return", 0.0),
                     "sharpe": bt.get("sharpe_ratio", 0.0),
                 }
