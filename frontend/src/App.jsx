@@ -594,8 +594,8 @@ function OverviewView({onNav, onDetail}) {
         <SectionSep label="Actions"/>
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
           {[{l:"Options Monitor",v:"options",I:Activity,c:C.grn},
-            {l:"Run Backtest",v:"backtest",I:FlaskConical,c:C.sky},
-            {l:"Optimize Portfolio",v:"optimize",I:Target,c:C.amb}].map(({l,v,I,c})=>(
+            {l:"Run Backtest",v:"lab",I:FlaskConical,c:C.sky},
+            {l:"Optimize Portfolio",v:"portfolio",I:Target,c:C.amb}].map(({l,v,I,c})=>(
             <button key={v} onClick={()=>onNav(v)}
               style={{display:"flex",alignItems:"center",justifyContent:"space-between",
                 padding:"13px 16px",borderRadius:12,border:`1px solid ${c}30`,
@@ -6982,8 +6982,68 @@ function PairsView() {
   );
 }
 
+// ── Hub wrappers ────────────────────────────────────────
+// Markets = Overview dashboard + News feed
+function MarketsView({onNav, onDetail}) {
+  const [tab, setTab] = useState("dashboard");
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:18}}>
+      <div style={{display:"flex",gap:8}}>
+        {[["dashboard","Dashboard"],["news","News"]].map(([id,l])=>(
+          <Pill key={id} label={l} active={tab===id} onClick={()=>setTab(id)}/>
+        ))}
+      </div>
+      {tab==="dashboard" && <OverviewView onNav={onNav} onDetail={onDetail}/>}
+      {tab==="news"      && <NewsView/>}
+    </div>
+  );
+}
+
+// Portfolio = Holdings analytics + Black-Litterman optimizer
+function PortfolioHubView() {
+  const [tab, setTab] = useState("holdings");
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:18}}>
+      <div style={{display:"flex",gap:8}}>
+        {[["holdings","Holdings"],["optimizer","Optimizer"]].map(([id,l])=>(
+          <Pill key={id} label={l} active={tab===id} onClick={()=>setTab(id)}/>
+        ))}
+      </div>
+      {tab==="holdings"  && <PortfolioView/>}
+      {tab==="optimizer" && <OptimizeView/>}
+    </div>
+  );
+}
+
+// Lab = Backtest runner + Results browser + Stochastic finance tools
+function LabView() {
+  const [tab, setTab] = useState("backtest");
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:18}}>
+      <div style={{display:"flex",gap:8}}>
+        {[["backtest","Backtest"],["report","Report"],["stochastic","Stochastic"]].map(([id,l])=>(
+          <Pill key={id} label={l} active={tab===id} onClick={()=>setTab(id)}/>
+        ))}
+      </div>
+      {tab==="backtest"   && <BacktestView/>}
+      {tab==="report"     && <ReportView/>}
+      {tab==="stochastic" && <StochasticView/>}
+    </div>
+  );
+}
+
 // ── App ─────────────────────────────────────────────────
-const NAV=[{id:"overview",l:"Overview",I:BarChart2},{id:"advisor",l:"Advisor",I:Compass},{id:"macro",l:"Macro",I:Database},{id:"portfolio",l:"Portfolio",I:Briefcase},{id:"technical",l:"Technical",I:TrendingUp},{id:"options",l:"Options",I:Activity},{id:"signals",l:"Signals",I:Zap},{id:"news",l:"News",I:Newspaper},{id:"pairs",l:"Pairs",I:Shuffle},{id:"report",l:"Report",I:FileText},{id:"backtest",l:"Backtest",I:FlaskConical},{id:"optimize",l:"Optimizer",I:Target},{id:"stochastic",l:"Stochastic",I:Globe}];
+const NAV=[
+  {id:"markets",   l:"Markets",   I:BarChart2},   // Overview + News
+  {id:"advisor",   l:"Advisor",   I:Compass},
+  {id:"macro",     l:"Macro",     I:Database},
+  {id:"technical", l:"Technical", I:TrendingUp},
+  {id:"options",   l:"Options",   I:Activity},
+  {id:"signals",   l:"Signals",   I:Zap},
+  {id:"pairs",     l:"Pairs",     I:Shuffle},
+  {id:"portfolio", l:"Portfolio", I:Briefcase},   // Holdings + Optimizer
+  {id:"lab",       l:"Lab",       I:FlaskConical},// Backtest + Report + Stochastic
+];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MACRO DETAIL VIEW — constants & component
@@ -7327,24 +7387,20 @@ function MacroDetailView({ sym, onBack }) {
 }
 
 export default function App() {
-  const [view,setView]           = useState("overview");
+  const [view,setView]           = useState("markets");
   const [dark,setDark]           = useState(true);
   const [detailSym,setDetailSym] = useState(null);
   const C = dark ? DARK : LIGHT;
   const VIEWS={
-    overview:  <OverviewView onNav={(v)=>{setDetailSym(null);setView(v);}} onDetail={setDetailSym}/>,
+    markets:   <MarketsView onNav={(v)=>{setDetailSym(null);setView(v);}} onDetail={setDetailSym}/>,
     advisor:   <TradeAdvisorView/>,
-    signals:   <SignalsView/>,
-    news:      <NewsView/>,
-    backtest:  <BacktestView/>,
-    optimize:  <OptimizeView/>,
-    portfolio: <PortfolioView/>,
+    macro:     <MacroView/>,
     technical: <TechnicalView/>,
     options:   <OptionsView/>,
-    macro:     <MacroView/>,
-    stochastic:<StochasticView/>,
+    signals:   <SignalsView/>,
     pairs:     <PairsView/>,
-    report:    <ReportView/>,
+    portfolio: <PortfolioHubView/>,
+    lab:       <LabView/>,
   };
   return (
     <ThemeCtx.Provider value={C}>
@@ -7390,7 +7446,7 @@ export default function App() {
           <div style={{maxWidth:980,margin:"0 auto"}}>
             {detailSym
               ? <MacroDetailView sym={detailSym} onBack={()=>setDetailSym(null)}/>
-              : (VIEWS[view]||VIEWS.overview)}
+              : (VIEWS[view]||VIEWS.markets)}
           </div>
         </main>
       </div>
