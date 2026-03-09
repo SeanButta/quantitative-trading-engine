@@ -3814,6 +3814,8 @@ function OptionsView() {
   const [error, setError] = useState(null);
   const [activeStrategy, setActiveStrategy] = useState(null);
   const [chainView, setChainView] = useState("both"); // "both" | "calls" | "puts"
+  const [strikeFilt,   setStrikeFilt]   = useState("all"); // "all"|"itm"|"atm"|"otm"
+  const [strikeWindow, setStrikeWindow] = useState(0);     // 0=all, N=±N strikes around ATM
   const [priceHistory, setPriceHistory] = useState([]);
   const [mlRecs,     setMlRecs]     = useState(null);   // backend ML recommender
   const [mlRecLoad,  setMlRecLoad]  = useState(false);
@@ -3918,6 +3920,23 @@ function OptionsView() {
   const strikes = [...strikesSet].sort((a,b)=>a-b);
   const callByStrike = Object.fromEntries(calls.map(r=>[r.strike,r]));
   const putByStrike  = Object.fromEntries(puts.map(r=>[r.strike,r]));
+
+  // Strike filtering
+  const filteredStrikes = (() => {
+    let s = strikes;
+    if (spot) {
+      if      (strikeFilt === "itm") s = s.filter(k => k < spot);                              // call-side ITM
+      else if (strikeFilt === "otm") s = s.filter(k => k > spot);                              // call-side OTM
+      else if (strikeFilt === "atm") s = s.filter(k => Math.abs(k - spot) / spot <= 0.03);    // ±3% from spot
+    }
+    if (strikeWindow > 0 && spot && s.length > 0) {
+      // Find index of the strike closest to spot, then slice ±strikeWindow around it
+      const atmIdx = s.reduce((best, k, i) =>
+        Math.abs(k - spot) < Math.abs(s[best] - spot) ? i : best, 0);
+      s = s.slice(Math.max(0, atmIdx - strikeWindow), atmIdx + strikeWindow + 1);
+    }
+    return s;
+  })();
 
   // Opportunity analysis
   const topOpps     = activeStrategy && visibleChain.length ? getTopOpportunities(activeStrategy, visibleChain) : [];
@@ -4256,10 +4275,10 @@ function OptionsView() {
       {/* Chain Table */}
       {strikes.length > 0 && (
         <Card>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:12}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8,marginBottom:8}}>
             <Lbl>
               {chainView==="calls"?"Calls":chainView==="puts"?"Puts":"Chain"}
-              {selExp ? ` — ${selExp} · ${chainView==="calls"?calls.length:chainView==="puts"?puts.length:strikes.length} strikes` : ""}
+              {selExp ? ` — ${selExp} · ${filteredStrikes.length}${filteredStrikes.length!==strikes.length?` / ${strikes.length}`:""} strikes` : ""}
             </Lbl>
             <div style={{display:"flex",gap:4,alignItems:"center",flexWrap:"wrap"}}>
               {[["calls","Calls ↗"],["both","Both"],["puts","↘ Puts"]].map(([v,lbl])=>(
@@ -4274,6 +4293,52 @@ function OptionsView() {
               {spot && <Tag color={C.sky}>Spot: ${spot.toFixed(2)}</Tag>}
             </div>
           </div>
+
+          {/* ── Strike Filters ── */}
+          {strikes.length > 0 && (
+            <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",
+              padding:"8px 10px",marginBottom:10,borderRadius:8,
+              background:C.dim,border:`1px solid ${C.bdr}`}}>
+              {/* Moneyness filter */}
+              <div style={{display:"flex",gap:3,alignItems:"center"}}>
+                <span style={{...mono(8,C.mut,600),letterSpacing:".07em",marginRight:3}}>MONEYNESS</span>
+                {[["all","All"],["itm","ITM"],["atm","Near ATM"],["otm","OTM"]].map(([v,lbl])=>(
+                  <button key={v} onClick={()=>setStrikeFilt(v)}
+                    style={{...mono(9,strikeFilt===v?"#000":C.mut,strikeFilt===v?700:400),
+                      padding:"3px 10px",borderRadius:5,cursor:"pointer",transition:"all .15s",
+                      border:`1px solid ${strikeFilt===v?C.grn:C.bdr}`,
+                      background:strikeFilt===v?C.grn:C.surf}}>
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+              {/* Divider */}
+              <div style={{width:1,height:16,background:C.bdr,flexShrink:0}}/>
+              {/* Window filter */}
+              <div style={{display:"flex",gap:3,alignItems:"center"}}>
+                <span style={{...mono(8,C.mut,600),letterSpacing:".07em",marginRight:3}}>
+                  {spot ? `AROUND ATM ($${spot.toFixed(0)})` : "WINDOW"}
+                </span>
+                {[[5,"±5"],[10,"±10"],[20,"±20"],[0,"All"]].map(([v,lbl])=>(
+                  <button key={v} onClick={()=>setStrikeWindow(v)}
+                    style={{...mono(9,strikeWindow===v?"#000":C.mut,strikeWindow===v?700:400),
+                      padding:"3px 10px",borderRadius:5,cursor:"pointer",transition:"all .15s",
+                      border:`1px solid ${strikeWindow===v?C.sky:C.bdr}`,
+                      background:strikeWindow===v?C.sky:C.surf}}>
+                    {lbl}
+                  </button>
+                ))}
+              </div>
+              {/* Active filter indicator */}
+              {(strikeFilt !== "all" || strikeWindow > 0) && (
+                <button onClick={()=>{ setStrikeFilt("all"); setStrikeWindow(0); }}
+                  style={{...mono(8,C.mut),padding:"2px 8px",borderRadius:5,cursor:"pointer",
+                    border:`1px solid ${C.bdr}`,background:"transparent",marginLeft:"auto"}}>
+                  ✕ Reset filters
+                </button>
+              )}
+            </div>
+          )}
           <div style={{overflowX:"auto"}}>
             {/* ── Dual-side (Both) view ── */}
             {chainView==="both" && (
@@ -4293,7 +4358,7 @@ function OptionsView() {
                 </tr>
               </thead>
               <tbody>
-                {strikes.map(strike=>{
+                {filteredStrikes.map(strike=>{
                   const c = callByStrike[strike];
                   const p = putByStrike[strike];
                   const itm_call = c?.in_the_money;
@@ -4347,7 +4412,7 @@ function OptionsView() {
                 </tr>
               </thead>
               <tbody>
-                {(chainView==="calls" ? calls : puts).map(row=>{
+                {(chainView==="calls" ? calls : puts).filter(row=>filteredStrikes.includes(row.strike)).map(row=>{
                   const strat2 = activeStrategy ? OPTION_STRATEGIES[activeStrategy] : null;
                   const score2 = strat2 ? strat2.score(row) : null;
                   const isAtm2 = spot && Math.abs(row.strike - spot) / spot < 0.005;
