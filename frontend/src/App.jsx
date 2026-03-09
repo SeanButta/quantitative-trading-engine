@@ -2215,6 +2215,16 @@ function StochasticView() {
 
   const PC = ["#00e676","#40c4ff","#ffb300","#b388ff","#ff5252","#00bfa5","#7c4dff","#ff6d00","#f06292","#4dd0e1","#aed581","#ff8a65"];
 
+  // ── Market context (shared across all tabs) ──
+  const [ctxInput,   setCtxInput]   = useState("");
+  const [ctxData,    setCtxData]    = useState(null);
+  const [ctxLoading, setCtxLoading] = useState(false);
+
+  // ── Position Sizing tab state ──
+  const [sizeBull,   setSizeBull]   = useState("60");
+  const [sizePort,   setSizePort]   = useState("100000");
+  const [sizeOdds,   setSizeOdds]   = useState("1.5");
+
   // ── GBM state ──
   const [gbmMu,    setGbmMu]    = useState("0.08");
   const [gbmSigma, setGbmSigma] = useState("0.20");
@@ -2244,6 +2254,38 @@ function StochasticView() {
   };
 
   // Transform paths → [{t,p0,p1,...}]
+  // ── Load real market data → auto-fill GBM & BS inputs ──
+  const loadCtx = async () => {
+    const sym = ctxInput.trim().toUpperCase();
+    if (!sym) return;
+    setCtxLoading(true);
+    try {
+      const r = await fetch(`/api/ta/${sym}?period=1y&interval=1d`);
+      if (r.ok) {
+        const d = await r.json();
+        const price = d.current_price;
+        // 30-day HV from log returns (annualised)
+        const closes = (d.ohlcv || []).slice(-31).map(b => b.close).filter(Boolean);
+        let hv30 = 0.20;
+        if (closes.length > 2) {
+          const logRets = closes.slice(1).map((c, i) => Math.log(c / closes[i]));
+          const mean    = logRets.reduce((a, b) => a + b, 0) / logRets.length;
+          const variance= logRets.reduce((a, b) => a + (b - mean) ** 2, 0) / (logRets.length - 1);
+          hv30 = Math.sqrt(variance * 252);
+        }
+        setCtxData({ sym, price, hv30 });
+        // pre-fill GBM
+        setGbmS0(price.toFixed(2));
+        setGbmSigma(hv30.toFixed(3));
+        // pre-fill BS
+        setBsS(price.toFixed(2));
+        setBsSig(hv30.toFixed(3));
+        setBsK((Math.round(price / 5) * 5).toFixed(2));
+      }
+    } catch (_) {}
+    setCtxLoading(false);
+  };
+
   const nDisplay = Math.min(parseInt(gbmN)||8, 12);
   const gbmChart = useMemo(()=>{
     if (!gbmRes) return GBM;
@@ -2296,12 +2338,38 @@ function StochasticView() {
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
-      <div>
-        <Lbl>Stochastic Finance Lab</Lbl>
-        <div style={mono(11,C.mut)}>Interactive GBM simulator · Black-Scholes option pricer · LMSR prediction market</div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+        <div>
+          <Lbl>Stochastic Finance Lab</Lbl>
+          <div style={mono(11,C.mut)}>GBM simulator · Black-Scholes pricer · Position sizing</div>
+        </div>
+        {/* ── Symbol context bar ── */}
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <input
+            value={ctxInput} onChange={e=>setCtxInput(e.target.value.toUpperCase())}
+            onKeyDown={e=>e.key==="Enter"&&loadCtx()}
+            placeholder="Load symbol…"
+            style={{...mono(11,C.txt),width:130,padding:"6px 10px",borderRadius:8,
+              background:C.dim,border:`1px solid ${C.bdr}`,outline:"none"}}/>
+          <button onClick={loadCtx} disabled={ctxLoading}
+            style={{display:"flex",alignItems:"center",gap:5,padding:"6px 14px",borderRadius:8,
+              border:`1px solid ${C.bdr}`,background:"transparent",cursor:"pointer",...mono(10,C.mut)}}>
+            {ctxLoading
+              ? <RefreshCw size={11} style={{animation:"spin 1s linear infinite"}}/>
+              : <Search size={11}/>}
+            {ctxLoading ? "Loading…" : "Load"}
+          </button>
+          {ctxData && (
+            <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",borderRadius:8,
+              border:`1px solid ${C.grn}25`,background:C.grnBg,...mono(10,C.grn)}}>
+              <div style={{width:6,height:6,borderRadius:"50%",background:C.grn}}/>
+              {ctxData.sym} · ${ctxData.price.toFixed(2)} · HV30 {(ctxData.hv30*100).toFixed(1)}%
+            </div>
+          )}
+        </div>
       </div>
       <div style={{display:"flex",gap:8}}>
-        {[["gbm","GBM Simulation"],["bs","Black-Scholes"],["lmsr","LMSR Market"]].map(([id,l])=>(
+        {[["gbm","GBM Simulation"],["bs","Black-Scholes"],["sizing","Position Sizing"]].map(([id,l])=>(
           <Pill key={id} label={l} active={tab===id} onClick={()=>setTab(id)}/>
         ))}
       </div>
@@ -2386,6 +2454,59 @@ function StochasticView() {
           )}
           </ChartPanel>
         </Card>
+
+        {/* ── GBM Decision Insights ── */}
+        {gbmRes?.paths && (() => {
+          const finalPrices = gbmRes.paths.map(p => p[p.length - 1]);
+          const sorted   = finalPrices.slice().sort((a, b) => a - b);
+          const pct      = q => sorted[Math.floor(q * (sorted.length - 1))];
+          const pProfit  = finalPrices.filter(p => p > s0).length / finalPrices.length;
+          const pUp20    = finalPrices.filter(p => p > s0 * 1.20).length / finalPrices.length;
+          const pDn20    = finalPrices.filter(p => p < s0 * 0.80).length / finalPrices.length;
+          const kelly    = Math.max(0, 2 * pProfit - 1);
+          const bias     = pProfit > 0.65 ? "BULLISH" : pProfit > 0.50 ? "NEUTRAL-BULL" : pProfit > 0.35 ? "NEUTRAL-BEAR" : "BEARISH";
+          const biasCol  = pProfit > 0.65 ? C.grn : pProfit > 0.50 ? C.amb : pProfit > 0.35 ? "#ff8a65" : C.red;
+          return (
+            <Card>
+              <Lbl>Decision Insights</Lbl>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginTop:10}}>
+                <div>
+                  <div style={{...mono(9,C.mut),marginBottom:8,letterSpacing:".06em"}}>PRICE TARGETS · {T}yr horizon</div>
+                  {[
+                    ["10th pct — bear case",  pct(0.10)],
+                    ["25th pct",              pct(0.25)],
+                    ["50th pct — base case",  pct(0.50)],
+                    ["75th pct",              pct(0.75)],
+                    ["90th pct — bull case",  pct(0.90)],
+                  ].map(([k, v]) => (
+                    <KV key={k} k={k} v={`$${v?.toFixed(2)}`}
+                      vc={v > s0 ? C.grn : v < s0 ? C.red : C.txt}/>
+                  ))}
+                </div>
+                <div>
+                  <div style={{...mono(9,C.mut),marginBottom:8,letterSpacing:".06em"}}>PROBABILITY OUTCOMES</div>
+                  {[
+                    ["P(profitable at T)",  `${(pProfit*100).toFixed(1)}%`,  pProfit>0.5?C.grn:C.red],
+                    ["P(+20% or more)",     `${(pUp20*100).toFixed(1)}%`,    C.grn],
+                    ["P(−20% or more)",     `${(pDn20*100).toFixed(1)}%`,    C.red],
+                    ["Kelly fraction",      `${(kelly*100).toFixed(1)}%`,    C.amb],
+                    ["Regime bias",         bias,                            biasCol],
+                  ].map(([k, v, vc]) => <KV key={k} k={k} v={v} vc={vc}/>)}
+                  <div style={{marginTop:12,padding:10,borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                    <div style={mono(9,C.mut,600)}>POSITIONING IMPLICATION</div>
+                    <div style={{...mono(10,C.txt),marginTop:5,lineHeight:1.7}}>
+                      {pProfit > 0.65
+                        ? `${(pProfit*100).toFixed(0)}% of paths finish profitable — regime supports net-long. Kelly suggests risking ${(kelly*100).toFixed(0)}% of portfolio.`
+                        : pProfit > 0.50
+                        ? `${(pProfit*100).toFixed(0)}% P(profit) is marginal. Prefer reduced size or a defined-risk spread over a directional bet.`
+                        : `Only ${(pProfit*100).toFixed(0)}% of paths are profitable under these parameters. Reduce or hedge — risk/reward is unfavorable.`}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          );
+        })()}
       </>)}
 
       {/* ── BLACK-SCHOLES TAB ── */}
@@ -2475,36 +2596,142 @@ function StochasticView() {
             )}
           </Card>
         )}
-      </>)}
 
-      {/* ── LMSR TAB ── */}
-      {tab==="lmsr"&&(<>
-        <Card>
-          <Lbl>LMSR Automated Market Maker</Lbl>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
-            <CodeBox>{"Cost function:\nC(q) = b·ln(Σᵢ exp(qᵢ/b))\n\nPrice / probability of outcome i:\npᵢ = exp(qᵢ/b) / Σⱼ exp(qⱼ/b)\n\nProperties:\n  Σᵢ pᵢ = 1  (probs sum to 1)\n  Max loss = b·ln(n)  (bounded)\n  Proper scoring rule"}</CodeBox>
-            <div>{[["Liquidity param b","100"],["N outcomes","2 (bull/bear)"],["Max loss","b·ln(2) = $69.31"],["q_bull","124 shares"],["q_bear","48 shares"],["P(bull)","62.2%"],["P(bear)","37.8%"],["Buy 1 bull (cost)","$0.378"]].map(([k,v])=><KV key={k} k={k} v={v}/>)}</div>
-          </div>
-        </Card>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
-          {[{l:"Bull (Up)",p:62.2,c:C.grn,q:"q = 124"},{l:"Bear (Down)",p:37.8,c:C.red,q:"q = 48"}].map(o=>(
-            <Card key={o.l} accent={o.c}>
-              <div style={mono(28,o.c,800)}>{o.p}%</div>
-              <div style={mono(13,C.txt,700)}>{o.l}</div>
-              <div style={{...mono(9,C.mut),marginTop:4}}>{o.q} shares outstanding</div>
-              <div style={{marginTop:10,height:6,borderRadius:99,background:C.dim,overflow:"hidden"}}>
-                <div style={{width:`${o.p}%`,height:"100%",background:o.c,opacity:0.8}}/>
+        {/* ── BS Decision Insights ── */}
+        {bs && (() => {
+          const S_v   = parseFloat(bsS)  || 100;
+          const K_v   = parseFloat(bsK)  || 100;
+          const T_v   = parseFloat(bsT)  || 0.25;
+          const sig_v = parseFloat(bsSig)|| 0.20;
+          const breakeven      = bsType === "call" ? K_v + bs.price : K_v - bs.price;
+          const bePct          = (breakeven - S_v) / S_v * 100;
+          const contractCost   = bs.price * 100;
+          const dollarsPerDollar = Math.abs(bs.delta) * 100;
+          const dollarsPerPct  = Math.abs(bs.delta) * S_v * 0.01 * 100;
+          const vegaPerPt      = Math.abs(bs.vega || 0) * 100;
+          const thetaPerDay    = Math.abs(bs.theta || 0) * 100;
+          const rhoPerPt       = Math.abs(bs.rho   || 0) * 100;
+          const daysToZero     = bs.theta ? Math.abs(bs.price / bs.theta) : null;
+          return (
+            <Card>
+              <Lbl>Decision Insights</Lbl>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginTop:10}}>
+                <div>
+                  <div style={{...mono(9,C.mut),marginBottom:8,letterSpacing:".06em"}}>BREAKEVEN ANALYSIS</div>
+                  {[
+                    ["Contract cost (1 lot)",       `$${contractCost.toFixed(2)}`],
+                    ["Breakeven at expiry",          `$${breakeven.toFixed(2)}`],
+                    [`Required ${bsType==="call"?"rally":"decline"}`, `${Math.abs(bePct).toFixed(2)}%`],
+                    ["Max risk (long buyer)",        `$${contractCost.toFixed(2)}`],
+                    ["Days to full decay (est.)",    daysToZero ? `${daysToZero.toFixed(0)}d` : "—"],
+                  ].map(([k, v]) => <KV key={k} k={k} v={v}/>)}
+                </div>
+                <div>
+                  <div style={{...mono(9,C.mut),marginBottom:8,letterSpacing:".06em"}}>DOLLAR SENSITIVITY · 1 CONTRACT</div>
+                  {[
+                    ["P&L per $1 underlying move",  `$${dollarsPerDollar.toFixed(2)}`],
+                    ["P&L per 1% underlying move",  `$${dollarsPerPct.toFixed(2)}`],
+                    ["P&L per 1pt IV change (vega)", `$${vegaPerPt.toFixed(2)}`],
+                    ["Daily time decay (theta)",     `−$${thetaPerDay.toFixed(2)}`],
+                    ["P&L per 1pt rate change (rho)",`$${rhoPerPt.toFixed(2)}`],
+                  ].map(([k, v]) => <KV key={k} k={k} v={v}/>)}
+                  <div style={{marginTop:12,padding:10,borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                    <div style={mono(9,C.mut,600)}>QUICK READ</div>
+                    <div style={{...mono(10,C.txt),marginTop:5,lineHeight:1.7}}>
+                      {`This ${bsType} needs a ${Math.abs(bePct).toFixed(1)}% ${bsType==="call"?"rally":"decline"} to $${breakeven.toFixed(2)} to break even at expiry. At ${(sig_v*100).toFixed(0)}% IV over ${Math.round(T_v*365)}d you lose $${thetaPerDay.toFixed(2)}/day to time decay.`}
+                    </div>
+                  </div>
+                </div>
               </div>
             </Card>
-          ))}
+          );
+        })()}
+      </>)}
+
+      {/* ── POSITION SIZING TAB ── */}
+      {tab==="sizing"&&(<>
+        <div>
+          <Lbl>Conviction &amp; Position Sizing</Lbl>
+          <div style={mono(11,C.mut)}>Set your directional P(bull), portfolio size, and expected win/loss ratio. Kelly criterion computes optimal allocation. Import P(profit) directly from a GBM run above.</div>
         </div>
-        <Card>
-          <Lbl>LMSR as Signal Input</Lbl>
-          <p style={{...mono(11,C.mut),lineHeight:1.8}}>The LMSR bull probability (62.2%) feeds directly into the signal pipeline as a soft prior: it can gate the Bayesian Update signal, scale Fat-Tail position sizing, or act as a standalone signal. When P(bull) &gt; 0.60, the engine scales allocation proportionally — integrating prediction-market crowd belief with the quantitative model signals.</p>
-          <div style={{marginTop:10}}>
-            <CodeBox>{"signal_weight = P(bull) × 2 − 1   ∈ [−1, +1]\n                = 0.622 × 2 − 1 = +0.244   (mild bullish)"}</CodeBox>
-          </div>
-        </Card>
+        {/* ── Inputs ── */}
+        {(() => {
+          const pBull  = Math.min(Math.max(parseFloat(sizeBull) || 60, 0), 100) / 100;
+          const pBear  = 1 - pBull;
+          const portV  = parseFloat(sizePort) || 100000;
+          const bRatio = Math.max(parseFloat(sizeOdds) || 1.5, 0.01);
+          const kelly  = Math.max(0, pBull - pBear / bRatio);
+          const full   = kelly * portV;
+          const half   = kelly * 0.5 * portV;
+          const signalW= pBull * 2 - 1;
+          const dir    = signalW > 0.10 ? "BULLISH" : signalW < -0.10 ? "BEARISH" : "NEUTRAL";
+          const dirCol = signalW > 0.10 ? C.grn : signalW < -0.10 ? C.red : C.mut;
+          return (<>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+              {[
+                ["P(Bull) %",       sizeBull,  setSizeBull,  "60"],
+                ["Portfolio ($)",   sizePort,  setSizePort,  "100000"],
+                ["Win/Loss ratio",  sizeOdds,  setSizeOdds,  "1.5"],
+              ].map(([l, v, set, ph]) => (
+                <div key={l}>
+                  <Lbl>{l}</Lbl>
+                  <input value={v} onChange={e=>set(e.target.value)} placeholder={ph}
+                    style={{...mono(12,C.txt),width:"100%",padding:"6px 9px",borderRadius:8,
+                      background:C.dim,border:`1px solid ${C.bdr}`,outline:"none",boxSizing:"border-box"}}/>
+                </div>
+              ))}
+            </div>
+            {/* Import from GBM */}
+            {gbmRes?.paths && (
+              <button onClick={()=>{
+                const fp = gbmRes.paths.map(p=>p[p.length-1]);
+                if (fp.length) setSizeBull((fp.filter(p=>p>s0).length/fp.length*100).toFixed(1));
+              }} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 14px",borderRadius:8,
+                border:`1px solid ${C.bdr}`,background:"transparent",cursor:"pointer",...mono(10,C.mut)}}>
+                ↑ Import GBM P(profit) as conviction
+              </button>
+            )}
+
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+              {/* Kelly sizing */}
+              <Card>
+                <Lbl>Kelly Position Sizing</Lbl>
+                {[
+                  ["P(bull)",              `${(pBull*100).toFixed(1)}%`],
+                  ["P(bear)",              `${(pBear*100).toFixed(1)}%`],
+                  ["Win / loss ratio",     `${bRatio.toFixed(2)}×`],
+                  ["Kelly fraction",       `${(kelly*100).toFixed(1)}%`],
+                  ["Full Kelly ($)",       `$${Math.round(full).toLocaleString()}`],
+                  ["Half Kelly ($)",       `$${Math.round(half).toLocaleString()}`],
+                  ["Signal weight",        `${signalW>=0?"+":""}${signalW.toFixed(3)}`],
+                  ["Direction",            dir],
+                ].map(([k, v]) => (
+                  <KV key={k} k={k} v={v}
+                    vc={k==="Direction"?dirCol:k.includes("Kelly ($)")?C.grn:k==="Signal weight"?dirCol:undefined}/>
+                ))}
+              </Card>
+              {/* Visual conviction bars + signal */}
+              <Card>
+                <Lbl>Conviction View</Lbl>
+                {[{l:"Bull",p:pBull*100,c:C.grn},{l:"Bear",p:pBear*100,c:C.red}].map(o=>(
+                  <div key={o.l} style={{marginBottom:12}}>
+                    <div style={{display:"flex",justifyContent:"space-between",...mono(10,C.txt,600)}}>
+                      <span>{o.l}</span><span style={{color:o.c}}>{o.p.toFixed(1)}%</span>
+                    </div>
+                    <div style={{marginTop:4,height:8,borderRadius:99,background:C.dim,overflow:"hidden"}}>
+                      <div style={{width:`${o.p}%`,height:"100%",background:o.c,opacity:0.8,transition:"width .3s"}}/>
+                    </div>
+                  </div>
+                ))}
+                <div style={{marginTop:10,padding:10,borderRadius:8,
+                  background:dirCol+"10",border:`1px solid ${dirCol}30`}}>
+                  <div style={mono(9,C.mut,600)}>SIGNAL WEIGHT → ENGINE INPUT</div>
+                  <CodeBox>{`f(p) = P(bull) × 2 − 1  ∈ [−1, +1]\n     = ${pBull.toFixed(3)} × 2 − 1 = ${signalW>=0?"+":""}${signalW.toFixed(3)}\n\nKelly f* = p − (1−p)/b\n        = ${pBull.toFixed(3)} − ${pBear.toFixed(3)}/${bRatio.toFixed(2)} = ${(kelly*100).toFixed(1)}%`}</CodeBox>
+                </div>
+              </Card>
+            </div>
+          </>);
+        })()}
       </>)}
       <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
     </div>
