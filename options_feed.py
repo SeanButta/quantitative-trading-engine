@@ -542,6 +542,20 @@ from dataclasses import dataclass as _dc, field as _field
 import math as _math
 
 
+# ── Strike rounding helper ────────────────────────────────────────────────────
+
+def _round_strike(price: float) -> float:
+    """Round a price to the nearest standard options strike increment."""
+    if price < 25:
+        return round(price * 2) / 2      # nearest $0.50
+    elif price < 200:
+        return round(price)               # nearest $1
+    elif price < 1000:
+        return round(price / 5) * 5      # nearest $5
+    else:
+        return round(price / 10) * 10    # nearest $10
+
+
 # ── StrategyRecommendation dataclass ────────────────────────────────────────
 
 @_dc
@@ -560,6 +574,10 @@ class StrategyRecommendation:
     greeks_profile: dict       # {"delta": "+", "gamma": "+", "theta": "-", "vega": "+"}
     fit_score: float           # 0-1 how well this fits current conditions
     rationale: str             # 2-3 sentence explanation
+    # Concrete contract details (computed when spot + IV are available)
+    contract_details: list = _field(default_factory=list)
+    net_premium: float | None = None      # net debit (+) or credit (-) per share
+    breakeven_price: float | None = None  # computed exact breakeven price
 
 
 # ── Strategy library (12 strategies) ────────────────────────────────────────
@@ -746,6 +764,7 @@ def recommend_strategies(
     current_iv: float | None,
     days_to_expiry: int = 30,
     risk_tolerance: str = "moderate",  # "conservative" / "moderate" / "aggressive"
+    hv20: float | None = None,         # historical vol fallback for BS pricing
 ) -> list[StrategyRecommendation]:
     """
     Synthesize IV environment + directional bias into concrete options strategy
@@ -776,14 +795,14 @@ def recommend_strategies(
     # ── 1. Classify IV environment ────────────────────────────────────────────
     if iv_rank is None:
         iv_env = "neutral_iv"
-    elif float(iv_rank) < 25:
+    elif float(iv_rank) < 0.25:    # iv_rank is a 0-1 proportion from compute_analytics
         iv_env = "low_iv"
-    elif float(iv_rank) > 75:
+    elif float(iv_rank) > 0.75:
         iv_env = "high_iv"
     else:
         iv_env = "neutral_iv"
 
-    iv_rank_val: float = float(iv_rank) if iv_rank is not None else 50.0
+    iv_rank_val: float = float(iv_rank) * 100 if iv_rank is not None else 50.0  # convert to 0-100 for display
 
     # ── 2. Classify directional bias ──────────────────────────────────────────
     if composite_signal > 0.25:
@@ -918,6 +937,78 @@ def recommend_strategies(
             scaled_leg["expiry_days"] = days_to_expiry
             scaled_legs.append(scaled_leg)
 
+        # ── Compute concrete contract details ─────────────────────────────────
+        # Resolve IV to use for Black-Scholes pricing
+        _iv = None
+        if current_iv and not _math.isnan(float(current_iv)) and float(current_iv) > 0.001:
+            _iv = float(current_iv)
+        elif hv20 and not _math.isnan(float(hv20)) and float(hv20) > 0.001:
+            _iv = float(hv20)
+        else:
+            _iv = 0.25  # conservative fallback: 25% vol
+        _iv = min(_iv, 5.0)   # cap at 500% (handles extreme values gracefully)
+        _RFR = 0.05            # risk-free rate
+
+        from stochastic_finance import BlackScholes as _BS
+        from datetime import timedelta as _td
+
+        _contract_details: list[dict] = []
+        _net_premium: float = 0.0
+        for _leg in scaled_legs:
+            _dte  = int(_leg.get("expiry_days", 30))
+            _T    = _dte / 365.0
+            # Strike offset is treated as % of spot (5 → 5% OTM) for realistic strikes
+            _off_pct  = _leg.get("strike_offset", 0)
+            _raw_k    = spot * (1.0 + _off_pct / 100.0) if spot > 0 else max(spot + _off_pct, 0.01)
+            _strike   = _round_strike(max(_raw_k, 0.01))
+            _opt_type = _leg.get("type", "call")
+            _action   = _leg.get("action", "BUY")
+            _expiry_label = (date.today() + _td(days=_dte)).strftime("%b %d, %Y")
+
+            _prem = _delta = _gamma = _theta = _vega = None
+            try:
+                _bs = _BS.price(spot, _strike, _T, _RFR, _iv, _opt_type)
+                _prem  = round(float(_bs.price),  2)
+                _delta = round(float(_bs.delta),  3)
+                _gamma = round(float(_bs.gamma),  4)
+                _theta = round(float(_bs.theta),  4)
+                _vega  = round(float(_bs.vega),   4)
+            except Exception:
+                pass
+
+            if _prem is not None:
+                _net_premium += _prem if _action == "BUY" else -_prem
+
+            _contract_details.append({
+                "action":              _action,
+                "option_type":         _opt_type,
+                "strike":              _strike,
+                "expiry_days":         _dte,
+                "expiry_label":        _expiry_label,
+                "est_premium":         _prem,
+                "est_premium_contract": round(_prem * 100, 0) if _prem is not None else None,
+                "delta":  _delta,
+                "gamma":  _gamma,
+                "theta":  _theta,
+                "vega":   _vega,
+            })
+
+        # Compute breakeven price from contract details
+        _be_price: float | None = None
+        if _contract_details and all(cd["est_premium"] is not None for cd in _contract_details):
+            _first = _contract_details[0]
+            if strat["category"] == "income":
+                # income = selling premium; breakeven = short strike ± net credit
+                _short = next((cd for cd in _contract_details if cd["action"] == "SELL"), _first)
+                if _short["option_type"] == "put":
+                    _be_price = round(_short["strike"] + _net_premium, 2)   # strike - credit
+                else:
+                    _be_price = round(_short["strike"] + _net_premium, 2)   # strike + credit
+            elif _first["option_type"] == "call":
+                _be_price = round(_first["strike"] + abs(_net_premium), 2)
+            else:
+                _be_price = round(_first["strike"] - abs(_net_premium), 2)
+
         recommendations.append(
             StrategyRecommendation(
                 rank=rank_idx,
@@ -934,6 +1025,9 @@ def recommend_strategies(
                 greeks_profile=dict(strat["greeks"]),
                 fit_score=round(fit, 4),
                 rationale=rationale,
+                contract_details=_contract_details,
+                net_premium=round(_net_premium, 2) if _contract_details else None,
+                breakeven_price=_be_price,
             )
         )
 

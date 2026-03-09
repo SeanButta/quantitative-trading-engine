@@ -2939,6 +2939,7 @@ def trade_advisor(req: TradeAdvisorRequest):
                 "max_pain": None, "iv_rank": None, "hv20": hv20_from_ta,
                 "avg_iv": None, "iv_hv_spread": None,
                 "put_call_ratio": None, "max_gamma_strike": None,
+                "total_call_oi": None, "total_put_oi": None,
                 "snapshot_at": None,
             }
     except Exception as e:
@@ -2962,8 +2963,11 @@ def trade_advisor(req: TradeAdvisorRequest):
             spot_price = float(spot_price)
 
         if spot_price:
-            iv_rank  = result.get("options", {}) and result["options"] and result["options"].get("iv_rank")
-            max_pain = result.get("options", {}) and result["options"] and result["options"].get("max_pain")
+            _opt_ctx   = result.get("options") or {}
+            iv_rank    = _opt_ctx.get("iv_rank")
+            max_pain   = _opt_ctx.get("max_pain")
+            avg_iv     = _opt_ctx.get("avg_iv")
+            hv20_for_rec = _opt_ctx.get("hv20") or (result.get("technical") or {}).get("hv20")
 
             # Composite directional signal
             signals_scores = []
@@ -2985,23 +2989,27 @@ def trade_advisor(req: TradeAdvisorRequest):
                 iv_rank=iv_rank if isinstance(iv_rank, float) else None,
                 composite_signal=composite,
                 max_pain=max_pain if isinstance(max_pain, float) else None,
-                current_iv=None,
+                current_iv=avg_iv if isinstance(avg_iv, float) else None,
+                hv20=hv20_for_rec if isinstance(hv20_for_rec, float) else None,
                 risk_tolerance=req.risk_tolerance,
             )
             result["strategy_recommendations"] = [
                 {
-                    "rank":       r.rank,
-                    "name":       r.name,
-                    "category":   r.category,
-                    "fit_score":  r.fit_score,
-                    "risk_level": r.risk_level,
-                    "max_profit": r.max_profit,
-                    "max_loss":   r.max_loss,
-                    "breakeven":  r.breakeven_description,
-                    "rationale":  r.rationale,
-                    "ideal":      r.ideal_conditions,
-                    "greeks":     r.greeks_profile,
-                    "legs":       r.legs,
+                    "rank":             r.rank,
+                    "name":             r.name,
+                    "category":         r.category,
+                    "fit_score":        r.fit_score,
+                    "risk_level":       r.risk_level,
+                    "max_profit":       r.max_profit,
+                    "max_loss":         r.max_loss,
+                    "breakeven":        r.breakeven_description,
+                    "rationale":        r.rationale,
+                    "ideal":            r.ideal_conditions,
+                    "greeks":           r.greeks_profile,
+                    "legs":             r.legs,
+                    "contract_details": r.contract_details,
+                    "net_premium":      r.net_premium,
+                    "breakeven_price":  r.breakeven_price,
                 }
                 for r in recs[:5]
             ]

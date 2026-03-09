@@ -6451,79 +6451,171 @@ function TradeAdvisorView() {
         </div>
 
         {/* Options context + Strategy Recommendations */}
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-          <Card>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-              <Layers size={13} style={{color:C.amb}}/><span style={mono(9,C.amb,700)}>OPTIONS CONTEXT</span>
-              {data.options && !data.options.max_pain && (
-                <Tag color={C.mut}>Fetch options data for full context</Tag>
-              )}
-            </div>
-            {data.options ? (
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+        {/* ── Options Context (full width, more detail) ─────────────────── */}
+        <Card>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+            <Layers size={13} style={{color:C.amb}}/><span style={mono(9,C.amb,700)}>OPTIONS CONTEXT</span>
+            {data.options && !data.options.max_pain && (
+              <Tag color={C.mut}>Run options refresh for full context</Tag>
+            )}
+          </div>
+          {data.options ? (()=>{
+            const opt = data.options;
+            const ivRankPct  = opt.iv_rank!=null ? opt.iv_rank*100 : null;
+            const ivRegime   = ivRankPct==null?"—":ivRankPct>70?"RICH (sell premium)":ivRankPct<30?"CHEAP (buy premium)":"FAIR";
+            const ivRegimeC  = ivRankPct==null?C.mut:ivRankPct>70?C.red:ivRankPct<30?C.grn:C.amb;
+            const spreadPct  = opt.iv_hv_spread!=null ? opt.iv_hv_spread*100 : null;
+            const spreadLabel= spreadPct==null?"—":spreadPct>5?"Expensive (IV >> HV)":spreadPct<-2?"Cheap (IV << HV)":"Fair";
+            const spreadC    = spreadPct==null?C.txt:spreadPct>5?C.red:spreadPct<-2?C.grn:C.txt;
+            const totalOI    = (opt.total_call_oi||0) + (opt.total_put_oi||0);
+            const callOIPct  = totalOI>0 ? Math.round(opt.total_call_oi/totalOI*100) : null;
+            const putOIPct   = totalOI>0 ? Math.round(opt.total_put_oi/totalOI*100) : null;
+            const snapshotAge= opt.snapshot_at ? (()=>{
+              const h = Math.round((Date.now()-new Date(opt.snapshot_at+"Z").getTime())/3600000);
+              return h<1?"<1h ago":h<24?h+"h ago":Math.floor(h/24)+"d ago";
+            })() : null;
+            const mpDiff     = opt.max_pain && data.technical?.latest_close
+              ? ((opt.max_pain - data.technical.latest_close)/data.technical.latest_close*100).toFixed(1)
+              : null;
+            return (
+              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
                 <Stat label="HV 20D"
-                  value={data.options.hv20!=null?(data.options.hv20*100).toFixed(1)+"%":"—"}
-                  sub="Realized vol" color={C.sky}/>
-                <Stat label="IV Rank"
-                  value={data.options.iv_rank!=null?(data.options.iv_rank*100).toFixed(0)+"th pct":"—"}
-                  sub="Options expensive?" color={data.options.iv_rank>0.7?C.red:data.options.iv_rank<0.3?C.grn:C.amb}/>
+                  value={opt.hv20!=null?(opt.hv20*100).toFixed(1)+"%":"—"}
+                  sub="Realized volatility" color={C.sky}/>
                 <Stat label="Avg IV"
-                  value={data.options.avg_iv!=null?(data.options.avg_iv*100).toFixed(1)+"%":"—"}
-                  sub="Implied vol"/>
+                  value={opt.avg_iv!=null?(opt.avg_iv*100).toFixed(1)+"%":"—"}
+                  sub="Implied volatility" color={C.txt}/>
+                <Stat label="IV Rank"
+                  value={ivRankPct!=null?ivRankPct.toFixed(0)+"th pct":"—"}
+                  sub={ivRegime} color={ivRegimeC}/>
                 <Stat label="IV−HV Spread"
-                  value={data.options.iv_hv_spread!=null?(data.options.iv_hv_spread*100).toFixed(1)+"%":"—"}
-                  sub="IV premium" color={data.options.iv_hv_spread>0.05?C.amb:C.txt}/>
+                  value={spreadPct!=null?(spreadPct>0?"+":"")+spreadPct.toFixed(1)+"%":"—"}
+                  sub={spreadLabel} color={spreadC}/>
                 <Stat label="Max Pain"
-                  value={data.options.max_pain?"$"+Number(data.options.max_pain).toFixed(0):"—"}
-                  sub="Pinning level"/>
+                  value={opt.max_pain?"$"+Number(opt.max_pain).toFixed(0):"—"}
+                  sub={mpDiff!=null?(mpDiff>0?"+":"")+mpDiff+"% vs spot":"OI-weighted pinning level"}
+                  color={mpDiff!=null&&Math.abs(mpDiff)<1?C.grn:C.txt}/>
                 <Stat label="P/C Ratio"
-                  value={data.options.put_call_ratio!=null?Number(data.options.put_call_ratio).toFixed(2):"—"}
-                  sub="Sentiment" color={data.options.put_call_ratio>1.2?C.red:data.options.put_call_ratio<0.7?C.grn:C.txt}/>
+                  value={opt.put_call_ratio!=null?Number(opt.put_call_ratio).toFixed(2):"—"}
+                  sub={opt.put_call_ratio>1.3?"Bearish skew":opt.put_call_ratio<0.7?"Bullish skew":"Neutral"}
+                  color={opt.put_call_ratio>1.3?C.red:opt.put_call_ratio<0.7?C.grn:C.txt}/>
                 <Stat label="Max Γ Strike"
-                  value={data.options.max_gamma_strike?"$"+Number(data.options.max_gamma_strike).toFixed(0):"—"}
+                  value={opt.max_gamma_strike?"$"+Number(opt.max_gamma_strike).toFixed(0):"—"}
                   sub="Dealer hedge magnet"/>
-                {data.options.snapshot_at && (
-                  <div style={{...mono(8,C.mut),gridColumn:"1/-1",paddingTop:4,borderTop:`1px solid ${C.bdr}30`}}>
-                    Options snapshot: {data.options.snapshot_at.slice(0,16)} UTC
+                <Stat label="Snapshot"
+                  value={snapshotAge||"—"}
+                  sub={opt.snapshot_at?opt.snapshot_at.slice(0,10):"No options data fetched"}
+                  color={snapshotAge&&snapshotAge.includes("d")?C.red:C.mut}/>
+                {totalOI>0 && (
+                  <div style={{gridColumn:"1/-1",marginTop:2}}>
+                    <div style={{...mono(8,C.mut),marginBottom:4}}>
+                      OPEN INTEREST — Call: {(opt.total_call_oi/1000).toFixed(0)}K ({callOIPct}%) · Put: {(opt.total_put_oi/1000).toFixed(0)}K ({putOIPct}%) · Total: {(totalOI/1000).toFixed(0)}K contracts
+                    </div>
+                    <div style={{height:6,borderRadius:3,background:C.bdr,overflow:"hidden",display:"flex"}}>
+                      <div style={{width:callOIPct+"%",background:C.grn+"99",transition:"width 0.4s"}}/>
+                      <div style={{width:putOIPct+"%",background:C.red+"99",transition:"width 0.4s"}}/>
+                    </div>
+                    <div style={{display:"flex",gap:10,marginTop:3}}>
+                      <span style={mono(7,C.grn)}>▌ Calls</span>
+                      <span style={mono(7,C.red)}>▌ Puts</span>
+                    </div>
                   </div>
                 )}
               </div>
-            ) : (
-              <div style={{...mono(10,C.mut),padding:"12px 0"}}>
-                No options or price data available.
-              </div>
-            )}
-          </Card>
-
-          <Card>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-              <Shield size={13} style={{color:C.sky}}/><span style={mono(9,C.sky,700)}>STRATEGY RECOMMENDATIONS</span>
+            );
+          })() : (
+            <div style={{...mono(10,C.mut),padding:"12px 0"}}>
+              No options or price data available.
             </div>
-            {data.strategy_recommendations?.length > 0 ? (
-              <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                {data.strategy_recommendations.slice(0,3).map((r,i)=>(
-                  <div key={i} style={{padding:"10px 12px",borderRadius:10,border:`1px solid ${C.bdr}`,background:C.dim}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4,flexWrap:"wrap",gap:4}}>
-                      <span style={mono(11,C.headingTxt,700)}>#{r.rank} {r.name}</span>
-                      <div style={{display:"flex",gap:4}}>
+          )}
+        </Card>
+
+        {/* ── Strategy Recommendations (full width) ───────────────────── */}
+        <Card>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+            <Shield size={13} style={{color:C.sky}}/><span style={mono(9,C.sky,700)}>STRATEGY RECOMMENDATIONS</span>
+            {data.strategy_recommendations?.length>0 && (
+              <span style={mono(8,C.mut)}>— top {Math.min(data.strategy_recommendations.length,3)} strategies ranked by fit</span>
+            )}
+          </div>
+          {data.strategy_recommendations?.length > 0 ? (
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {data.strategy_recommendations.slice(0,3).map((r,i)=>{
+                const isCredit = r.net_premium!=null && r.net_premium<0;
+                const isDebit  = r.net_premium!=null && r.net_premium>0;
+                return (
+                  <div key={i} style={{borderRadius:10,border:`1px solid ${C.bdr}`,overflow:"hidden"}}>
+                    {/* Header bar */}
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                      padding:"8px 12px",background:C.dim,borderBottom:`1px solid ${C.bdr}`}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{...mono(12,C.headingTxt,700)}}>#{r.rank}</span>
+                        <span style={mono(11,C.txt,600)}>{r.name}</span>
+                      </div>
+                      <div style={{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"flex-end"}}>
                         <Tag color={C.mut}>{r.category}</Tag>
-                        <Tag color={r.risk_level==="low"?C.grn:r.risk_level==="high"?C.red:C.amb}>{r.risk_level}</Tag>
+                        <Tag color={r.risk_level==="low"?C.grn:r.risk_level==="high"?C.red:C.amb}>{r.risk_level} risk</Tag>
                         <Tag color={C.sky}>{(r.fit_score*100).toFixed(0)}% fit</Tag>
                       </div>
                     </div>
-                    <div style={{display:"flex",gap:14,marginBottom:4}}>
-                      <KV k="Max Profit" v={r.max_profit}/>
-                      <KV k="Max Loss"   v={r.max_loss}/>
+
+                    <div style={{padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+                      {/* Contract detail rows */}
+                      {r.contract_details?.length>0 && (
+                        <div>
+                          <div style={{...mono(8,C.mut,700),marginBottom:4}}>CONTRACT DETAILS</div>
+                          <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                            {r.contract_details.map((cd,j)=>(
+                              <div key={j} style={{display:"flex",alignItems:"center",gap:6,
+                                padding:"5px 8px",borderRadius:6,
+                                background:cd.action==="BUY"?C.grn+"11":C.red+"11",
+                                border:`1px solid ${cd.action==="BUY"?C.grn:C.red}22`}}>
+                                <span style={{...mono(9,cd.action==="BUY"?C.grn:C.red,700),minWidth:32}}>{cd.action}</span>
+                                <span style={mono(9,C.txt,600)}>{cd.option_type.toUpperCase()}</span>
+                                <span style={{...mono(10,C.headingTxt,700),minWidth:50}}>${cd.strike}</span>
+                                <span style={{...mono(8,C.mut),flex:1}}>exp {cd.expiry_label} (~{cd.expiry_days}d)</span>
+                                {cd.est_premium!=null && (
+                                  <span style={mono(9,C.sky,600)}>
+                                    ${cd.est_premium.toFixed(2)}/sh · ${cd.est_premium_contract?.toFixed(0)}/contract
+                                  </span>
+                                )}
+                                {cd.delta!=null && (
+                                  <span style={mono(8,C.mut)}>Δ {cd.delta>0?"+":""}{cd.delta.toFixed(2)}</span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Trade summary row */}
+                      <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"center",
+                        padding:"6px 8px",borderRadius:6,background:C.bg,border:`1px solid ${C.bdr}33`}}>
+                        {r.net_premium!=null && (
+                          <KV k={isCredit?"Net Credit":"Net Debit"}
+                            v={"$"+Math.abs(r.net_premium).toFixed(2)+"/sh ($"+Math.abs(r.net_premium*100).toFixed(0)+"/contract)"}
+                            vc={isCredit?C.grn:isDebit?C.red:C.txt}/>
+                        )}
+                        {r.breakeven_price!=null && (
+                          <KV k="Breakeven" v={"$"+r.breakeven_price.toFixed(2)+" at expiry"}/>
+                        )}
+                        <KV k="Max Profit" v={r.max_profit}/>
+                        <KV k="Max Loss" v={r.max_loss}/>
+                      </div>
+
+                      {/* Condensed rationale */}
+                      <div style={{...mono(8,C.mut),lineHeight:1.6}}>
+                        {r.rationale?.split(". ").slice(0,2).join(". ")+(r.rationale?.includes(".")?".":" ")}
+                      </div>
                     </div>
-                    <div style={{...mono(8,C.mut),lineHeight:1.5}}>{r.rationale}</div>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <div style={mono(10,C.mut)}>Fetch options data and re-analyze to generate strategy recommendations.</div>
-            )}
-          </Card>
-        </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div style={mono(10,C.mut)}>Fetch options data and re-analyze to generate strategy recommendations.</div>
+          )}
+        </Card>
 
         {data.warnings?.filter(w=>w).length > 0 && (
           <Card>
