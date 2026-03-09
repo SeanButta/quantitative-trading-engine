@@ -6685,6 +6685,229 @@ function MacroView() {
             </div>
           )}
 
+          {/* ── Macro Regime Synthesis ── */}
+          {summary && primarySeries && (() => {
+            const sid    = (primarySeries.id   || "").toUpperCase();
+            const sname  = (primarySeries.name || "").toLowerCase();
+            const curVal = summary.current_value ?? lastVal ?? 0;
+            const pct5y  = summary.percentile_5y ?? 50;
+            const ch1m   = summary.change_1m  ?? 0;
+            const ch3m   = summary.change_3m  ?? 0;
+            const ch1y   = summary.change_1y  ?? 0;
+            const regime = summary.regime     || "normal";
+
+            // ── Series classification ──────────────────────────────────────
+            const isYieldCurve = /T10Y2Y|T10Y3M|T5Y5Y/.test(sid);
+            const isInflation  = /CPI|PCE|PPI|T5YIFR|T\dYIFR|MICH/.test(sid) || sname.includes("infla") || sname.includes("price index");
+            const isFedRates   = /FEDFUNDS|DFF|DFED/.test(sid);
+            const isTreasury   = /^GS\d|^TB\d/.test(sid);
+            const isLabor      = /UNRATE|U6RATE|PAYEMS|ICSA|CIVPART|JTSJOL/.test(sid);
+            const isGDP        = /^GDP|GDPC1|GNP|NROU|A191RL/.test(sid);
+            const isCredit     = /BAML|BAMLEM|AAAFRBSF/.test(sid);
+            const isMoney      = /^M[12]SL|WALCL|WRESBAL|AMBSL/.test(sid);
+            const isHousing    = /HOUST|CSUSHI|MORTGAGE/.test(sid);
+
+            // ── Momentum signals ──────────────────────────────────────────
+            const shortUp  = ch1m > 0;
+            const longUp   = ch1y > 0;
+            const pivoting = shortUp !== longUp && Math.abs(ch1m) > 0.01;
+            const accel    = shortUp  && ch3m > 0  && longUp;
+            const decel    = !shortUp && ch3m <= 0 && !longUp;
+            const momLabel = accel                       ? "ACCELERATING"
+                           : decel                       ? "DECELERATING"
+                           : pivoting && !shortUp        ? "ROLLING OVER"
+                           : pivoting &&  shortUp        ? "BOTTOMING"
+                           : "STABLE";
+
+            // ── Per-series verdict + implication ─────────────────────────
+            let regimePhase, bc, verdict, synthesis, implication;
+
+            if (isYieldCurve) {
+              const inv = curVal < 0;
+              bc = inv ? C.red : pct5y < 30 ? C.amb : C.grn;
+              verdict = inv ? (ch3m > 0 ? "INVERSION EASING" : "INVERTED — RECESSION RISK")
+                           : (pct5y < 30 ? "FLAT — LATE CYCLE" : "STEEPENING");
+              regimePhase = inv ? "Late Cycle" : ch3m > 0 ? "Transition / Early Recovery" : "Mid Cycle";
+              synthesis = `10Y–2Y spread ${curVal >= 0 ? "+" : ""}${curVal?.toFixed(0) ?? "?"}bp · ${Math.round(pct5y)}th percentile vs 5Y. 3M change: ${ch3m > 0 ? "widening +" : "narrowing "}${Math.abs(ch3m).toFixed(0)}bp. 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(0)}bp.`;
+              implication = inv
+                ? `Yield curve inversion has historically preceded recessions by 6–18 months. Banking net-interest margins compress and credit conditions tighten. ${ch3m > 0 ? "Current re-steepening may signal an approaching Fed pivot — historically, curve normalisation often coincides with or precedes the recession onset rather than averting it." : "Sustained inversion elevates risk of a credit shock or liquidity event."} Defensives, short-duration fixed income, and cash are favoured until the curve normalises.`
+                : `Positive and ${ch3m > 0 ? "widening" : "stable"} spread reflects improving growth expectations. ${pct5y > 60 ? "Elevated spread suggests markets are pricing reflation — equities, cyclicals, and commodities tend to benefit in this phase." : "Moderate spread level indicates cautious optimism; balanced positioning across growth and defensive sectors is appropriate."}`;
+            } else if (isInflation) {
+              const high = curVal > 3.0 || regime === "elevated";
+              const low  = curVal < 2.0 || regime === "low";
+              bc = high ? C.red : low ? C.sky : C.grn;
+              verdict = high ? (decel ? "ELEVATED — DECELERATING" : "ELEVATED — PERSISTENT")
+                       : low  ? (accel ? "LOW — RE-ACCELERATING"  : "BELOW TARGET")
+                       : "NEAR TARGET";
+              regimePhase = high ? "Inflationary Cycle" : low ? "Disinflationary" : "Stable Inflation";
+              synthesis = `${primarySeries.name}: ${curVal?.toFixed(2)}${primarySeries.unit?.includes("%") ? "%" : ""} — ${Math.round(pct5y)}th percentile vs 5Y. 1M: ${ch1m >= 0 ? "+" : ""}${ch1m?.toFixed(2)}% · 3M: ${ch3m >= 0 ? "+" : ""}${ch3m?.toFixed(2)}% · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. Momentum: ${momLabel}.`;
+              implication = high && !decel
+                ? `Persistently elevated inflation constrains Fed easing. Real rates likely remain positive — headwind for long-duration growth equities and rate-sensitive sectors (REITs, utilities). Energy, materials, and TIPS hedges remain relevant. Watch core vs headline divergence for stickiness signals.`
+                : high && decel
+                ? `Inflation decelerating from elevated levels — disinflation in progress. If the trend holds, a Fed pivot becomes increasingly probable. Early-disinflation phases have historically been broadly positive for equities before the curve normalises. Reduce inflation hedges; rotate toward growth on confirmation.`
+                : low
+                ? `Below-target inflation gives the Fed room to ease or hold accommodation. Reflationary policy is supportive of equities and growth assets. Key risk: premature tightening into a low-inflation environment could trigger demand shock.`
+                : `Inflation near target — neutral backdrop. Policy flexibility is maintained. Focus on earnings growth and sector rotation rather than inflation-regime positioning.`;
+            } else if (isLabor) {
+              const isUnemp    = /UNRATE|U6RATE/.test(sid);
+              const weakLabor  = isUnemp ? curVal > 5.0 : decel;
+              const strongLabor= isUnemp ? curVal < 4.0 : accel;
+              bc = weakLabor ? C.red : strongLabor ? C.grn : C.amb;
+              verdict = isUnemp
+                ? (weakLabor ? "LABOR SOFTENING" : strongLabor ? "TIGHT LABOR MARKET" : "LABOR NORMALISING")
+                : (decel ? "LABOR WEAKENING" : accel ? "LABOR STRENGTHENING" : "LABOR STABLE");
+              regimePhase = weakLabor ? "Contraction / Late Cycle" : strongLabor ? "Expansion / Full Employment" : "Mid Cycle";
+              synthesis = `${primarySeries.name}: ${curVal?.toFixed(1)}${primarySeries.unit?.includes("%") ? "%" : ""}. 5Y pct: ${Math.round(pct5y)}th. 1M: ${ch1m >= 0 ? "+" : ""}${ch1m?.toFixed(2)} · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}. Trend: ${momLabel}.`;
+              implication = weakLabor && isUnemp
+                ? `Rising unemployment signals demand destruction and late-cycle deterioration. Historically associated with Fed easing cycles and defensive equity leadership. Reduce cyclical exposure; add consumer staples, utilities, and high-quality fixed income.`
+                : strongLabor && isUnemp
+                ? `Tight labor market supports consumer spending but may keep wage inflation elevated — a primary driver of services CPI. The Fed is likely to maintain a restrictive stance. Cyclicals and financials outperform in this phase; watch for wage-driven margin compression in labour-intensive sectors.`
+                : `Labor market in transition. Monitor JOLTS (JTSJOL) and initial claims (ICSA) as higher-frequency leading indicators for trend confirmation before repositioning.`;
+            } else if (isFedRates || isTreasury) {
+              const high = curVal > 4.0 || regime === "elevated";
+              const low  = curVal < 1.5 || regime === "low";
+              bc = high ? C.red : low ? C.grn : C.amb;
+              verdict = high ? (decel ? "RATES PEAKING" : "RESTRICTIVE REGIME")
+                       : low  ? (accel ? "RATES LIFTING OFF" : "ACCOMMODATIVE REGIME")
+                       : "NEUTRAL RATES";
+              regimePhase = high ? "Tightening Cycle" : low ? "Easing / ZIRP" : "Rate Normalisation";
+              synthesis = `${primarySeries.id} at ${curVal?.toFixed(2)}% — ${Math.round(pct5y)}th percentile vs 5Y. 1M: ${ch1m >= 0 ? "+" : ""}${ch1m?.toFixed(2)}% · 3M: ${ch3m >= 0 ? "+" : ""}${ch3m?.toFixed(2)}% · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. ${momLabel}.`;
+              implication = high && !decel
+                ? `Restrictive rate environment compresses equity multiples and raises corporate refinancing risk. Short-duration bonds, value equities, and financials (NIM expansion) tend to outperform. Watch credit spreads and regional bank stress as leading indicators of policy overshoot.`
+                : high && decel
+                ? `Rates appear to be approaching a peak — historically a positive inflection for risk assets. First cut cycles have typically triggered broad equity rallies led by growth/tech. Consider locking in higher bond yields before they decline.`
+                : low
+                ? `Accommodative rate environment supports risk assets and long-duration growth equities. Low hurdle rates drive multiple expansion. Monitor for normalisation signals which could trigger repricing across duration-sensitive assets.`
+                : `Rates at neutral — balanced environment. Fundamentals and earnings growth drive returns more than rate-regime directional bets in this phase.`;
+            } else if (isGDP) {
+              const contracting = curVal < 0;
+              bc = contracting ? C.red : curVal < 1.5 ? C.amb : C.grn;
+              verdict = contracting ? "CONTRACTION" : curVal < 1.5 ? "BELOW TREND" : curVal > 3 ? "ABOVE TREND" : "EXPANSION";
+              regimePhase = contracting ? "Recession" : curVal < 1.5 ? "Late Cycle Slowdown" : "Expansion";
+              synthesis = `${primarySeries.name}: ${curVal?.toFixed(2)}${primarySeries.unit?.includes("%") ? "%" : ""}. 5Y pct: ${Math.round(pct5y)}th. 12M Δ: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. ${momLabel}.`;
+              implication = contracting
+                ? `Negative growth print signals recessionary conditions. Historically associated with significant equity bear markets. Prioritise capital preservation and defensive assets. Watch for two consecutive quarters to confirm a technical recession.`
+                : curVal > 3
+                ? `Above-trend growth supports earnings expansion and cyclical outperformance. Risk appetite is elevated — equities, credit, and commodities can all benefit. Monitor for overheating signals (inflation, tight labour) that could force Fed action.`
+                : `Moderate growth environment. Quality and earnings consistency favoured over speculative names. Sector rotation toward late-cycle beneficiaries (energy, industrials, materials) as growth peak approaches.`;
+            } else if (isCredit) {
+              const wide  = regime === "elevated";
+              const tight = regime === "low";
+              bc = wide ? C.red : tight ? C.grn : C.amb;
+              verdict = wide ? "STRESS — SPREADS WIDE" : tight ? "COMPLACENCY RISK" : "SPREADS NORMAL";
+              regimePhase = wide ? "Credit Contraction / Risk-Off" : tight ? "Credit Expansion / Risk-On" : "Mid Credit Cycle";
+              synthesis = `${primarySeries.name}: ${fmtVal(curVal, primarySeries.unit)} — ${Math.round(pct5y)}th percentile. 3M: ${ch3m >= 0 ? "+" : ""}${ch3m?.toFixed(2)}% · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. ${momLabel}.`;
+              implication = wide
+                ? `Elevated credit spreads signal risk aversion and potential liquidity stress. Leveraged buybacks and M&A slow materially. Avoid HY; reduce equity beta. Investment-grade and sovereigns preferred. Watch for defaults or downgrades in leveraged sectors as the cycle progresses.`
+                : tight
+                ? `Tight spreads reflect strong risk appetite but leave limited margin of safety. Complacency risk is elevated — small shocks can cause outsized moves. Consider reducing HY allocations and adding credit protection as an asymmetric hedge.`
+                : `Spreads within historical norms — balanced risk appetite. Credit conditions broadly supportive of equity valuations. Monitor IG vs HY divergence as an early warning of credit cycle turning.`;
+            } else if (isMoney) {
+              bc = accel ? C.grn : decel ? C.red : C.amb;
+              verdict = accel ? "EXPANDING" : decel ? "CONTRACTING" : "STABLE";
+              regimePhase = accel ? "Liquidity Expansion" : decel ? "Liquidity Withdrawal (QT)" : "Neutral Liquidity";
+              synthesis = `${primarySeries.name}: ${fmtVal(curVal, primarySeries.unit)} — ${Math.round(pct5y)}th percentile. 1M: ${ch1m >= 0 ? "+" : ""}${ch1m?.toFixed(2)}% · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. ${momLabel}.`;
+              implication = accel
+                ? `Expanding money supply is historically supportive of asset prices. Excess liquidity tends to flow into equities, credit, and real assets. Watch for transmission into inflation if monetary velocity picks up.`
+                : decel
+                ? `Contracting money supply (QT or reduced bank lending) is a headwind for asset prices and economic activity. Higher risk of liquidity crunch in credit markets. Prefer quality, short-duration, and cash equivalents in this environment.`
+                : `Stable monetary conditions provide a neutral liquidity backdrop. Focus on micro fundamentals (earnings, margins) rather than macro liquidity tailwinds.`;
+            } else if (isHousing) {
+              const hot  = regime === "elevated";
+              const cold = regime === "low";
+              bc = hot ? C.amb : cold ? C.red : C.grn;
+              verdict = hot ? "ELEVATED HOUSING" : cold ? "HOUSING CONTRACTION" : "HOUSING STABLE";
+              regimePhase = hot ? "Housing Boom / Rate Sensitivity" : cold ? "Housing Downturn" : "Balanced Housing";
+              synthesis = `${primarySeries.name}: ${fmtVal(curVal, primarySeries.unit)} — ${Math.round(pct5y)}th percentile. 3M: ${ch3m >= 0 ? "+" : ""}${ch3m?.toFixed(2)}% · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. ${momLabel}.`;
+              implication = hot
+                ? `Elevated housing activity is sensitive to mortgage rate moves. Any Fed rate increases disproportionately cool this sector. Homebuilders and related materials can outperform in the early phase, but affordability constraints eventually cap upside.`
+                : cold
+                ? `Housing contraction weighs on construction, consumer wealth effects, and related retail spending. Fed typically watches shelter CPI (which lags spot housing by ~12 months) — a contracting market is a leading indicator of future shelter disinflation.`
+                : `Balanced housing conditions reflect a stable consumer backdrop. Rate normalisation and affordability trends are the key variables to monitor for the next regime shift.`;
+            } else {
+              // Generic fallback
+              bc = regime === "elevated" || regime === "inverted" ? C.red : regime === "low" ? C.sky : C.grn;
+              verdict = regime === "elevated" ? "ELEVATED" : regime === "inverted" ? "INVERTED" : regime === "low" ? "BELOW NORMAL" : "NORMAL";
+              regimePhase = `${momLabel} · ${regime.charAt(0).toUpperCase() + regime.slice(1)} Regime`;
+              synthesis = `${primarySeries.name}: ${fmtVal(curVal, primarySeries.unit)} — ${Math.round(pct5y)}th percentile vs 5Y. 1M: ${ch1m >= 0 ? "+" : ""}${ch1m?.toFixed(2)}% · 3M: ${ch3m >= 0 ? "+" : ""}${ch3m?.toFixed(2)}% · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. ${momLabel}.`;
+              implication = pivoting
+                ? `Trend is pivoting — ${shortUp ? "short-term acceleration" : "short-term deceleration"} diverges from the ${longUp ? "positive" : "negative"} 12-month trajectory. Regime-change signals warrant close monitoring. Await subsequent prints for confirmation before establishing directional positions.`
+                : `Momentum is ${momLabel.toLowerCase()} at the ${Math.round(pct5y)}th percentile of the 5-year range. ${regime === "elevated" ? "Above-normal reading — watch for mean reversion." : regime === "low" ? "Below-normal reading — potential for reversal if underlying drivers normalise." : "Reading within normal range — macro backdrop broadly stable."}`;
+            }
+
+            // ── Regime-shift alert ────────────────────────────────────────
+            const shiftNote = pivoting
+              ? `⚡ REGIME SHIFT SIGNAL: 1M momentum (${ch1m >= 0 ? "+" : ""}${ch1m?.toFixed(2)}%) is diverging from the 12-month trend (${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%) — ${momLabel.toLowerCase()} in progress. The next 1–2 data prints will confirm or invalidate.`
+              : accel ? `↑ Momentum accelerating across 1M/3M/12M — trend has cross-timeframe consistency.`
+              : decel ? `↓ Momentum decelerating across timeframes — watch for trend exhaustion and a potential regime turn.`
+              : null;
+
+            return (
+              <div style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:12,overflow:"hidden"}}>
+                {/* Header */}
+                <div style={{padding:"11px 16px",borderBottom:`1px solid ${C.bdr}`,
+                  display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                  <TrendingUp size={13} style={{color:bc,flexShrink:0}}/>
+                  <span style={{fontFamily:"monospace",fontSize:11,color:C.headingTxt,fontWeight:700}}>
+                    Macro Regime Synthesis
+                  </span>
+                  <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                    <span style={{fontFamily:"monospace",fontSize:8,color:C.mut,letterSpacing:".06em"}}>
+                      CYCLE:
+                    </span>
+                    <span style={{fontFamily:"monospace",fontSize:8,fontWeight:700,color:bc,
+                      background:bc+"15",borderRadius:4,padding:"2px 7px"}}>
+                      {regimePhase.toUpperCase()}
+                    </span>
+                    <span style={{fontFamily:"monospace",fontSize:9,fontWeight:700,color:bc,
+                      background:bc+"18",border:`1px solid ${bc}40`,borderRadius:99,padding:"2px 10px"}}>
+                      {verdict}
+                    </span>
+                  </div>
+                </div>
+                {/* Body */}
+                <div style={{padding:"14px 16px",display:"flex",flexDirection:"column",gap:12}}>
+                  {/* Data summary line */}
+                  <div style={{padding:"10px 12px",background:bc+"08",borderRadius:8,
+                    borderLeft:`3px solid ${bc}`,fontFamily:"monospace",fontSize:11,
+                    color:C.txt,lineHeight:1.75}}>
+                    {synthesis}
+                  </div>
+                  {/* Market implication */}
+                  <div>
+                    <div style={{fontFamily:"monospace",fontSize:9,color:C.mut,
+                      letterSpacing:".06em",marginBottom:6}}>MARKET IMPLICATION</div>
+                    <div style={{fontFamily:"monospace",fontSize:10,color:C.txt,lineHeight:1.75}}>
+                      {implication}
+                    </div>
+                  </div>
+                  {/* Regime-shift alert */}
+                  {shiftNote && (
+                    <div style={{display:"flex",gap:8,alignItems:"flex-start",padding:"8px 12px",
+                      background:C.amb+"0A",borderRadius:8,border:`1px solid ${C.amb}30`}}>
+                      <div style={{fontFamily:"monospace",fontSize:10,color:C.amb,lineHeight:1.65}}>
+                        {shiftNote}
+                      </div>
+                    </div>
+                  )}
+                  {/* Overlay series note */}
+                  {activeSeries.length > 1 && (
+                    <div style={{fontFamily:"monospace",fontSize:9,color:C.mut,
+                      borderTop:`1px solid ${C.bdr}`,paddingTop:8,lineHeight:1.6}}>
+                      {activeSeries.length - 1} overlay series active:{" "}
+                      {activeSeries.slice(1).map(s => (
+                        <span key={s.id} style={{color:s.color,fontWeight:700,marginRight:8}}>
+                          {s.id}
+                        </span>
+                      ))}
+                      — cross-series divergence or confirmation strengthens the regime read above.
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Empty state */}
           {!activeSeries.length && !loading && (
             <div style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:12,
