@@ -674,25 +674,35 @@ class StrategyEngine:
 
 def compute_fibonacci(low: float, high: float) -> dict[str, float]:
     """
-    Compute Fibonacci retracement levels (measured from the swing high downward)
-    and extension levels (above the swing high).
+    Compute Fibonacci retracement levels using the standard convention:
+    percentages represent the fraction of the high→low range that has been
+    retraced downward from the swing high.
 
-    Returned keys are the percentage labels: "100.0%", "78.6%", etc.
+      "0.0%"   = swing high  (0 % retraced)
+      "23.6%"  = high - 0.236 × (high - low)
+      "38.2%"  = high - 0.382 × (high - low)   ← golden zone top
+      "50.0%"  = midpoint
+      "61.8%"  = high - 0.618 × (high - low)   ← golden ratio / golden zone bottom
+      "78.6%"  = high - 0.786 × (high - low)
+      "100.0%" = swing low  (100 % retraced)
+
+    Extension levels ("127.2%", "161.8%", "261.8%") are measured above the
+    swing high using: low + ratio × (high - low).
     """
     diff = high - low
     if diff <= 0:
         return {}
 
     levels: dict[str, float] = {}
-    # Retracements (from high downward)
+    # Retracements (from high downward — standard convention: % of range retraced)
     for ratio, label in [
-        (0.000, "100.0%"),
-        (0.236, "76.4%"),
-        (0.382, "61.8%"),
+        (0.000, "0.0%"),    # swing high  (0% retraced)
+        (0.236, "23.6%"),
+        (0.382, "38.2%"),
         (0.500, "50.0%"),
-        (0.618, "38.2%"),
-        (0.786, "21.4%"),
-        (1.000, "0.0%"),
+        (0.618, "61.8%"),   # golden ratio
+        (0.786, "78.6%"),
+        (1.000, "100.0%"),  # swing low  (100% retraced)
     ]:
         levels[label] = round(high - diff * ratio, 4)
 

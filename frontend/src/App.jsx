@@ -5095,7 +5095,7 @@ function TechnicalView() {
                     </span>
                   </div>
                   {Object.entries(godMode.fib_levels)
-                    .filter(([k])=>["100.0%","76.4%","61.8%","50.0%","38.2%","21.4%","0.0%"].includes(k))
+                    .filter(([k])=>["0.0%","23.6%","38.2%","50.0%","61.8%","78.6%","100.0%"].includes(k))
                     .map(([pct,price])=>{
                       const isKey = pct === godMode.key_fib_label;
                       const cp    = godMode.current_price;
@@ -5357,11 +5357,11 @@ function TechnicalView() {
             {/* ── Fibonacci retracement overlay ─────────────────────────── */}
             {showFib && godMode?.fib_levels && cw > 0 && (() => {
               const fibColors = {
-                "100.0%":"#787b86","76.4%":"#ab47bc","61.8%":"#f6c90e",
-                "50.0%":"#ff9800","38.2%":"#f6c90e","21.4%":"#ab47bc","0.0%":"#787b86",
+                "0.0%":"#787b86","23.6%":"#ab47bc","38.2%":"#f6c90e",
+                "50.0%":"#ff9800","61.8%":"#f6c90e","78.6%":"#ab47bc","100.0%":"#787b86",
                 "127.2%":"#26a69a88","161.8%":"#26a69a","261.8%":"#26a69acc",
               };
-              const retraceLevels = ["100.0%","76.4%","61.8%","50.0%","38.2%","21.4%","0.0%"];
+              const retraceLevels = ["0.0%","23.6%","38.2%","50.0%","61.8%","78.6%","100.0%"];
               return (
                 <svg style={{position:"absolute",top:0,left:0,pointerEvents:"none"}}
                   width={cw} height={TV_MAIN_H}>
