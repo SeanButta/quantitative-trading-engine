@@ -947,6 +947,60 @@ function BacktestView() {
           </div>
           <div style={{marginTop:12}}><CodeBox>{"β̂ = (XᵀX)⁻¹Xᵀy  ·  SE = Newey-West (1987) HAC  ·  H₀: α = 0"}</CodeBox></div>
         </Card>
+
+        {/* ── Backtest Synthesis tile ── */}
+        {(() => {
+          const sharpe  = m.sharpe_ratio  || 0;
+          const cagr    = m.cagr          || 0;
+          const dd      = Math.abs(m.max_drawdown || 0);
+          const vol     = m.volatility    || 0;
+          const pCorr   = v.p_value_corrected != null ? v.p_value_corrected : 1;
+          const tStat   = v.t_stat        || 0;
+          const nTrades = m.n_trades      || 0;
+          // Infer trading style from trade frequency
+          const yrs = startDate && endDate
+            ? Math.max(1, parseInt(endDate.slice(0,4)) - parseInt(startDate.slice(0,4)))
+            : 5;
+          const avgHoldDays = nTrades ? Math.round(yrs * 252 / nTrades) : null;
+          const styleLabel  = !avgHoldDays ? "unknown"
+            : avgHoldDays <= 3  ? "intraday/swing (1–3 day holds)"
+            : avgHoldDays <= 10 ? "swing (1–2 week holds)"
+            : avgHoldDays <= 40 ? "position trading (2–8 week holds)"
+            : "trend following (multi-month holds)";
+          // Verdict logic
+          const statSig  = pCorr < 0.05 && Math.abs(tStat) > 1.96;
+          const perfGood = sharpe > 1.0 && cagr > 0.08;
+          const riskOK   = dd < 0.30;
+          const verdict  = statSig && perfGood && riskOK ? "DEPLOY CANDIDATE"
+            : statSig && (sharpe > 0.5 || cagr > 0.05)  ? "PROMISING — REFINE"
+            : statSig                                     ? "MARGINAL — CAUTION"
+            : "NOT VALIDATED";
+          const bc = verdict === "DEPLOY CANDIDATE" ? C.grn
+            : verdict === "PROMISING — REFINE"      ? C.amb
+            : verdict === "MARGINAL — CAUTION"      ? "#ff8a65"
+            : C.red;
+          const summary = `CAGR ${(cagr*100).toFixed(1)}% · Sharpe ${sharpe.toFixed(2)} · Max DD −${(dd*100).toFixed(1)}% · Vol ${(vol*100).toFixed(1)}% · ${nTrades} trades over ${yrs}yr (${styleLabel}). Statistical validation: p=${pCorr.toFixed(3)} (${statSig ? "✓ significant" : "✗ not significant"}).`;
+          const action = verdict === "DEPLOY CANDIDATE"
+            ? `Results are statistically significant and risk-adjusted returns are strong. Forward-test at 50% position sizing for 3–6 months before full deployment. Set a live drawdown limit at −${(dd*0.5*100).toFixed(0)}% (half of backtest max). Monitor rolling Sharpe — pause the strategy if it drops below 0.5 for 8+ consecutive weeks.`
+            : verdict === "PROMISING — REFINE"
+            ? `Strategy shows real edge (p=${pCorr.toFixed(3)}) but performance metrics need improvement — either Sharpe ${sharpe.toFixed(2)} is below 1.0 or CAGR ${(cagr*100).toFixed(0)}% is modest. Consider tightening signal parameters, increasing the universe, or adding a volatility filter. Do not deploy at full size — paper-trade first.`
+            : verdict === "MARGINAL — CAUTION"
+            ? `Statistically valid but performance is weak — Sharpe ${sharpe.toFixed(2)} and max drawdown −${(dd*100).toFixed(0)}% suggest the strategy captures a small edge with significant risk. Only trade in a limited-risk, defined-outcome structure. Do not allocate more than 5–10% of capital.`
+            : `p-value ${pCorr.toFixed(3)} is above the 0.05 significance threshold — results cannot be distinguished from random. Do not deploy. Revisit signal selection, universe, or time period before re-testing.`;
+          return (
+            <div style={{padding:"18px 20px",borderRadius:12,
+              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>SYNTHESIS</div>
+                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
+                  background:bc+"18",border:`1px solid ${bc}40`}}>{verdict}</div>
+              </div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>{summary}</div>
+              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>WHAT THIS INDICATES</div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8}}>{action}</div>
+            </div>
+          );
+        })()}
       </>)}
     </div>
   );
@@ -2507,6 +2561,38 @@ function StochasticView() {
             </Card>
           );
         })()}
+
+        {/* ── GBM Synthesis tile ── */}
+        {gbmRes?.paths && (() => {
+          const fp     = gbmRes.paths.map(p => p[p.length - 1]);
+          const sorted = fp.slice().sort((a, b) => a - b);
+          const pc     = q => sorted[Math.floor(q * (sorted.length - 1))];
+          const pP     = fp.filter(p => p > s0).length / fp.length;
+          const kelly  = Math.max(0, 2 * pP - 1);
+          const p10 = pc(0.10), p50 = pc(0.50), p90 = pc(0.90), p75 = pc(0.75);
+          const bc  = pP > 0.65 ? C.grn : pP > 0.50 ? C.amb : C.red;
+          const bl  = pP > 0.65 ? "BULLISH" : pP > 0.50 ? "NEUTRAL" : "BEARISH";
+          const action = pP > 0.65
+            ? `Base case $${p50?.toFixed(0)} · bull case $${p90?.toFixed(0)} over ${T}yr. Consider a directional long or bull call spread targeting the 75th-percentile level ($${p75?.toFixed(0)}). Size at Half-Kelly (${(kelly*0.5*100).toFixed(0)}% of capital). Use the 10th-percentile price ($${p10?.toFixed(0)}) as your stop reference.`
+            : pP > 0.50
+            ? `Only ${(pP*100).toFixed(0)}% probability of profit — edge is marginal. Prefer a defined-risk vertical spread over a naked position. Reduce to quarter-Kelly (${(kelly*0.25*100).toFixed(0)}% of capital). Base case target $${p50?.toFixed(0)}.`
+            : `${(pP*100).toFixed(0)}% of paths are profitable — unfavourable risk/reward at current drift/vol settings. Avoid net-long exposure. Consider protective puts or cash until parameters improve.`;
+          return (
+            <div style={{padding:"18px 20px",borderRadius:12,
+              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>SYNTHESIS</div>
+                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
+                  background:bc+"18",border:`1px solid ${bc}40`}}>{bl}</div>
+              </div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>
+                {`Over ${T}yr at ${(sig*100).toFixed(0)}% vol / ${(mu*100).toFixed(0)}% drift — ${(pP*100).toFixed(0)}% of paths end profitably. Bear case (10th pct): $${p10?.toFixed(0)} · Base case: $${p50?.toFixed(0)} · Bull case (90th pct): $${p90?.toFixed(0)}.`}
+              </div>
+              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>SUGGESTED ACTION</div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8}}>{action}</div>
+            </div>
+          );
+        })()}
       </>)}
 
       {/* ── BLACK-SCHOLES TAB ── */}
@@ -2646,6 +2732,43 @@ function StochasticView() {
             </Card>
           );
         })()}
+
+        {/* ── BS Synthesis tile ── */}
+        {bs && (() => {
+          const S_v   = parseFloat(bsS)  || 100;
+          const K_v   = parseFloat(bsK)  || 100;
+          const T_v   = parseFloat(bsT)  || 0.25;
+          const sig_v = parseFloat(bsSig)|| 0.20;
+          const breakeven    = bsType === "call" ? K_v + bs.price : K_v - bs.price;
+          const bePct        = (breakeven - S_v) / S_v * 100;
+          const thetaDay     = Math.abs(bs.theta || 0) * 100;
+          const moneyness    = K_v / S_v;
+          const mLabel       = moneyness < 0.97 ? "ITM" : moneyness > 1.03 ? "OTM" : "ATM";
+          const deltaAbs     = Math.abs(bs.delta || 0);
+          const bc           = deltaAbs > 0.55 ? C.grn : deltaAbs > 0.35 ? C.amb : C.mut;
+          const days         = Math.round(T_v * 365);
+          const hedgeShares  = bs.delta > 0 ? Math.round(1 / bs.delta) : null;
+          const action = bsType === "call"
+            ? `This ${mLabel} call needs a ${Math.abs(bePct).toFixed(1)}% rally to $${breakeven.toFixed(2)} to break even at expiry. At delta ${deltaAbs.toFixed(2)}, you need ${hedgeShares} contracts to hedge 100 shares. With $${thetaDay.toFixed(2)}/day time decay over ${days}d, hold shorter if vol doesn't materialise. IV at ${(sig_v*100).toFixed(0)}% — exit or roll if IV compresses more than 3–4pts (loses ~$${(Math.abs(bs.vega||0)*300).toFixed(0)}/contract).`
+            : `This ${mLabel} put needs a ${Math.abs(bePct).toFixed(1)}% decline to $${breakeven.toFixed(2)} to break even at expiry. Delta of ${deltaAbs.toFixed(2)} makes it a ${deltaAbs>0.5?"strong":"moderate"} directional hedge. At $${thetaDay.toFixed(2)}/day decay over ${days}d — buy on confirmed weakness, not as a speculative hold. Vega of ${Math.abs(bs.vega||0).toFixed(2)} means each 1pt IV expansion adds $${(Math.abs(bs.vega||0)*100).toFixed(0)}/contract.`;
+          return (
+            <div style={{padding:"18px 20px",borderRadius:12,
+              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>SYNTHESIS</div>
+                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
+                  background:bc+"18",border:`1px solid ${bc}40`}}>
+                  {bsType.toUpperCase()} · {mLabel} · Δ {deltaAbs.toFixed(2)}
+                </div>
+              </div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>
+                {`${bsType === "call" ? "Call" : "Put"} @ $${K_v} · theoretical value $${bs.price?.toFixed(2)} · ${days}d to expiry · breakeven $${breakeven.toFixed(2)} (${bePct >= 0 ? "+" : ""}${bePct.toFixed(1)}% from spot $${S_v}).`}
+              </div>
+              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>SUGGESTED ACTION</div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8}}>{action}</div>
+            </div>
+          );
+        })()}
       </>)}
 
       {/* ── POSITION SIZING TAB ── */}
@@ -2731,6 +2854,41 @@ function StochasticView() {
               </Card>
             </div>
           </>);
+        })()}
+
+        {/* ── Position Sizing Synthesis tile ── */}
+        {(() => {
+          const pBull  = Math.min(Math.max(parseFloat(sizeBull) || 60, 0), 100) / 100;
+          const portV  = parseFloat(sizePort) || 100000;
+          const bRatio = Math.max(parseFloat(sizeOdds) || 1.5, 0.01);
+          const kelly  = Math.max(0, pBull - (1 - pBull) / bRatio);
+          const half   = kelly * 0.5 * portV;
+          const sigW   = pBull * 2 - 1;
+          const dir    = sigW > 0.10 ? "BULLISH" : sigW < -0.10 ? "BEARISH" : "NEUTRAL";
+          const bc     = sigW > 0.10 ? C.grn : sigW < -0.10 ? C.red : C.mut;
+          const conviction = pBull > 0.70 ? "high" : pBull > 0.55 ? "moderate" : pBull > 0.45 ? "low" : "contrarian-bearish";
+          const action = kelly > 0.20
+            ? `${conviction.charAt(0).toUpperCase() + conviction.slice(1)} conviction (${(pBull*100).toFixed(0)}% bull). Full Kelly ($${Math.round(kelly*portV).toLocaleString()}) is aggressive — Half-Kelly ($${Math.round(half).toLocaleString()}) is the standard practitioner recommendation. Signal weight of ${sigW>=0?"+":""}${sigW.toFixed(2)} maps to a ${dir.toLowerCase()} allocation in the strategy engine. Risk $${Math.round(half).toLocaleString()} on your highest-conviction idea or spread it across 2–3 correlated positions.`
+            : kelly > 0.05
+            ? `Modest edge with ${(pBull*100).toFixed(0)}% conviction and ${bRatio.toFixed(1)}× win/loss ratio. Kelly fraction ${(kelly*100).toFixed(1)}% suggests limited size — risk no more than $${Math.round(half).toLocaleString()} (Half-Kelly). Signal weight of ${sigW>=0?"+":""}${sigW.toFixed(2)} is a weak ${dir.toLowerCase()} lean. Consider defined-risk structures over outright directional bets.`
+            : `Insufficient edge at current inputs (Kelly = ${(kelly*100).toFixed(1)}%). Either conviction or win/loss ratio (or both) is too low to justify risk capital. Stay flat or use minimum allocation until conviction strengthens. Re-run after a GBM simulation to derive a data-driven P(bull).`;
+          return (
+            <div style={{padding:"18px 20px",borderRadius:12,
+              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>SYNTHESIS</div>
+                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
+                  background:bc+"18",border:`1px solid ${bc}40`}}>
+                  {dir} · Kelly {(kelly*100).toFixed(1)}%
+                </div>
+              </div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>
+                {`P(bull) = ${(pBull*100).toFixed(0)}% · Win/loss ${bRatio.toFixed(1)}× · Portfolio $${portV.toLocaleString()} → Full Kelly $${Math.round(kelly*portV).toLocaleString()} · Half Kelly $${Math.round(half).toLocaleString()}.`}
+              </div>
+              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>SUGGESTED ACTION</div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8}}>{action}</div>
+            </div>
+          );
         })()}
       </>)}
       <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
@@ -2978,6 +3136,73 @@ function ReportView() {
             <p style={{...mono(11,C.mut),lineHeight:1.8,marginTop:6}}>{s.b}</p>
           </Card>
         ))}
+
+        {/* ── Report Synthesis ── */}
+        {(() => {
+          const sharpe  = m.sharpe_ratio    ?? 0;
+          const cagr    = m.cagr            ?? 0;
+          const dd      = m.max_drawdown    ?? 0;
+          const nTrades = m.n_trades        ?? 0;
+          const nDays   = m.n_days ?? (v.n_observations ?? 252);
+          const yrs     = Math.max(nDays / 252, 0.01);
+          const pCorr   = v.p_value_corrected    ?? 1;
+          const tStat   = Math.abs(v.t_stat      ?? 0);
+          const alpha   = m.alpha_annualized     ?? 0;
+
+          const statSig  = pCorr < 0.05 && tStat > 1.96;
+          const perfGood = sharpe > 1.0 && cagr > 0.08;
+          const riskOK   = Math.abs(dd) < 0.30;
+
+          const avgHold  = nTrades > 0 ? (yrs * 252 / nTrades) : 0;
+          const style    = avgHold < 2  ? "Intraday"
+                         : avgHold < 10 ? "Swing"
+                         : avgHold < 60 ? "Position"
+                         : "Trend-Following";
+
+          const tfNote   = avgHold < 2  ? "Intraday requires low-latency execution; brokerage costs erode edge fast."
+                         : avgHold < 10 ? "Swing-style (2–9 days); overnight gap risk demands disciplined sizing."
+                         : avgHold < 60 ? "Position-trade horizon (weeks); momentum & earnings events dominate."
+                         : "Trend-following horizon (months+); macro regime shifts are the primary risk.";
+
+          let verdict, bc, summary, action;
+          if (statSig && perfGood && riskOK) {
+            verdict = "DEPLOY CANDIDATE"; bc = C.grn;
+            summary = `Statistically significant edge confirmed (p=${n4(pCorr)}, |t|=${n4(v.t_stat)}) with Sharpe ${n4(sharpe)} and CAGR ${pct(cagr)} over ${yrs.toFixed(1)} yr${yrs>=2?"s":""}. Max drawdown ${pct(dd)} is within acceptable risk bounds. ${style} execution inferred from ${nTrades} trades across ${runSymbols}.`;
+            action  = `Evidence supports forward-testing with small live capital. Enforce position sizing discipline and monitor drawdown weekly. Consider 2–4 weeks of paper trading before scaling.`;
+          } else if (statSig && (perfGood || riskOK)) {
+            verdict = "PROMISING — REFINE"; bc = C.amb;
+            summary = `Detectable edge (p=${n4(pCorr)}) but ${!perfGood ? `performance metrics are below threshold (Sharpe ${n4(sharpe)}, CAGR ${pct(cagr)})` : `drawdown ${pct(dd)} is elevated`}. ${style} style across ${yrs.toFixed(1)} yr${yrs>=2?"s":""}. Alpha ${pct(alpha)} annualized.`;
+            action  = `Review signal combinations, fee assumptions (${cfg.fee_bps ?? 1}bp), and risk controls. Tighten drawdown limits or re-weight signals before committing capital. Re-run validation with n≥1000 permutations.`;
+          } else if (perfGood && riskOK) {
+            verdict = "MARGINAL — CAUTION"; bc = C.amb;
+            summary = `Returns appear favorable (CAGR ${pct(cagr)}, Sharpe ${n4(sharpe)}) but statistical validation is insufficient (p=${n4(pCorr)}, required <0.05). Over ${yrs.toFixed(1)} yr${yrs>=2?"s":""} results may reflect overfitting or data-mining bias.`;
+            action  = `Do not deploy. Extend the out-of-sample period and add a holdout test. Increase permutations and verify with walk-forward analysis before reconsidering.`;
+          } else {
+            verdict = "NOT VALIDATED"; bc = C.red;
+            summary = `Strategy shows no consistent edge: Sharpe ${n4(sharpe)}, CAGR ${pct(cagr)}, max drawdown ${pct(dd)}, p-value ${n4(pCorr)}. Validation: ${v.label || "N/A"}. Over ${yrs.toFixed(1)} yr${yrs>=2?"s":""} results are consistent with random performance.`;
+            action  = `Do not trade this configuration. Revisit the signal hypothesis, entry/exit logic, or universe selection. Consider different timeframes, fundamental inputs, or alternative signal combinations.`;
+          }
+
+          return (
+            <div style={{padding:"18px 20px",borderRadius:12,
+              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>REPORT SYNTHESIS</div>
+                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
+                  background:bc+"18",border:`1px solid ${bc}40`}}>{verdict}</div>
+              </div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>{summary}</div>
+              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>WHAT THIS INDICATES</div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:10}}>{action}</div>
+              <div style={{...mono(10,C.mut),borderTop:`1px solid ${bc}25`,paddingTop:8,lineHeight:1.7}}>
+                ⏱ <span style={{color:C.mut}}>Trading style:</span>{" "}
+                <span style={{color:bc,fontWeight:700}}>{style}</span>
+                {avgHold > 0 && <span style={{color:C.mut}}> · avg {avgHold.toFixed(1)} day{avgHold!==1?"s":""}/trade</span>}
+                <span style={{color:C.mut}}> — {tfNote}</span>
+              </div>
+            </div>
+          );
+        })()}
 
       </>}
     </div>
