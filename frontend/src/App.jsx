@@ -2162,6 +2162,52 @@ function OptimizeView() {
         {error && <div style={{marginTop:10,padding:10,borderRadius:8,background:C.red+"12",border:`1px solid ${C.red}30`,...mono(10,C.red)}}>⚠ {error}</div>}
       </Card>
 
+      {/* ── Optimizer Synthesis ── */}
+      {live && (() => {
+        const ret    = result.portfolio_return  ?? 0;
+        const vol    = result.portfolio_vol     ?? 0;
+        const sharpe = result.portfolio_sharpe  ?? 0;
+        const lambda = parseFloat(riskAv)       || 2.5;
+        const topW   = sorted.length > 0 ? sorted[0][1] : 0;
+        const topSym = sorted.length > 0 ? sorted[0][0] : "—";
+        const hhi    = sorted.reduce((s, [,w]) => s + w * w, 0);
+        const effNum = hhi > 0 ? (1 / hhi).toFixed(1) : "—";
+
+        const bc = sharpe > 1.0 ? C.grn : sharpe > 0.5 ? C.amb : C.red;
+        const verdict = sharpe > 1.0 && topW < 0.40
+          ? "EFFICIENT"
+          : sharpe > 0.5 && topW < 0.50
+          ? "MODERATE"
+          : topW >= 0.50
+          ? "CONCENTRATED"
+          : "UNDEROPTIMIZED";
+
+        const riskDesc = lambda < 1.5 ? "aggressive" : lambda < 3 ? "moderate" : "conservative";
+        const action = verdict === "EFFICIENT"
+          ? `Black-Litterman achieves Sharpe ${sharpe.toFixed(2)} with ${(ret*100).toFixed(1)}% expected return at ${(vol*100).toFixed(1)}% vol. Effective diversification across ~${effNum} positions with ${topSym} as top weight at ${(topW*100).toFixed(1)}%. Allocations reflect a ${riskDesc} risk appetite (λ=${lambda}). Portfolio is suitable for deployment with quarterly rebalancing.`
+          : verdict === "MODERATE"
+          ? `Acceptable risk-adjusted return (Sharpe ${sharpe.toFixed(2)}) with room to improve. ${(ret*100).toFixed(1)}% expected return at ${(vol*100).toFixed(1)}% vol. Effective N ~${effNum} — consider adding low-correlation assets. Review λ=${lambda} (${riskDesc}) against your actual risk tolerance and adjust signals or priors.`
+          : verdict === "CONCENTRATED"
+          ? `Top holding ${topSym} at ${(topW*100).toFixed(1)}% creates tail risk. Effective N ~${effNum} is low. Consider adding uncorrelated assets, tightening weight caps below 40%, or raising λ to ${(lambda + 1).toFixed(1)} to penalise concentration more heavily.`
+          : `Sharpe ${sharpe.toFixed(2)} indicates limited risk-adjusted edge. Try adding assets with stronger momentum or quality signals, lowering λ to ${Math.max(1, lambda - 1).toFixed(1)} for more return focus, or enriching the signal_scores input to shift BL posterior returns.`;
+
+        return (
+          <div style={{padding:"18px 20px",borderRadius:12,
+            background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>OPTIMIZER SYNTHESIS</div>
+              <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
+                background:bc+"18",border:`1px solid ${bc}40`}}>{verdict}</div>
+            </div>
+            <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>
+              {`Sharpe ${sharpe.toFixed(2)} · Expected return ${(ret*100).toFixed(2)}% · Volatility ${(vol*100).toFixed(2)}% · Effective N ~${effNum} · Top weight ${topSym} ${(topW*100).toFixed(1)}% · λ=${lambda} (${riskDesc}).`}
+            </div>
+            <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>WHAT THIS INDICATES</div>
+            <div style={{...mono(11,C.txt),lineHeight:1.8}}>{action}</div>
+          </div>
+        );
+      })()}
+
       {/* Stats */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
         <Stat label="Expected Return (ann.)" value={live&&result.portfolio_return!=null?`${(result.portfolio_return*100).toFixed(2)}%`:"—"} color={C.grn} sub={live?"Black-Litterman posterior":"run optimizer"}/>
@@ -2461,6 +2507,38 @@ function StochasticView() {
           </div>
         </Card>
 
+        {/* ── GBM Synthesis tile ── */}
+        {gbmRes?.paths && (() => {
+          const fp     = gbmRes.paths.map(p => p[p.length - 1]);
+          const sorted = fp.slice().sort((a, b) => a - b);
+          const pc     = q => sorted[Math.floor(q * (sorted.length - 1))];
+          const pP     = fp.filter(p => p > s0).length / fp.length;
+          const kelly  = Math.max(0, 2 * pP - 1);
+          const p10 = pc(0.10), p50 = pc(0.50), p90 = pc(0.90), p75 = pc(0.75);
+          const bc  = pP > 0.65 ? C.grn : pP > 0.50 ? C.amb : C.red;
+          const bl  = pP > 0.65 ? "BULLISH" : pP > 0.50 ? "NEUTRAL" : "BEARISH";
+          const action = pP > 0.65
+            ? `Base case $${p50?.toFixed(0)} · bull case $${p90?.toFixed(0)} over ${T}yr. Consider a directional long or bull call spread targeting the 75th-percentile level ($${p75?.toFixed(0)}). Size at Half-Kelly (${(kelly*0.5*100).toFixed(0)}% of capital). Use the 10th-percentile price ($${p10?.toFixed(0)}) as your stop reference.`
+            : pP > 0.50
+            ? `Only ${(pP*100).toFixed(0)}% probability of profit — edge is marginal. Prefer a defined-risk vertical spread over a naked position. Reduce to quarter-Kelly (${(kelly*0.25*100).toFixed(0)}% of capital). Base case target $${p50?.toFixed(0)}.`
+            : `${(pP*100).toFixed(0)}% of paths are profitable — unfavourable risk/reward at current drift/vol settings. Avoid net-long exposure. Consider protective puts or cash until parameters improve.`;
+          return (
+            <div style={{padding:"18px 20px",borderRadius:12,
+              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>SYNTHESIS</div>
+                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
+                  background:bc+"18",border:`1px solid ${bc}40`}}>{bl}</div>
+              </div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>
+                {`Over ${T}yr at ${(sig*100).toFixed(0)}% vol / ${(mu*100).toFixed(0)}% drift — ${(pP*100).toFixed(0)}% of paths end profitably. Bear case (10th pct): $${p10?.toFixed(0)} · Base case: $${p50?.toFixed(0)} · Bull case (90th pct): $${p90?.toFixed(0)}.`}
+              </div>
+              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>SUGGESTED ACTION</div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8}}>{action}</div>
+            </div>
+          );
+        })()}
+
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
           <Card>
             <Lbl>Ito's Lemma — Exact Solution</Lbl>
@@ -2562,37 +2640,6 @@ function StochasticView() {
           );
         })()}
 
-        {/* ── GBM Synthesis tile ── */}
-        {gbmRes?.paths && (() => {
-          const fp     = gbmRes.paths.map(p => p[p.length - 1]);
-          const sorted = fp.slice().sort((a, b) => a - b);
-          const pc     = q => sorted[Math.floor(q * (sorted.length - 1))];
-          const pP     = fp.filter(p => p > s0).length / fp.length;
-          const kelly  = Math.max(0, 2 * pP - 1);
-          const p10 = pc(0.10), p50 = pc(0.50), p90 = pc(0.90), p75 = pc(0.75);
-          const bc  = pP > 0.65 ? C.grn : pP > 0.50 ? C.amb : C.red;
-          const bl  = pP > 0.65 ? "BULLISH" : pP > 0.50 ? "NEUTRAL" : "BEARISH";
-          const action = pP > 0.65
-            ? `Base case $${p50?.toFixed(0)} · bull case $${p90?.toFixed(0)} over ${T}yr. Consider a directional long or bull call spread targeting the 75th-percentile level ($${p75?.toFixed(0)}). Size at Half-Kelly (${(kelly*0.5*100).toFixed(0)}% of capital). Use the 10th-percentile price ($${p10?.toFixed(0)}) as your stop reference.`
-            : pP > 0.50
-            ? `Only ${(pP*100).toFixed(0)}% probability of profit — edge is marginal. Prefer a defined-risk vertical spread over a naked position. Reduce to quarter-Kelly (${(kelly*0.25*100).toFixed(0)}% of capital). Base case target $${p50?.toFixed(0)}.`
-            : `${(pP*100).toFixed(0)}% of paths are profitable — unfavourable risk/reward at current drift/vol settings. Avoid net-long exposure. Consider protective puts or cash until parameters improve.`;
-          return (
-            <div style={{padding:"18px 20px",borderRadius:12,
-              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>SYNTHESIS</div>
-                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
-                  background:bc+"18",border:`1px solid ${bc}40`}}>{bl}</div>
-              </div>
-              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>
-                {`Over ${T}yr at ${(sig*100).toFixed(0)}% vol / ${(mu*100).toFixed(0)}% drift — ${(pP*100).toFixed(0)}% of paths end profitably. Bear case (10th pct): $${p10?.toFixed(0)} · Base case: $${p50?.toFixed(0)} · Bull case (90th pct): $${p90?.toFixed(0)}.`}
-              </div>
-              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>SUGGESTED ACTION</div>
-              <div style={{...mono(11,C.txt),lineHeight:1.8}}>{action}</div>
-            </div>
-          );
-        })()}
       </>)}
 
       {/* ── BLACK-SCHOLES TAB ── */}
@@ -2631,6 +2678,43 @@ function StochasticView() {
             {bsLoad ? <><RefreshCw size={13} style={{animation:"spin 1s linear infinite"}}/>Pricing…</> : <>▶ Price Option</>}
           </button>
         </Card>
+
+        {/* ── BS Synthesis tile ── */}
+        {bs && (() => {
+          const S_v   = parseFloat(bsS)  || 100;
+          const K_v   = parseFloat(bsK)  || 100;
+          const T_v   = parseFloat(bsT)  || 0.25;
+          const sig_v = parseFloat(bsSig)|| 0.20;
+          const breakeven    = bsType === "call" ? K_v + bs.price : K_v - bs.price;
+          const bePct        = (breakeven - S_v) / S_v * 100;
+          const thetaDay     = Math.abs(bs.theta || 0) * 100;
+          const moneyness    = K_v / S_v;
+          const mLabel       = moneyness < 0.97 ? "ITM" : moneyness > 1.03 ? "OTM" : "ATM";
+          const deltaAbs     = Math.abs(bs.delta || 0);
+          const bc           = deltaAbs > 0.55 ? C.grn : deltaAbs > 0.35 ? C.amb : C.mut;
+          const days         = Math.round(T_v * 365);
+          const hedgeShares  = bs.delta > 0 ? Math.round(1 / bs.delta) : null;
+          const action = bsType === "call"
+            ? `This ${mLabel} call needs a ${Math.abs(bePct).toFixed(1)}% rally to $${breakeven.toFixed(2)} to break even at expiry. At delta ${deltaAbs.toFixed(2)}, you need ${hedgeShares} contracts to hedge 100 shares. With $${thetaDay.toFixed(2)}/day time decay over ${days}d, hold shorter if vol doesn't materialise. IV at ${(sig_v*100).toFixed(0)}% — exit or roll if IV compresses more than 3–4pts (loses ~$${(Math.abs(bs.vega||0)*300).toFixed(0)}/contract).`
+            : `This ${mLabel} put needs a ${Math.abs(bePct).toFixed(1)}% decline to $${breakeven.toFixed(2)} to break even at expiry. Delta of ${deltaAbs.toFixed(2)} makes it a ${deltaAbs>0.5?"strong":"moderate"} directional hedge. At $${thetaDay.toFixed(2)}/day decay over ${days}d — buy on confirmed weakness, not as a speculative hold. Vega of ${Math.abs(bs.vega||0).toFixed(2)} means each 1pt IV expansion adds $${(Math.abs(bs.vega||0)*100).toFixed(0)}/contract.`;
+          return (
+            <div style={{padding:"18px 20px",borderRadius:12,
+              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>SYNTHESIS</div>
+                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
+                  background:bc+"18",border:`1px solid ${bc}40`}}>
+                  {bsType.toUpperCase()} · {mLabel} · Δ {deltaAbs.toFixed(2)}
+                </div>
+              </div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>
+                {`${bsType === "call" ? "Call" : "Put"} @ $${K_v} · theoretical value $${bs.price?.toFixed(2)} · ${days}d to expiry · breakeven $${breakeven.toFixed(2)} (${bePct >= 0 ? "+" : ""}${bePct.toFixed(1)}% from spot $${S_v}).`}
+              </div>
+              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>SUGGESTED ACTION</div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8}}>{action}</div>
+            </div>
+          );
+        })()}
 
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
           <Card>
@@ -2733,42 +2817,6 @@ function StochasticView() {
           );
         })()}
 
-        {/* ── BS Synthesis tile ── */}
-        {bs && (() => {
-          const S_v   = parseFloat(bsS)  || 100;
-          const K_v   = parseFloat(bsK)  || 100;
-          const T_v   = parseFloat(bsT)  || 0.25;
-          const sig_v = parseFloat(bsSig)|| 0.20;
-          const breakeven    = bsType === "call" ? K_v + bs.price : K_v - bs.price;
-          const bePct        = (breakeven - S_v) / S_v * 100;
-          const thetaDay     = Math.abs(bs.theta || 0) * 100;
-          const moneyness    = K_v / S_v;
-          const mLabel       = moneyness < 0.97 ? "ITM" : moneyness > 1.03 ? "OTM" : "ATM";
-          const deltaAbs     = Math.abs(bs.delta || 0);
-          const bc           = deltaAbs > 0.55 ? C.grn : deltaAbs > 0.35 ? C.amb : C.mut;
-          const days         = Math.round(T_v * 365);
-          const hedgeShares  = bs.delta > 0 ? Math.round(1 / bs.delta) : null;
-          const action = bsType === "call"
-            ? `This ${mLabel} call needs a ${Math.abs(bePct).toFixed(1)}% rally to $${breakeven.toFixed(2)} to break even at expiry. At delta ${deltaAbs.toFixed(2)}, you need ${hedgeShares} contracts to hedge 100 shares. With $${thetaDay.toFixed(2)}/day time decay over ${days}d, hold shorter if vol doesn't materialise. IV at ${(sig_v*100).toFixed(0)}% — exit or roll if IV compresses more than 3–4pts (loses ~$${(Math.abs(bs.vega||0)*300).toFixed(0)}/contract).`
-            : `This ${mLabel} put needs a ${Math.abs(bePct).toFixed(1)}% decline to $${breakeven.toFixed(2)} to break even at expiry. Delta of ${deltaAbs.toFixed(2)} makes it a ${deltaAbs>0.5?"strong":"moderate"} directional hedge. At $${thetaDay.toFixed(2)}/day decay over ${days}d — buy on confirmed weakness, not as a speculative hold. Vega of ${Math.abs(bs.vega||0).toFixed(2)} means each 1pt IV expansion adds $${(Math.abs(bs.vega||0)*100).toFixed(0)}/contract.`;
-          return (
-            <div style={{padding:"18px 20px",borderRadius:12,
-              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>SYNTHESIS</div>
-                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
-                  background:bc+"18",border:`1px solid ${bc}40`}}>
-                  {bsType.toUpperCase()} · {mLabel} · Δ {deltaAbs.toFixed(2)}
-                </div>
-              </div>
-              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>
-                {`${bsType === "call" ? "Call" : "Put"} @ $${K_v} · theoretical value $${bs.price?.toFixed(2)} · ${days}d to expiry · breakeven $${breakeven.toFixed(2)} (${bePct >= 0 ? "+" : ""}${bePct.toFixed(1)}% from spot $${S_v}).`}
-              </div>
-              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>SUGGESTED ACTION</div>
-              <div style={{...mono(11,C.txt),lineHeight:1.8}}>{action}</div>
-            </div>
-          );
-        })()}
       </>)}
 
       {/* ── POSITION SIZING TAB ── */}
@@ -2777,6 +2825,42 @@ function StochasticView() {
           <Lbl>Conviction &amp; Position Sizing</Lbl>
           <div style={mono(11,C.mut)}>Set your directional P(bull), portfolio size, and expected win/loss ratio. Kelly criterion computes optimal allocation. Import P(profit) directly from a GBM run above.</div>
         </div>
+
+        {/* ── Position Sizing Synthesis tile ── */}
+        {(() => {
+          const pBull  = Math.min(Math.max(parseFloat(sizeBull) || 60, 0), 100) / 100;
+          const portV  = parseFloat(sizePort) || 100000;
+          const bRatio = Math.max(parseFloat(sizeOdds) || 1.5, 0.01);
+          const kelly  = Math.max(0, pBull - (1 - pBull) / bRatio);
+          const half   = kelly * 0.5 * portV;
+          const sigW   = pBull * 2 - 1;
+          const dir    = sigW > 0.10 ? "BULLISH" : sigW < -0.10 ? "BEARISH" : "NEUTRAL";
+          const bc     = sigW > 0.10 ? C.grn : sigW < -0.10 ? C.red : C.mut;
+          const conviction = pBull > 0.70 ? "high" : pBull > 0.55 ? "moderate" : pBull > 0.45 ? "low" : "contrarian-bearish";
+          const action = kelly > 0.20
+            ? `${conviction.charAt(0).toUpperCase() + conviction.slice(1)} conviction (${(pBull*100).toFixed(0)}% bull). Full Kelly ($${Math.round(kelly*portV).toLocaleString()}) is aggressive — Half-Kelly ($${Math.round(half).toLocaleString()}) is the standard practitioner recommendation. Signal weight of ${sigW>=0?"+":""}${sigW.toFixed(2)} maps to a ${dir.toLowerCase()} allocation in the strategy engine. Risk $${Math.round(half).toLocaleString()} on your highest-conviction idea or spread it across 2–3 correlated positions.`
+            : kelly > 0.05
+            ? `Modest edge with ${(pBull*100).toFixed(0)}% conviction and ${bRatio.toFixed(1)}× win/loss ratio. Kelly fraction ${(kelly*100).toFixed(1)}% suggests limited size — risk no more than $${Math.round(half).toLocaleString()} (Half-Kelly). Signal weight of ${sigW>=0?"+":""}${sigW.toFixed(2)} is a weak ${dir.toLowerCase()} lean. Consider defined-risk structures over outright directional bets.`
+            : `Insufficient edge at current inputs (Kelly = ${(kelly*100).toFixed(1)}%). Either conviction or win/loss ratio (or both) is too low to justify risk capital. Stay flat or use minimum allocation until conviction strengthens. Re-run after a GBM simulation to derive a data-driven P(bull).`;
+          return (
+            <div style={{padding:"18px 20px",borderRadius:12,
+              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>SYNTHESIS</div>
+                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
+                  background:bc+"18",border:`1px solid ${bc}40`}}>
+                  {dir} · Kelly {(kelly*100).toFixed(1)}%
+                </div>
+              </div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>
+                {`P(bull) = ${(pBull*100).toFixed(0)}% · Win/loss ${bRatio.toFixed(1)}× · Portfolio $${portV.toLocaleString()} → Full Kelly $${Math.round(kelly*portV).toLocaleString()} · Half Kelly $${Math.round(half).toLocaleString()}.`}
+              </div>
+              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>SUGGESTED ACTION</div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8}}>{action}</div>
+            </div>
+          );
+        })()}
+
         {/* ── Inputs ── */}
         {(() => {
           const pBull  = Math.min(Math.max(parseFloat(sizeBull) || 60, 0), 100) / 100;
@@ -2856,40 +2940,6 @@ function StochasticView() {
           </>);
         })()}
 
-        {/* ── Position Sizing Synthesis tile ── */}
-        {(() => {
-          const pBull  = Math.min(Math.max(parseFloat(sizeBull) || 60, 0), 100) / 100;
-          const portV  = parseFloat(sizePort) || 100000;
-          const bRatio = Math.max(parseFloat(sizeOdds) || 1.5, 0.01);
-          const kelly  = Math.max(0, pBull - (1 - pBull) / bRatio);
-          const half   = kelly * 0.5 * portV;
-          const sigW   = pBull * 2 - 1;
-          const dir    = sigW > 0.10 ? "BULLISH" : sigW < -0.10 ? "BEARISH" : "NEUTRAL";
-          const bc     = sigW > 0.10 ? C.grn : sigW < -0.10 ? C.red : C.mut;
-          const conviction = pBull > 0.70 ? "high" : pBull > 0.55 ? "moderate" : pBull > 0.45 ? "low" : "contrarian-bearish";
-          const action = kelly > 0.20
-            ? `${conviction.charAt(0).toUpperCase() + conviction.slice(1)} conviction (${(pBull*100).toFixed(0)}% bull). Full Kelly ($${Math.round(kelly*portV).toLocaleString()}) is aggressive — Half-Kelly ($${Math.round(half).toLocaleString()}) is the standard practitioner recommendation. Signal weight of ${sigW>=0?"+":""}${sigW.toFixed(2)} maps to a ${dir.toLowerCase()} allocation in the strategy engine. Risk $${Math.round(half).toLocaleString()} on your highest-conviction idea or spread it across 2–3 correlated positions.`
-            : kelly > 0.05
-            ? `Modest edge with ${(pBull*100).toFixed(0)}% conviction and ${bRatio.toFixed(1)}× win/loss ratio. Kelly fraction ${(kelly*100).toFixed(1)}% suggests limited size — risk no more than $${Math.round(half).toLocaleString()} (Half-Kelly). Signal weight of ${sigW>=0?"+":""}${sigW.toFixed(2)} is a weak ${dir.toLowerCase()} lean. Consider defined-risk structures over outright directional bets.`
-            : `Insufficient edge at current inputs (Kelly = ${(kelly*100).toFixed(1)}%). Either conviction or win/loss ratio (or both) is too low to justify risk capital. Stay flat or use minimum allocation until conviction strengthens. Re-run after a GBM simulation to derive a data-driven P(bull).`;
-          return (
-            <div style={{padding:"18px 20px",borderRadius:12,
-              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>SYNTHESIS</div>
-                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
-                  background:bc+"18",border:`1px solid ${bc}40`}}>
-                  {dir} · Kelly {(kelly*100).toFixed(1)}%
-                </div>
-              </div>
-              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>
-                {`P(bull) = ${(pBull*100).toFixed(0)}% · Win/loss ${bRatio.toFixed(1)}× · Portfolio $${portV.toLocaleString()} → Full Kelly $${Math.round(kelly*portV).toLocaleString()} · Half Kelly $${Math.round(half).toLocaleString()}.`}
-              </div>
-              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>SUGGESTED ACTION</div>
-              <div style={{...mono(11,C.txt),lineHeight:1.8}}>{action}</div>
-            </div>
-          );
-        })()}
       </>)}
       <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
     </div>
