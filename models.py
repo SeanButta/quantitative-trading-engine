@@ -100,3 +100,17 @@ class PortfolioAnalysisJob(Base):
     error        = Column(Text, nullable=True)
     created_at   = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
+
+
+class DailySummary(Base):
+    __tablename__ = "daily_summaries"
+
+    date          = Column(String, primary_key=True)   # YYYY-MM-DD (UTC)
+    generated_at  = Column(DateTime, default=datetime.utcnow)
+    theme         = Column(Text, nullable=True)         # one-line headline theme
+    paragraphs    = Column(JSON, default=list)          # [p1, p2, p3, p4] strings
+    sentiment     = Column(String, default="neutral")   # bullish / bearish / neutral
+    sentiment_score = Column(JSON, default=0.0)         # float avg score
+    top_tags      = Column(JSON, default=list)          # top 5 tag strings
+    article_count = Column(Integer, default=0)
+    sources_used  = Column(JSON, default=list)          # list of source names

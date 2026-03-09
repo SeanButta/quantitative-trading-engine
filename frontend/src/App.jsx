@@ -1959,81 +1959,258 @@ function NewsCard({article}) {
   );
 }
 
-function NewsView() {
+// ── Daily Summary Tile ───────────────────────────────────
+function DailySummaryTile() {
   const C = useC();
-  const [input,      setInput]      = useState("");
-  const [symbol,     setSymbol]     = useState("market");
-  const [articles,   setArticles]   = useState([]);
-  const [loading,    setLoading]    = useState(false);
-  const [activeTag,  setActiveTag]  = useState("All");
+  const [data,       setData]       = useState(null);
+  const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState(null);
-  const [lastFetch,  setLastFetch]  = useState(null);
+  const [expanded,   setExpanded]   = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const loadFeed = async (sym) => {
-    setLoading(true); setError(null);
+  const load = async (force=false) => {
+    if (force) setRefreshing(true); else setLoading(true);
+    setError(null);
     try {
-      const r = await fetch(`/api/news/feed?symbol=${encodeURIComponent(sym)}&limit=60`);
+      const url = force ? "/api/feeds/daily-summary/refresh" : "/api/feeds/daily-summary";
+      const r = await fetch(url, force ? {method:"POST",headers:{"Content-Type":"application/json"},body:"{}"} : undefined);
+      if (!r.ok) throw new Error(await r.text());
+      setData(await r.json());
+    } catch(e) { setError(e.message); }
+    setLoading(false); setRefreshing(false);
+  };
+
+  useEffect(()=>{ load(); }, []);
+
+  const sentColor = data?.sentiment === "bullish" ? C.grn
+                  : data?.sentiment === "bearish" ? C.red : C.amb;
+
+  if (loading) return (
+    <div style={{padding:"20px",borderRadius:12,background:C.surf,border:`1px solid ${C.bdr}`,
+      display:"flex",alignItems:"center",gap:10,...mono(10,C.mut)}}>
+      <RefreshCw size={13} style={{animation:"spin 1s linear infinite",color:C.mut}}/>
+      Generating today's market summary…
+    </div>
+  );
+
+  if (error || !data) return (
+    <div style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${C.bdr}`}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={mono(9,C.mut)}>DAILY SUMMARY — unavailable</div>
+        <button onClick={()=>load(true)} style={{...mono(8,C.sky),background:"transparent",border:"none",cursor:"pointer"}}>↺ Retry</button>
+      </div>
+      {error && <div style={{...mono(9,C.red),marginTop:4}}>{error}</div>}
+    </div>
+  );
+
+  const paras = data.paragraphs || [];
+  const visibleParas = expanded ? paras : paras.slice(0,2);
+
+  return (
+    <div style={{borderRadius:12,overflow:"hidden",background:C.surf,
+      border:`1px solid ${C.bdr}`,borderLeft:`3px solid ${sentColor}`}}>
+      {/* Header */}
+      <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 16px",
+        borderBottom:`1px solid ${C.bdr}`,flexWrap:"wrap",gap:8}}>
+        <div style={mono(8,C.mut,700,{letterSpacing:1})}>DAILY MARKET SUMMARY</div>
+        <div style={{padding:"2px 9px",borderRadius:20,background:sentColor+"20",
+          border:`1px solid ${sentColor}40`,...mono(8,sentColor,700)}}>
+          {(data.sentiment||"neutral").toUpperCase()}
+        </div>
+        <div style={{...mono(8,C.mut),marginLeft:4}}>
+          {data.article_count} articles · {(data.sources_used||[]).length} sources
+        </div>
+        <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center"}}>
+          {data.cached && <span style={mono(8,C.mut)}>cached</span>}
+          <button onClick={()=>load(true)} disabled={refreshing}
+            style={{...mono(8,C.sky,700),background:"transparent",border:`1px solid ${C.sky}30`,
+              borderRadius:6,padding:"2px 8px",cursor:"pointer"}}>
+            {refreshing ? "…" : "↺ Refresh"}
+          </button>
+        </div>
+      </div>
+
+      {/* Theme line */}
+      <div style={{padding:"10px 16px 4px",...mono(11,C.headingTxt,700),lineHeight:1.4}}>
+        {data.theme}
+      </div>
+
+      {/* Top tags */}
+      {(data.top_tags||[]).length > 0 && (
+        <div style={{display:"flex",gap:5,padding:"4px 16px 10px",flexWrap:"wrap"}}>
+          {data.top_tags.map(tag=>(
+            <span key={tag} style={{...mono(8,NEWS_TAG_COLORS[tag]||C.mut,600),
+              padding:"1px 7px",borderRadius:10,background:(NEWS_TAG_COLORS[tag]||C.mut)+"15",
+              border:`1px solid ${(NEWS_TAG_COLORS[tag]||C.mut)}25`}}>
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Paragraphs */}
+      <div style={{padding:"0 16px 12px",display:"flex",flexDirection:"column",gap:10}}>
+        {visibleParas.map((p,i)=>(
+          <div key={i} style={{...mono(10,i===0?C.txt:C.mut),lineHeight:1.7,
+            paddingLeft:10,borderLeft:`2px solid ${i===0?sentColor:C.bdr}`}}>
+            {p}
+          </div>
+        ))}
+
+        {paras.length > 2 && (
+          <button onClick={()=>setExpanded(!expanded)}
+            style={{...mono(9,C.sky),background:"transparent",border:"none",
+              cursor:"pointer",textAlign:"left",padding:"2px 0"}}>
+            {expanded ? "▲ Show less" : `▼ Show all ${paras.length} sections`}
+          </button>
+        )}
+      </div>
+
+      {/* Footer */}
+      {data.generated_at && (
+        <div style={{...mono(8,C.mut),padding:"6px 16px",borderTop:`1px solid ${C.bdr}`,
+          background:C.dim}}>
+          Generated {new Date(data.generated_at).toLocaleString()} UTC
+          {(data.sources_used||[]).length > 0 && (
+            <span style={{marginLeft:8,color:C.mut}}>
+              · {data.sources_used.slice(0,4).join(", ")}{data.sources_used.length>4?` +${data.sources_used.length-4} more`:""}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Feeds View (upgraded News tab) ───────────────────────
+function FeedsView() {
+  const C = useC();
+  const [activeCategory, setActiveCategory] = useState("all");
+  const [articles,       setArticles]       = useState([]);
+  const [loading,        setLoading]        = useState(false);
+  const [activeTag,      setActiveTag]      = useState("All");
+  const [error,          setError]          = useState(null);
+  const [lastFetch,      setLastFetch]      = useState(null);
+  const [sourceCounts,   setSourceCounts]   = useState({});
+
+  // Symbol search (legacy compat — hits original /news/feed endpoint)
+  const [input,   setInput]   = useState("");
+  const [symMode, setSymMode] = useState(false);  // true = searching a ticker
+
+  const CATEGORIES = [
+    {id:"all",         label:"All Sources"},
+    {id:"Markets",     label:"Markets"},
+    {id:"Technology",  label:"Technology"},
+    {id:"Economy",     label:"Economy"},
+    {id:"Earnings",    label:"Earnings"},
+    {id:"Commodities", label:"Commodities"},
+  ];
+
+  const loadFeeds = async (cat="all") => {
+    setLoading(true); setError(null); setSymMode(false);
+    try {
+      const r = await fetch(`/api/feeds?category=${encodeURIComponent(cat)}&limit=100`);
       if (!r.ok) throw new Error(await r.text());
       const d = await r.json();
       setArticles(d.articles || []);
+      setSourceCounts(d.source_counts || {});
       setLastFetch(new Date().toLocaleTimeString());
     } catch(e) { setError(e.message); }
     setLoading(false);
   };
 
-  useEffect(()=>{ loadFeed("market"); }, []);
-
-  const handleSearch = () => {
+  const searchSymbol = async () => {
     const sym = input.trim().toUpperCase() || "market";
-    setSymbol(sym); setActiveTag("All");
-    loadFeed(sym);
+    setLoading(true); setError(null); setSymMode(true); setActiveTag("All");
+    try {
+      const r = await fetch(`/api/news/feed?symbol=${encodeURIComponent(sym)}&limit=60`);
+      if (!r.ok) throw new Error(await r.text());
+      const d = await r.json();
+      setArticles(d.articles || []);
+      setSourceCounts({});
+      setLastFetch(new Date().toLocaleTimeString());
+    } catch(e) { setError(e.message); }
+    setLoading(false);
   };
+
+  useEffect(()=>{ loadFeeds("all"); }, []);
 
   const allTags = useMemo(()=>{
     const counts = {};
-    articles.forEach(a => a.tags.forEach(t => { counts[t]=(counts[t]||0)+1; }));
+    articles.forEach(a => (a.tags||[]).forEach(t => { counts[t]=(counts[t]||0)+1; }));
     return ["All", ...Object.entries(counts).sort((a,b)=>b[1]-a[1]).map(([t])=>t)];
   }, [articles]);
 
-  const filtered = activeTag==="All" ? articles : articles.filter(a=>a.tags.includes(activeTag));
+  const filtered = activeTag==="All" ? articles : articles.filter(a=>(a.tags||[]).includes(activeTag));
 
   const bullCount = articles.filter(a=>a.score>0.1).length;
   const bearCount = articles.filter(a=>a.score<-0.1).length;
   const neutCount = articles.length - bullCount - bearCount;
-  const avgScore  = articles.length ? (articles.reduce((s,a)=>s+a.score,0)/articles.length).toFixed(2) : "—";
+  const avgScore  = articles.length
+    ? (articles.reduce((s,a)=>s+a.score,0)/articles.length).toFixed(2) : "—";
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:16}}>
-      {/* Header */}
+
+      {/* Daily Summary Tile */}
+      <DailySummaryTile/>
+
+      {/* Header + symbol search */}
       <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",flexWrap:"wrap",gap:10}}>
         <div>
-          <Lbl>Market News Feed</Lbl>
-          <div style={mono(11,C.mut)}>Live financial news · RSS aggregated · sentiment-scored & tagged</div>
+          <Lbl>Market Feeds</Lbl>
+          <div style={mono(11,C.mut)}>Multi-source financial news · RSS aggregated · sentiment-scored & tagged</div>
         </div>
         <div style={{display:"flex",gap:7,alignItems:"center"}}>
-          <input
-            value={input}
-            onChange={e=>setInput(e.target.value.toUpperCase())}
-            onKeyDown={e=>e.key==="Enter"&&handleSearch()}
-            placeholder="SPY, AAPL, market…"
+          <input value={input} onChange={e=>setInput(e.target.value.toUpperCase())}
+            onKeyDown={e=>e.key==="Enter"&&searchSymbol()}
+            placeholder="Search ticker (AAPL, SPY…)"
             style={{padding:"7px 12px",borderRadius:8,border:`1.5px solid ${C.grn}55`,
-              background:C.surf,color:C.headingTxt,fontFamily:"monospace",fontSize:13,
-              fontWeight:600,outline:"none",width:170,boxSizing:"border-box"}}
-          />
-          <button onClick={handleSearch}
-            style={{padding:"7px 16px",borderRadius:8,background:loading?C.dim:C.grn,
-              color:loading?C.mut:"#000",...mono(12,loading?C.mut:"#000",700),border:"none",cursor:"pointer"}}>
+              background:C.surf,color:C.headingTxt,...mono(12),outline:"none",
+              width:200,boxSizing:"border-box"}}/>
+          <button onClick={searchSymbol}
+            style={{padding:"7px 14px",borderRadius:8,background:loading?C.dim:C.grn,
+              color:"#000",...mono(11,"#000",700),border:"none",cursor:"pointer"}}>
             Search
           </button>
-          <button onClick={()=>loadFeed(symbol)} title="Refresh"
+          <button onClick={()=>{ setInput(""); setSymMode(false); loadFeeds(activeCategory); }}
+            title="Show all feeds"
             style={{padding:"7px 9px",borderRadius:8,background:"transparent",
-              border:`1px solid ${C.bdr}`,cursor:"pointer",color:C.mut,lineHeight:0}}>
+              border:`1px solid ${C.bdr}`,cursor:"pointer",lineHeight:0}}>
             <RefreshCw size={13} style={{color:C.mut}}/>
           </button>
         </div>
       </div>
 
-      {/* Summary strip */}
+      {/* Category tabs (hidden in symbol-search mode) */}
+      {!symMode && (
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {CATEGORIES.map(({id,label})=>(
+            <button key={id} onClick={()=>{ setActiveCategory(id); setActiveTag("All"); loadFeeds(id); }}
+              style={{...mono(10,activeCategory===id?C.sky:C.mut,activeCategory===id?700:400),
+                padding:"5px 14px",borderRadius:20,cursor:"pointer",
+                border:`1px solid ${activeCategory===id?C.sky+"60":C.bdr}`,
+                background: activeCategory===id?C.sky+"15":"transparent",transition:"all .15s"}}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Source breakdown chips */}
+      {!symMode && Object.keys(sourceCounts).length > 0 && (
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+          <span style={mono(8,C.mut)}>Sources:</span>
+          {Object.entries(sourceCounts).sort((a,b)=>b[1]-a[1]).map(([src,cnt])=>(
+            <span key={src} style={{...mono(8,C.mut),padding:"2px 8px",borderRadius:10,
+              background:C.dim,border:`1px solid ${C.bdr}`}}>
+              {src} <span style={{color:C.sky}}>{cnt}</span>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Sentiment strip */}
       {articles.length>0 && (
         <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
           {[{l:"Bullish",n:bullCount,c:C.grn},{l:"Neutral",n:neutCount,c:C.mut},{l:"Bearish",n:bearCount,c:C.red}].map(({l,n,c})=>(
@@ -2045,12 +2222,12 @@ function NewsView() {
           ))}
           <span style={{...mono(10,C.mut),marginLeft:4}}>{articles.length} articles</span>
           <span style={mono(10,C.mut)}>·</span>
-          <span style={mono(10,C.mut)}>avg score: <span style={{color: parseFloat(avgScore)>0?C.grn:parseFloat(avgScore)<0?C.red:C.mut}}>{avgScore>0?"+":""}{avgScore}</span></span>
+          <span style={mono(10,C.mut)}>avg score: <span style={{color:parseFloat(avgScore)>0?C.grn:parseFloat(avgScore)<0?C.red:C.mut}}>{avgScore>0?"+":""}{avgScore}</span></span>
           {lastFetch && <span style={{...mono(9,C.mut),marginLeft:"auto"}}>fetched {lastFetch}</span>}
         </div>
       )}
 
-      {/* Tag filter pills */}
+      {/* Topic tag pills */}
       {articles.length>0 && (
         <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
           {allTags.map(tag=>{
@@ -2058,12 +2235,12 @@ function NewsView() {
             const isActive = activeTag===tag;
             return (
               <button key={tag} onClick={()=>setActiveTag(tag)} style={{
-                padding:"4px 11px", borderRadius:6, cursor:"pointer", transition:"all .15s",
+                padding:"4px 11px",borderRadius:6,cursor:"pointer",transition:"all .15s",
                 border:`1px solid ${isActive?tagColor+"60":C.bdr}`,
-                background: isActive?tagColor+"18":"transparent",
-                color: isActive?tagColor:C.mut,
-                ...mono(10,"inherit",600),
-              }}>{tag}</button>
+                background:isActive?tagColor+"18":"transparent",
+                color:isActive?tagColor:C.mut,...mono(10,"inherit",600)}}>
+                {tag}
+              </button>
             );
           })}
         </div>
@@ -2076,19 +2253,23 @@ function NewsView() {
         </div>
       )}
 
-      {/* Loading spinner */}
+      {/* Loading */}
       {loading && (
         <div style={{display:"flex",justifyContent:"center",padding:48}}>
           <RefreshCw size={22} style={{color:C.grn,animation:"spin 1s linear infinite"}}/>
         </div>
       )}
 
-      {/* Article feed */}
-      {!loading && filtered.map((a,i)=><NewsCard key={i} article={a}/>)}
+      {/* Articles */}
+      {!loading && filtered.map((a,i)=>(
+        <NewsCard key={i} article={{...a,
+          source: a.source + (a.category && a.category!=="all" ? ` · ${a.category}` : "")
+        }}/>
+      ))}
 
       {!loading && filtered.length===0 && !error && (
         <div style={{textAlign:"center",padding:48,...mono(12,C.mut)}}>
-          {articles.length===0 ? "Enter a ticker or click Search for market news." : "No articles match this filter."}
+          {articles.length===0 ? "Loading feeds…" : "No articles match this filter."}
         </div>
       )}
 
@@ -7952,18 +8133,18 @@ function PairsView() {
 }
 
 // ── Hub wrappers ────────────────────────────────────────
-// Markets = Overview dashboard + News feed
+// Markets = Overview dashboard + Feeds
 function MarketsView({onNav, onDetail}) {
   const [tab, setTab] = useState("dashboard");
   return (
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
       <div style={{display:"flex",gap:8}}>
-        {[["dashboard","Dashboard"],["news","News"]].map(([id,l])=>(
+        {[["dashboard","Dashboard"],["feeds","Feeds"]].map(([id,l])=>(
           <Pill key={id} label={l} active={tab===id} onClick={()=>setTab(id)}/>
         ))}
       </div>
       {tab==="dashboard" && <OverviewView onNav={onNav} onDetail={onDetail}/>}
-      {tab==="news"      && <NewsView/>}
+      {tab==="feeds"     && <FeedsView/>}
     </div>
   );
 }

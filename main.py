@@ -27,7 +27,7 @@ _ROOT = str(Path(__file__).parent)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from models import Base, Project, Strategy, Run, OptionsRefreshJob, SignalReadingJob, PortfolioAnalysisJob
+from models import Base, Project, Strategy, Run, OptionsRefreshJob, SignalReadingJob, PortfolioAnalysisJob, DailySummary
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -2676,6 +2676,368 @@ def get_news_feed(symbol: str = "market", limit: int = 50, window_hours: int = 4
     except Exception as e:
         logger.exception("News feed failed for %s", symbol)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Enriched Feeds + Daily Summary Endpoints
+# ---------------------------------------------------------------------------
+
+def _generate_daily_summary(db: Session) -> dict:
+    """
+    Compile today's news + sentiment into a 4-paragraph contextual summary.
+    Returns a dict suitable for storing in DailySummary and returning via API.
+    """
+    import re as _re
+    from datetime import timezone as _tz
+
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+
+    try:
+        from sentiment_engine import SentimentEngine, EXTENDED_FEEDS
+        engine = SentimentEngine()
+
+        # ── Gather articles from all extended feeds ──────────────────────
+        all_articles = []
+        sources_seen: set[str] = set()
+        for category, urls in EXTENDED_FEEDS.items():
+            for url in urls:
+                items = engine._fetch_feed(url)
+                for item in items:
+                    all_articles.append({
+                        "title":    item.title,
+                        "summary":  item.summary,
+                        "source":   item.source,
+                        "score":    item.normalized_score,
+                        "tags":     _tag_article(item.title, item.summary),
+                        "category": category,
+                        "published": str(item.published),
+                    })
+                    sources_seen.add(item.source)
+
+        # Deduplicate by title similarity (drop near-duplicates)
+        seen_titles: set[str] = set()
+        unique = []
+        for a in all_articles:
+            key = _re.sub(r"[^a-z ]", "", a["title"].lower())[:60]
+            if key not in seen_titles:
+                seen_titles.add(key)
+                unique.append(a)
+
+        articles = unique
+        article_count = len(articles)
+
+        if article_count == 0:
+            return {"date": today, "theme": "No data available", "paragraphs": [],
+                    "sentiment": "neutral", "sentiment_score": 0.0,
+                    "top_tags": [], "article_count": 0, "sources_used": []}
+
+        # ── Aggregate statistics ─────────────────────────────────────────
+        scores = [a["score"] for a in articles]
+        avg_score = sum(scores) / len(scores)
+        bull_ct  = sum(1 for s in scores if s > 0.1)
+        bear_ct  = sum(1 for s in scores if s < -0.1)
+        neut_ct  = article_count - bull_ct - bear_ct
+
+        overall_dir = ("bullish"  if avg_score >  0.08 else
+                       "bearish"  if avg_score < -0.08 else "neutral")
+
+        # Tag frequency
+        tag_counts: dict[str, int] = {}
+        for a in articles:
+            for t in a["tags"]:
+                tag_counts[t] = tag_counts.get(t, 0) + 1
+        top_tags = [t for t, _ in sorted(tag_counts.items(), key=lambda x: -x[1])[:6]]
+
+        # Top positive / negative articles
+        top_bull = sorted(articles, key=lambda a: a["score"], reverse=True)[:3]
+        top_bear = sorted(articles, key=lambda a: a["score"])[:3]
+
+        # Category coverage
+        cat_counts: dict[str, int] = {}
+        for a in articles:
+            cat_counts[a["category"]] = cat_counts.get(a["category"], 0) + 1
+        dominant_cat = max(cat_counts, key=cat_counts.get) if cat_counts else "Markets"
+
+        # ── Build one-line theme ─────────────────────────────────────────
+        tone_word  = "risk-on"  if overall_dir == "bullish" else \
+                     "risk-off" if overall_dir == "bearish" else "mixed"
+        dom_tag    = top_tags[0] if top_tags else dominant_cat
+        second_tag = top_tags[1] if len(top_tags) > 1 else ""
+        theme = (f"{tone_word.capitalize()} tape driven by {dom_tag}"
+                 + (f" and {second_tag}" if second_tag and second_tag != dom_tag else "")
+                 + f" — {article_count} stories from {len(sources_seen)} sources")
+
+        # ── Generate 4 paragraphs ────────────────────────────────────────
+        def fmt_score(s: float) -> str:
+            return f"+{s:.2f}" if s >= 0 else f"{s:.2f}"
+
+        # ── P1: Market Theme ────────────────────────────────────────────
+        bull_pct  = round(100 * bull_ct  / article_count)
+        bear_pct  = round(100 * bear_ct  / article_count)
+        neut_pct  = 100 - bull_pct - bear_pct
+        tag_list  = ", ".join(top_tags[:4]) if top_tags else "general markets"
+
+        if overall_dir == "bullish":
+            tone_phrase = f"Today's financial media is broadly constructive ({bull_pct}% bullish, {bear_pct}% bearish) with an average sentiment score of {fmt_score(avg_score)}."
+        elif overall_dir == "bearish":
+            tone_phrase = f"Today's financial media carries a notably cautious tone ({bear_pct}% bearish, {bull_pct}% bullish) with an average sentiment score of {fmt_score(avg_score)}."
+        else:
+            tone_phrase = f"Financial media is balanced today ({bull_pct}% bullish, {bear_pct}% bearish, {neut_pct}% neutral) with a near-flat average score of {fmt_score(avg_score)}."
+
+        p1 = (f"{tone_phrase} Coverage across {len(sources_seen)} sources spans "
+              f"{article_count} stories, with dominant themes in {tag_list}. "
+              f"The narrative is led by {dominant_cat.lower()} developments, with "
+              f"{top_tags[2] if len(top_tags) > 2 else 'macro'} stories adding context.")
+
+        # ── P2: What Matters ───────────────────────────────────────────
+        bull_headlines = "; ".join(a["title"][:90] for a in top_bull[:2])
+        bear_headlines = "; ".join(a["title"][:90] for a in top_bear[:2])
+
+        p2_parts = []
+        if top_bull and top_bull[0]["score"] > 0.2:
+            p2_parts.append(f"On the positive side: {bull_headlines}.")
+        if top_bear and top_bear[0]["score"] < -0.2:
+            p2_parts.append(f"Weighing on sentiment: {bear_headlines}.")
+        if not p2_parts:
+            p2_parts.append(f"Top stories today include: {bull_headlines}.")
+
+        tag_detail = []
+        for tag in top_tags[:4]:
+            cnt = tag_counts.get(tag, 0)
+            tag_detail.append(f"{cnt} {tag} article{'s' if cnt != 1 else ''}")
+        p2 = " ".join(p2_parts) + (f" Story breakdown: {', '.join(tag_detail)}." if tag_detail else "")
+
+        # ── P3: Why It Matters ─────────────────────────────────────────
+        implications = []
+        if "Fed/Rates" in top_tags[:3]:
+            implications.append("Fed/rates coverage is elevated — duration and rate-sensitive positions warrant attention as policy signals may shift market pricing")
+        if "Earnings" in top_tags[:3]:
+            implications.append("Active earnings cycle underway — single-stock risk is elevated and implied volatility could reprice significantly post-announcement")
+        if "Macro" in top_tags[:3]:
+            implications.append("Macro data in focus — GDP, CPI, or payroll prints may reset consensus expectations for growth and the path of real rates")
+        if "Technology" in top_tags[:3]:
+            implications.append("Technology sector driving sentiment — AI/semiconductor narratives continue to disproportionately influence broad market momentum")
+        if "M&A" in top_tags[:3]:
+            implications.append("M&A activity signals corporate confidence in valuations — watch for sector rotation as deal premiums reset comparable multiples")
+        if "Geopolitical" in top_tags[:3]:
+            implications.append("Geopolitical risk surfacing in coverage — commodity exposure (energy, metals) and safe-haven flows (gold, Treasuries) merit review")
+        if "Commodities" in top_tags[:3]:
+            implications.append("Commodities in the narrative — supply-side disruptions or demand signals could feed directly into inflation expectations")
+        if not implications:
+            implications.append("Cross-asset signals remain broadly intact — no single catalyst appears dominant enough to force a regime shift today")
+
+        p3 = " ".join(f"{s}." for s in implications[:3])
+
+        # ── P4: Go-Forward / Context ────────────────────────────────────
+        momentum_word = ("building" if avg_score > 0.12 else
+                         "fading"   if avg_score < -0.12 else "stable")
+        source_list = ", ".join(sorted(sources_seen)[:5])
+
+        p4 = (f"Sentiment momentum is {momentum_word} today based on the aggregate of "
+              f"{article_count} articles from {source_list}{' and others' if len(sources_seen) > 5 else ''}. "
+              f"This summary is cached daily and will carry forward as a contextual baseline for comparing "
+              f"tomorrow's tone shift. A move from today's {overall_dir} reading to the opposite "
+              f"direction — particularly if led by a new {top_tags[0] if top_tags else 'macro'} catalyst — "
+              f"would represent a meaningful regime change worth acting on.")
+
+        paragraphs = [p for p in [p1, p2, p3, p4] if p.strip()]
+
+        return {
+            "date":            today,
+            "theme":           theme,
+            "paragraphs":      paragraphs,
+            "sentiment":       overall_dir,
+            "sentiment_score": round(avg_score, 4),
+            "top_tags":        top_tags,
+            "article_count":   article_count,
+            "sources_used":    sorted(sources_seen),
+            "generated_at":    datetime.utcnow().isoformat(),
+        }
+
+    except Exception as exc:
+        logger.exception("Daily summary generation failed: %s", exc)
+        return {"date": today, "theme": "Summary generation failed", "paragraphs": [str(exc)],
+                "sentiment": "neutral", "sentiment_score": 0.0,
+                "top_tags": [], "article_count": 0, "sources_used": []}
+
+
+@app.get("/feeds/daily-summary")
+def get_daily_summary():
+    """
+    Return today's cached daily narrative summary (4 paragraphs).
+    Generates and caches if not yet available for today.
+    """
+    db: Session = SessionLocal()
+    try:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        row = db.query(DailySummary).filter(DailySummary.date == today).first()
+        if row:
+            return _sanitize({
+                "date":            row.date,
+                "theme":           row.theme,
+                "paragraphs":      row.paragraphs,
+                "sentiment":       row.sentiment,
+                "sentiment_score": row.sentiment_score,
+                "top_tags":        row.top_tags,
+                "article_count":   row.article_count,
+                "sources_used":    row.sources_used,
+                "generated_at":    row.generated_at.isoformat() if row.generated_at else None,
+                "cached":          True,
+            })
+        # Not cached yet — generate now
+        data = _generate_daily_summary(db)
+        row = DailySummary(
+            date=data["date"], theme=data["theme"], paragraphs=data["paragraphs"],
+            sentiment=data["sentiment"], sentiment_score=data["sentiment_score"],
+            top_tags=data["top_tags"], article_count=data["article_count"],
+            sources_used=data["sources_used"],
+        )
+        db.merge(row)
+        db.commit()
+        data["cached"] = False
+        return _sanitize(data)
+    finally:
+        db.close()
+
+
+@app.post("/feeds/daily-summary/refresh")
+def refresh_daily_summary(body: dict = None):
+    """Force-regenerate today's daily summary and update the cache."""
+    db: Session = SessionLocal()
+    try:
+        data = _generate_daily_summary(db)
+        row = DailySummary(
+            date=data["date"], theme=data["theme"], paragraphs=data["paragraphs"],
+            sentiment=data["sentiment"], sentiment_score=data["sentiment_score"],
+            top_tags=data["top_tags"], article_count=data["article_count"],
+            sources_used=data["sources_used"], generated_at=datetime.utcnow(),
+        )
+        db.merge(row)
+        db.commit()
+        data["cached"] = False
+        data["refreshed"] = True
+        return _sanitize(data)
+    finally:
+        db.close()
+
+
+@app.get("/feeds/daily-summary/history")
+def get_summary_history(days: int = 30):
+    """Return the last N days of cached daily summaries for contextual trend view."""
+    db: Session = SessionLocal()
+    try:
+        rows = (db.query(DailySummary)
+                .order_by(DailySummary.date.desc())
+                .limit(max(1, min(days, 90)))
+                .all())
+        return _sanitize([{
+            "date":            r.date,
+            "theme":           r.theme,
+            "sentiment":       r.sentiment,
+            "sentiment_score": r.sentiment_score,
+            "top_tags":        r.top_tags,
+            "article_count":   r.article_count,
+        } for r in rows])
+    finally:
+        db.close()
+
+
+@app.get("/feeds")
+def get_feeds(category: str = "all", limit: int = 80, window_hours: int = 48):
+    """
+    Enriched multi-source financial news feed.
+    category: 'all' | 'Markets' | 'Technology' | 'Economy' | 'Earnings' | 'Commodities'
+    Returns articles from all EXTENDED_FEEDS sources, scored, tagged, and deduplicated.
+    """
+    import re as _re
+    from datetime import timezone as _tz
+    try:
+        from sentiment_engine import SentimentEngine, EXTENDED_FEEDS
+        engine = SentimentEngine()
+        now_utc = datetime.utcnow().replace(tzinfo=_tz.utc)
+        cutoff = now_utc - timedelta(hours=window_hours)
+
+        # Source label mapping
+        SOURCE_LABELS = {
+            "feeds.finance.yahoo.com": "Yahoo Finance",
+            "finance.yahoo.com": "Yahoo Finance",
+            "feeds.marketwatch.com": "MarketWatch",
+            "www.marketwatch.com": "MarketWatch",
+            "www.cnbc.com": "CNBC",
+            "feeds.a.dj.com": "WSJ",
+            "www.reuters.com": "Reuters",
+            "feeds.reuters.com": "Reuters",
+            "feeds.bloomberg.com": "Bloomberg",
+        }
+
+        all_articles = []
+        # Determine which categories to pull
+        cats_to_fetch = (EXTENDED_FEEDS.keys() if category == "all"
+                         else [c for c in EXTENDED_FEEDS if c.lower() == category.lower()])
+
+        for cat, urls in EXTENDED_FEEDS.items():
+            if cat not in cats_to_fetch:
+                continue
+            for url in urls:
+                items = engine._fetch_feed(url)
+                for item in items:
+                    try:
+                        pub = item.published if item.published.tzinfo else \
+                              item.published.replace(tzinfo=_tz.utc)
+                        if pub < cutoff:
+                            continue
+                        age_s = max(0, (now_utc - pub).total_seconds())
+                        rel_time = (f"{int(age_s/60)}m ago" if age_s < 3600
+                                    else f"{int(age_s/3600)}h ago" if age_s < 86400
+                                    else f"{int(age_s/86400)}d ago")
+                    except Exception:
+                        rel_time = "recently"
+                        pub = now_utc
+
+                    src = item.source
+                    for old, new in SOURCE_LABELS.items():
+                        src = src.replace(old, new)
+
+                    all_articles.append({
+                        "title":            item.title,
+                        "summary":          item.summary[:280],
+                        "url":              item.url,
+                        "source":           src,
+                        "published":        str(item.published),
+                        "rel_time":         rel_time,
+                        "score":            round(item.normalized_score, 3),
+                        "symbol_mentioned": item.symbol_mentioned,
+                        "tags":             _tag_article(item.title, item.summary),
+                        "category":         cat,
+                    })
+
+        # Deduplicate by title
+        seen: set[str] = set()
+        unique = []
+        for a in all_articles:
+            key = _re.sub(r"[^a-z ]", "", a["title"].lower())[:60]
+            if key not in seen:
+                seen.add(key)
+                unique.append(a)
+
+        # Sort newest first, cap at limit
+        unique.sort(key=lambda a: a["published"], reverse=True)
+        result = unique[:limit]
+
+        # Source breakdown for the UI
+        source_counts: dict[str, int] = {}
+        for a in result:
+            source_counts[a["source"]] = source_counts.get(a["source"], 0) + 1
+
+        return _sanitize({
+            "articles":      result,
+            "count":         len(result),
+            "category":      category,
+            "source_counts": source_counts,
+        })
+    except Exception as exc:
+        logger.exception("Feeds endpoint failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------
