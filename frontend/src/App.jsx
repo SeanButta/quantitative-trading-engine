@@ -7591,10 +7591,13 @@ function PairsView() {
   const [zEntry,   setZEntry]   = useState(2.0);
   const [minCorr,  setMinCorr]  = useState(0.7);
   const [expanded, setExpanded] = useState(null);
+  const screeningRef = useRef(false);
 
   const screen = () => {
+    if (screeningRef.current) return;               // prevent double-trigger (Enter + button)
     const syms = symbols.split(",").map(s=>s.trim().toUpperCase()).filter(Boolean);
     if (syms.length < 2) { setErr("Need at least 2 symbols"); return; }
+    screeningRef.current = true;
     setLoading(true); setPairs(null); setErr(null); setExpanded(null);
     fetch("/api/pairs/screen", {
       method:"POST", headers:{"Content-Type":"application/json"},
@@ -7602,7 +7605,8 @@ function PairsView() {
     })
       .then(r=>r.ok?r.json():r.json().then(e=>Promise.reject(e.detail||"Screen failed")))
       .then(d=>{ setPairs(d); setLoading(false); })
-      .catch(e=>{ setErr(String(e)); setLoading(false); });
+      .catch(e=>{ setErr(String(e)); setLoading(false); })
+      .finally(()=>{ screeningRef.current = false; });
   };
 
   const zCol = z => { const az=Math.abs(z||0); return az>=zEntry?(z>0?C.grn:C.red):C.mut; };
@@ -7663,6 +7667,115 @@ function PairsView() {
           ))}
         </div>
       </Card>
+
+      {/* ── Pairs Trading Synthesis ── */}
+      {pairs && (() => {
+        const allPairs   = pairs.pairs || [];
+        const total      = allPairs.length;
+        const withSignal = allPairs.filter(p => p.signal_a !== 0 && p.signal_a != null);
+        const longSpr    = withSignal.filter(p => p.position === "long_spread");
+        const shortSpr   = withSignal.filter(p => p.position === "short_spread");
+
+        // Quality metrics across the universe
+        const pVals      = allPairs.map(p => p.p_value).filter(v => v != null);
+        const avgP       = pVals.length ? pVals.reduce((a,b)=>a+b,0)/pVals.length : null;
+        const highConf   = allPairs.filter(p => (p.p_value||1) < 0.01).length;   // p < 1%
+
+        const halfLives  = allPairs.map(p => p.half_life).filter(v => v != null && v > 0);
+        const minHL      = halfLives.length ? Math.min(...halfLives).toFixed(1) : null;
+        const medHL      = halfLives.length
+          ? [...halfLives].sort((a,b)=>a-b)[Math.floor(halfLives.length/2)].toFixed(1)
+          : null;
+
+        const sharpes    = allPairs.map(p => p.sharpe).filter(v => v != null);
+        const bestSharpe = sharpes.length ? Math.max(...sharpes) : null;
+        const avgSharpe  = sharpes.length ? sharpes.reduce((a,b)=>a+b,0)/sharpes.length : null;
+
+        const zscores    = allPairs.map(p => p.current_zscore).filter(v => v != null);
+        const avgAbsZ    = zscores.length
+          ? (zscores.reduce((a,b)=>a+Math.abs(b),0)/zscores.length).toFixed(2)
+          : null;
+        const maxAbsZ    = zscores.length
+          ? Math.max(...zscores.map(z=>Math.abs(z))).toFixed(2)
+          : null;
+
+        // Best pair by Sharpe
+        const bestPair   = allPairs.length
+          ? allPairs.reduce((a,b)=>(b.sharpe||0)>(a.sharpe||0)?b:a)
+          : null;
+
+        // Determine overall regime verdict
+        let verdict, bc, synthesis, implications;
+
+        if (total === 0) {
+          verdict = "NO PAIRS"; bc = C.mut;
+          synthesis = `${pairs.symbols_screened} symbols screened — no statistically significant cointegration found at current correlation threshold (${minCorr}).`;
+          implications = "Expand your universe, lower the min correlation filter, or consider that the selected assets are moving independently (regime break or structural shift).";
+        } else if (withSignal.length === 0) {
+          verdict = "MEAN REVERTING"; bc = C.amb;
+          synthesis = `${total} cointegrated pair${total===1?"":"s"} found across ${pairs.symbols_screened} symbols. Spreads are currently near equilibrium — no entry signals at ±${zEntry}σ. Median half-life: ${medHL||"—"}d · Avg |Z|: ${avgAbsZ||"—"}σ.`;
+          implications = `Pairs are cointegrated but not stretched. Monitor for spread expansion — expected mean-reversion window is ~${medHL||"—"} trading days once a signal fires. ${highConf} pair${highConf===1?"":"s"} with p < 1% offer highest-conviction setup.`;
+        } else if (withSignal.length >= 3 && avgAbsZ > 2.5) {
+          verdict = "SPREAD REGIME"; bc = C.red;
+          synthesis = `${withSignal.length} of ${total} pairs show active Z-score signals — broad spread widening suggests a market stress or correlation breakdown event. Avg |Z|: ${avgAbsZ}σ · Max |Z|: ${maxAbsZ}σ.`;
+          implications = "High simultaneous signal count may indicate regime-wide dislocation rather than idiosyncratic pair divergence. Mean-reversion trades carry elevated risk — size conservatively and validate that cointegration relationships remain intact.";
+        } else {
+          const sDir = longSpr.length >= shortSpr.length ? "LONG SPREAD" : "SHORT SPREAD";
+          verdict = `${withSignal.length} SIGNAL${withSignal.length>1?"S":""}  ACTIVE`; bc = C.grn;
+          synthesis = `${withSignal.length} active signal${withSignal.length>1?"s":""} across ${total} cointegrated pair${total===1?"":"s"}. Dominant direction: ${sDir}. Best Sharpe: ${bestSharpe?.toFixed(2)||"—"} (${bestPair?.symbol_a||""}/${bestPair?.symbol_b||""}). Median half-life: ${medHL||"—"}d · Avg |Z|: ${avgAbsZ}σ.`;
+          implications = `${highConf} pair${highConf===1?"":"s"} with p < 1% suggest robust cointegration. Size positions using hedge ratio (β) from each pair card — 1 unit long paired with β units short. Targets: Z-score returning to 0 within ~${medHL||"—"} days. Use ±0.5σ as exit.`;
+        }
+
+        // Go-forward note based on half-life
+        let hlNote = "";
+        if (medHL) {
+          const hl = parseFloat(medHL);
+          if (hl < 5)       hlNote = "⚡ Short half-lives (<5d) — suitable for active intraday/swing execution with tight stops.";
+          else if (hl < 15) hlNote = "Short-to-medium half-lives (5–15d) — weekly rebalance cadence appropriate.";
+          else if (hl < 40) hlNote = "Moderate half-lives (15–40d) — monthly review; spreads take time to revert.";
+          else              hlNote = "Long half-lives (>40d) — cointegration may be weak or structural; monitor p-values closely over time.";
+        }
+
+        return (
+          <div style={{padding:"18px 20px",borderRadius:12,
+            background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10,flexWrap:"wrap"}}>
+              <div style={mono(8,C.mut,700,{letterSpacing:1})}>PAIRS SYNTHESIS</div>
+              <div style={{padding:"2px 10px",borderRadius:20,background:bc+"25",
+                border:`1px solid ${bc}55`,...mono(9,bc,700)}}>{verdict}</div>
+              <div style={{marginLeft:"auto",...mono(8,C.mut)}}>
+                {total} pair{total===1?"":"s"} · {withSignal.length} signal{withSignal.length===1?"":"s"} · {pairs.symbols_screened} symbols screened
+              </div>
+            </div>
+            <div style={{...mono(10,C.txt),marginBottom:10,lineHeight:1.6}}>{synthesis}</div>
+            <div style={{...mono(8,C.mut,700,{letterSpacing:1}),marginBottom:4}}>OBSERVATIONS & GO-FORWARD</div>
+            <div style={{...mono(10,C.mut),lineHeight:1.6,marginBottom: hlNote ? 8 : 0}}>{implications}</div>
+            {hlNote && (
+              <div style={{...mono(9,C.amb),marginTop:6,padding:"6px 10px",
+                borderRadius:6,background:C.amb+"11",border:`1px solid ${C.amb}30`}}>
+                {hlNote}
+              </div>
+            )}
+            {bestPair && avgSharpe != null && (
+              <div style={{display:"flex",gap:16,marginTop:10,flexWrap:"wrap"}}>
+                {[
+                  ["Best Pair",    `${bestPair.symbol_a}/${bestPair.symbol_b}`],
+                  ["Best Sharpe",  bestSharpe?.toFixed(2)||"—"],
+                  ["Avg Sharpe",   avgSharpe?.toFixed(2)||"—"],
+                  ["Median HL",    medHL ? medHL+"d" : "—"],
+                  ["High-Conf",    `${highConf}/${total}`],
+                  ["Active",       `${withSignal.length}/${total}`],
+                ].map(([k,v])=>(
+                  <div key={k} style={{display:"flex",flexDirection:"column",gap:2}}>
+                    <div style={mono(8,C.mut)}>{k}</div>
+                    <div style={mono(11,C.headingTxt,700)}>{v}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {err && <Card><div style={mono(11,C.red)}>⚠ {err}</div></Card>}
       {loading && (
