@@ -4598,7 +4598,7 @@ const TV_G = "#26a69a";   // TradingView bull green
 const TV_R = "#ef5350";   // TradingView bear red
 const SMA_COLS = {"20":"#ef9b20","50":"#2196f3","200":"#9c27b0","10":"#ef9b20","100":"#2196f3"};
 const EMA_COLS = {"9":"#e91e63","12":"#e91e63","21":"#00bcd4","26":"#00bcd4"};
-const TV_Y_AX_W = 62;
+const TV_Y_AX_W = 80;   // wider right gutter keeps Fib labels outside the candle zone
 const TV_X_AX_H = 22;
 const TV_MAIN_H = 340;
 
@@ -5377,10 +5377,11 @@ function TechnicalView() {
                         <line x1={0} y1={py} x2={iW} y2={py}
                           stroke={col} strokeWidth={isKey?1.5:0.8}
                           strokeDasharray={isKey?"none":"4 3"} strokeOpacity={isKey?0.85:0.55}/>
-                        <rect x={iW-52} y={py-9} width={50} height={12}
-                          fill="#13172299" rx={2}/>
-                        <text x={iW-48} y={py} fill={col}
-                          fontSize={8} fontFamily="monospace" dominantBaseline="middle"
+                        {/* label lives in the Y-axis gutter (x > iW) — never over candles */}
+                        <rect x={iW+3} y={py-7} width={TV_Y_AX_W-6} height={13}
+                          fill="#131722dd" rx={2}/>
+                        <text x={iW+6} y={py} fill={col}
+                          fontSize={7.5} fontFamily="monospace" dominantBaseline="middle"
                           fontWeight={isKey?"700":"400"}>
                           {pct} ${price?.toFixed(2)}
                         </text>
