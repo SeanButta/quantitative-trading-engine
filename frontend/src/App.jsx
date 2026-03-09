@@ -6643,6 +6643,154 @@ function TradeAdvisorView() {
 }
 
 // ── PairsView ─────────────────────────────────────────────────────────────────
+// ── PairsCompareChart ──────────────────────────────────────────────────────────
+function PairsCompareChart({ comparisonSeries, symbols, pairs }) {
+  const C = useC();
+  const [visible, setVisible] = useState(() => new Set(symbols || []));
+  const [range,   setRange]   = useState("1Y");
+  const RANGE_DAYS = {"3M":63,"6M":126,"1Y":252,"2Y":504};
+
+  // Slice to chosen range then normalize every symbol to 100 at period start
+  const { chartData, symReturns } = useMemo(() => {
+    if (!comparisonSeries?.length || !symbols?.length)
+      return { chartData: [], symReturns: {} };
+    const slice = comparisonSeries.slice(-(RANGE_DAYS[range] || 252));
+    if (!slice.length) return { chartData: [], symReturns: {} };
+    const first = slice[0];
+    const bases = {};
+    symbols.forEach(s => { bases[s] = first[s] || 1; });
+    const chartData = slice.map(row => {
+      const r = { date: row.date };
+      symbols.forEach(s => {
+        r[s] = row[s] != null ? +((row[s] / bases[s]) * 100).toFixed(2) : null;
+      });
+      return r;
+    });
+    const last = chartData[chartData.length - 1] || {};
+    const symReturns = {};
+    symbols.forEach(s => { symReturns[s] = last[s] != null ? (last[s] - 100).toFixed(1) : null; });
+    return { chartData, symReturns };
+  }, [comparisonSeries, symbols, range]);
+
+  const pairMembers = useMemo(() =>
+    new Set((pairs || []).flatMap(p => [p.symbol_a, p.symbol_b]))
+  , [pairs]);
+
+  if (!comparisonSeries?.length || !symbols?.length) return null;
+
+  const toggle = s => setVisible(prev => {
+    const n = new Set(prev); n.has(s) ? n.delete(s) : n.add(s); return n;
+  });
+
+  return (
+    <Card>
+      {/* Header row */}
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",
+        marginBottom:10,flexWrap:"wrap",gap:6}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <TrendingUp size={13} style={{color:C.sky}}/>
+          <span style={mono(9,C.sky,700)}>PRICE COMPARISON</span>
+          <span style={mono(8,C.mut)}>normalized to 100 at period start</span>
+        </div>
+        <div style={{display:"flex",gap:4}}>
+          {["3M","6M","1Y","2Y"].map(r=>(
+            <button key={r} onClick={()=>setRange(r)}
+              style={{padding:"3px 9px",borderRadius:5,cursor:"pointer",
+                border:`1px solid ${r===range?C.sky:C.bdr}`,
+                background:r===range?C.sky+"22":"transparent",
+                color:r===range?C.sky:C.mut,
+                ...mono(9,undefined,r===range?700:400)}}>
+              {r}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Symbol toggle chips — bold for pair members */}
+      <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:10}}>
+        {(symbols||[]).map((s,i)=>{
+          const on  = visible.has(s);
+          const col = TICKER_COLORS[i % TICKER_COLORS.length];
+          const ret = symReturns[s];
+          const isPair = pairMembers.has(s);
+          return (
+            <button key={s} onClick={()=>toggle(s)}
+              style={{display:"flex",alignItems:"center",gap:5,padding:"4px 10px",
+                borderRadius:16,cursor:"pointer",transition:"all 0.15s",
+                border:`1px solid ${on?col+"66":C.bdr+"44"}`,
+                background:on?col+"18":"transparent"}}>
+              <span style={{width:8,height:8,borderRadius:"50%",flexShrink:0,
+                background:on?col:C.mut+"44",display:"inline-block"}}/>
+              <span style={mono(9,on?col:C.mut,isPair?700:400)}>{s}</span>
+              {ret!=null&&on&&(
+                <span style={mono(8,parseFloat(ret)>=0?C.grn:C.red,600)}>
+                  {parseFloat(ret)>=0?"+":""}{ret}%
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Chart — ChartPanel gives the expand-to-fullscreen button */}
+      <ChartPanel title="Price Comparison" defaultHeight={290}>
+        {(h)=>(
+          <ResponsiveContainer width="100%" height={h}>
+            <ComposedChart data={chartData} margin={{top:4,right:14,bottom:4,left:44}}>
+              <defs>
+                {(symbols||[]).map((s,i)=>{
+                  const safeId = s.replace(/[^a-zA-Z0-9]/g,"_");
+                  const col = TICKER_COLORS[i % TICKER_COLORS.length];
+                  return (
+                    <linearGradient key={s} id={`pcmp_${safeId}`} x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%"  stopColor={col} stopOpacity={0.22}/>
+                      <stop offset="95%" stopColor={col} stopOpacity={0}/>
+                    </linearGradient>
+                  );
+                })}
+              </defs>
+              <CartesianGrid stroke={C.bdr} strokeDasharray="3 3"/>
+              <XAxis dataKey="date" tick={{fill:C.mut,fontSize:8}} tickLine={false}
+                tickFormatter={v=>v?.slice(5,10)||""}/>
+              <YAxis tick={{fill:C.mut,fontSize:8}} tickLine={false} axisLine={false}
+                tickFormatter={v=>v?.toFixed(0)}
+                label={{value:"Indexed (100)",angle:-90,position:"insideLeft",offset:20,
+                  style:{fontFamily:"monospace",fontSize:8,fill:C.mut,textAnchor:"middle"}}}/>
+              <ReferenceLine y={100} stroke={C.bdr} strokeDasharray="4 2" strokeOpacity={0.8}/>
+              <Tooltip
+                contentStyle={{background:C.surf,border:`1px solid ${C.bdr}`,
+                  ...mono(9),padding:"8px 14px",borderRadius:8}}
+                labelStyle={{color:C.mut,marginBottom:6,fontFamily:"monospace",fontSize:9}}
+                formatter={(v,name)=>{
+                  const idx=(symbols||[]).indexOf(name);
+                  if (idx<0||v==null) return [v,name];
+                  const ret=(v-100).toFixed(1);
+                  const col=TICKER_COLORS[idx%TICKER_COLORS.length];
+                  return [
+                    <span style={{color:col}}>{v.toFixed(1)} ({parseFloat(ret)>=0?"+":""}{ret}%)</span>,
+                    <span style={{color:col,fontWeight:pairMembers.has(name)?700:400}}>{name}</span>
+                  ];
+                }}
+              />
+              {(symbols||[]).flatMap((s,i)=>{
+                if (!visible.has(s)) return [];
+                const col    = TICKER_COLORS[i % TICKER_COLORS.length];
+                const safeId = s.replace(/[^a-zA-Z0-9]/g,"_");
+                return [
+                  <Area key={s} type="monotone" dataKey={s}
+                    fill={`url(#pcmp_${safeId})`} stroke={col}
+                    strokeWidth={pairMembers.has(s)?2.2:1.5}
+                    fillOpacity={1} dot={false} connectNulls/>
+                ];
+              })}
+            </ComposedChart>
+          </ResponsiveContainer>
+        )}
+      </ChartPanel>
+    </Card>
+  );
+}
+
 function PairsView() {
   const C = useC();
   const [symbols,  setSymbols]  = useState("SPY,QQQ,IWM,GLD,TLT,XLF,XLK,XLE");
@@ -6738,6 +6886,13 @@ function PairsView() {
         <div style={mono(10,C.mut)}>
           Screened {pairs.symbols_screened} symbols · {pairs.pairs?.length||0} cointegrated pair{pairs.pairs?.length===1?"":"s"} found
         </div>
+
+        {/* Price comparison chart — always shown when data is available */}
+        <PairsCompareChart
+          comparisonSeries={pairs.comparison_series}
+          symbols={pairs.comparison_symbols}
+          pairs={pairs.pairs}
+        />
 
         {(pairs.pairs?.length||0)===0 && (
           <Card><div style={mono(11,C.mut)}>No cointegrated pairs found. Try lowering min correlation or adding more symbols.</div></Card>

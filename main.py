@@ -2725,7 +2725,26 @@ def pairs_screen(req: PairsScreenRequest):
         screener.engine.z_exit  = req.z_exit
         pairs = screener.find_best_pairs(price_dict, timestamps,
                                          min_correlation=req.min_correlation)
-        return _sanitize({"pairs": pairs, "symbols_screened": len(price_dict)})
+
+        # Build comparison series — raw closing prices so frontend can re-index
+        # to 100 at any chosen period start (3M / 6M / 1Y / 2Y range).
+        _min_len  = min(len(v) for v in price_dict.values()) if price_dict else 0
+        _MAX_COMP = 504                            # up to 2 years of trading days
+        _start_i  = max(0, _min_len - _MAX_COMP)
+        comparison_series: list[dict] = []
+        for _i in range(_start_i, _min_len):
+            _row: dict = {"date": timestamps[_i]}
+            for _sym in price_dict:
+                _raw = price_dict[_sym][_i]
+                _row[_sym] = round(float(_raw), 4) if _raw is not None else None
+            comparison_series.append(_row)
+
+        return _sanitize({
+            "pairs":              pairs,
+            "symbols_screened":   len(price_dict),
+            "comparison_series":  comparison_series,
+            "comparison_symbols": list(price_dict.keys()),
+        })
     except Exception as e:
         logger.exception("Pairs screen failed")
         raise HTTPException(status_code=500, detail=str(e))
