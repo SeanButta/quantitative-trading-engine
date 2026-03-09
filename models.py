@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Column, String, DateTime, JSON, Text, ForeignKey
+from sqlalchemy import Column, String, DateTime, JSON, Text, Integer, ForeignKey
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -62,3 +62,41 @@ class Run(Base):
     completed_at = Column(DateTime, nullable=True)
 
     project = relationship("Project", back_populates="runs")
+
+
+class OptionsRefreshJob(Base):
+    __tablename__ = "options_refresh_jobs"
+
+    id              = Column(String, primary_key=True)
+    status          = Column(String, default="running")   # running / complete / failed
+    symbols_total   = Column(Integer, default=0)
+    symbols_done    = Column(Integer, default=0)
+    symbols_failed  = Column(JSON, default=dict)          # {symbol: error_message}
+    risk_free_rate  = Column(JSON, default=0.05)
+    started_at      = Column(DateTime, default=datetime.utcnow)
+    completed_at    = Column(DateTime, nullable=True)
+
+
+class SignalReadingJob(Base):
+    __tablename__ = "signal_reading_jobs"
+
+    id           = Column(String, primary_key=True)
+    project_id   = Column(String, ForeignKey("projects.id"), nullable=False)
+    symbol       = Column(String, nullable=False)
+    status       = Column(String, default="pending")  # pending / running / complete / failed
+    results      = Column(JSON, nullable=True)         # full readings + consensus dict
+    error        = Column(Text, nullable=True)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+
+class PortfolioAnalysisJob(Base):
+    __tablename__ = "portfolio_analysis_jobs"
+
+    id           = Column(String, primary_key=True)
+    status       = Column(String, default="pending")   # pending / running / complete / failed
+    holdings     = Column(JSON, nullable=False)         # [{ticker, weight, shares, price}]
+    results      = Column(JSON, nullable=True)          # full analytics dict
+    error        = Column(Text, nullable=True)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
