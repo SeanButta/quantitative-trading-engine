@@ -3408,6 +3408,22 @@ const OPTION_STRATEGIES = {
   },
 };
 
+// ── Strategy sweet-spot guidance ─────────────────────────
+const STRAT_FOCUS = {
+  coveredCall:    { filt:"otm", label:"OTM calls",       range:"Δ 0.20–0.40 · IV ≥ 15%"              },
+  cashSecuredPut: { filt:"otm", label:"OTM puts",        range:"Δ 0.20–0.40 · IV ≥ 15%"              },
+  longStraddle:   { filt:"atm", label:"ATM contracts",   range:"Δ 0.40–0.60 · lowest IV"              },
+  ironCondor:     { filt:"otm", label:"OTM legs",        range:"Short leg Δ 0.15–0.25 · wing 0.05–0.12" },
+  bullCallSpread: { filt:"atm", label:"ATM→OTM calls",   range:"Long leg Δ 0.45–0.60 · sell leg 0.20–0.35" },
+  bearPutSpread:  { filt:"atm", label:"ATM→OTM puts",    range:"Long leg Δ 0.45–0.60 · sell leg 0.20–0.35" },
+  gammaScalping:  { filt:"atm", label:"ATM high-Γ",      range:"Δ 0.40–0.60 · Γ > 0.01"              },
+  vegaHarvesting: { filt:"all", label:"High-IV",         range:"IV ≥ 40% · Δ 0.15–0.50"              },
+  thetaDecay:     { filt:"otm", label:"OTM contracts",   range:"Θ/price ≥ 1.5%/day"                  },
+  deltaHedging:   { filt:"atm", label:"ATM liquid",      range:"Δ 0.44–0.56 · OI ≥ 500"              },
+  riskReversal:   { filt:"otm", label:"OTM both sides",  range:"Δ 0.20–0.35 calls + puts"            },
+  skewArb:        { filt:"otm", label:"OTM wings",       range:"Δ < 0.20 · IV ≥ 45%"                },
+};
+
 function GreekCell({val, greek}) {
   const C = useC();
   if (val == null || isNaN(val)) return <span style={mono(9,C.mut)}>—</span>;
@@ -4069,10 +4085,28 @@ function OptionsView() {
           <div style={{...mono(9,C.mut),marginBottom:12,padding:"8px 12px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`,lineHeight:1.6}}>
             <span style={{color:C.txt,fontWeight:700}}>{OPTION_STRATEGIES[activeStrategy].label}  </span>
             {OPTION_STRATEGIES[activeStrategy].desc}
-            <div style={{display:"flex",gap:16,marginTop:8}}>
-              {[["attractive","#00e676","● Attractive"],["neutral","#ffb300","● Median"],["unattractive","#ff5252","● Unattractive"]].map(([k,col,lbl])=>(
-                <span key={k} style={{...mono(9,col,700)}}>{lbl}</span>
-              ))}
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",flexWrap:"wrap",gap:8,marginTop:8}}>
+              <div style={{display:"flex",gap:16}}>
+                {[["attractive","#00e676","● Attractive"],["neutral","#ffb300","● Median"],["unattractive","#ff5252","● Unattractive"]].map(([k,col,lbl])=>(
+                  <span key={k} style={{...mono(9,col,700)}}>{lbl}</span>
+                ))}
+              </div>
+              {STRAT_FOCUS[activeStrategy] && (
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <span style={mono(8,C.mut)}>
+                    Sweet spot: <span style={{color:C.sky}}>{STRAT_FOCUS[activeStrategy].range}</span>
+                  </span>
+                  <button onClick={()=>{
+                    const f = STRAT_FOCUS[activeStrategy];
+                    if(f) { setStrikeFilt(f.filt); setStrikeWindow(0); }
+                  }}
+                    style={{...mono(8,C.sky,700),padding:"2px 9px",borderRadius:12,
+                      border:`1px solid ${C.sky}50`,background:C.sky+"12",cursor:"pointer",
+                      whiteSpace:"nowrap"}}>
+                    → Show {STRAT_FOCUS[activeStrategy].label}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -4171,11 +4205,43 @@ function OptionsView() {
             )}
           </div>
         )}
-        {activeStrategy && !topOpps.length && visibleChain.length > 0 && (
-          <div style={{...mono(9,C.mut),marginTop:14,paddingTop:12,borderTop:`1px solid ${C.bdr}`,textAlign:"center",color:C.mut}}>
-            No "attractive" contracts for this strategy in the current expiration — try a different date or strategy.
-          </div>
-        )}
+        {activeStrategy && !topOpps.length && visibleChain.length > 0 && (() => {
+          const focus = STRAT_FOCUS[activeStrategy];
+          const strat = OPTION_STRATEGIES[activeStrategy];
+          // Count how many contracts in the FULL visible chain would be attractive
+          // (ignoring strike filter) to distinguish "wrong filter" vs "genuinely none"
+          const fullAttractive = visibleChain.filter(r=>strat.score(r)==="attractive").length;
+          return (
+            <div style={{marginTop:14,paddingTop:12,borderTop:`1px solid ${C.bdr}`,
+              padding:"12px 14px",borderRadius:8,background:C.amb+"08",border:`1px solid ${C.amb}30`}}>
+              <div style={{display:"flex",alignItems:"flex-start",gap:10,flexWrap:"wrap"}}>
+                <div style={{flex:1}}>
+                  <div style={mono(9,C.amb,700)}>No attractive contracts visible for {strat.label}</div>
+                  {fullAttractive > 0 ? (
+                    <div style={{...mono(8,C.mut),marginTop:4,lineHeight:1.6}}>
+                      ✓ {fullAttractive} attractive contract{fullAttractive>1?"s":""} exist in this expiration but are hidden by the current strike filter.
+                      {focus && <> Sweet spot: <span style={{color:C.sky}}>{focus.range}</span>.</>}
+                    </div>
+                  ) : (
+                    <div style={{...mono(8,C.mut),marginTop:4,lineHeight:1.6}}>
+                      {focus
+                        ? <>Sweet spot for this strategy is <span style={{color:C.sky}}>{focus.range}</span> — all currently visible strikes fall outside this range. Try a different expiration or use the filter below.</>
+                        : "Try a different expiration or adjust the strike filter."}
+                    </div>
+                  )}
+                </div>
+                {focus && (
+                  <button onClick={()=>{ setStrikeFilt(focus.filt); setStrikeWindow(0); }}
+                    style={{...mono(9,C.sky,700),padding:"5px 12px",borderRadius:8,
+                      border:`1px solid ${C.sky}50`,background:C.sky+"12",cursor:"pointer",
+                      flexShrink:0,whiteSpace:"nowrap"}}>
+                    → Show {focus.label}
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })()}
       </Card>
 
       {/* Expirations */}
