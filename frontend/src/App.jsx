@@ -593,9 +593,9 @@ function OverviewView({onNav, onDetail}) {
         {/* ── Quick Nav ── */}
         <SectionSep label="Actions"/>
         <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"repeat(3,1fr)",gap:10}}>
-          {[{l:"Options Monitor",v:"options",I:Activity,c:C.grn},
-            {l:"Run Backtest",v:"lab",I:FlaskConical,c:C.sky},
-            {l:"Optimize Portfolio",v:"portfolio",I:Target,c:C.amb}].map(({l,v,I,c})=>(
+          {[{l:"Sectors",v:"sectors",I:Layers,c:C.grn},
+            {l:"Technical",v:"technical",I:TrendingUp,c:C.sky},
+            {l:"Options",v:"options",I:Activity,c:C.amb}].map(({l,v,I,c})=>(
             <button key={v} onClick={()=>onNav(v)}
               style={{display:"flex",alignItems:"center",justifyContent:"space-between",
                 padding:"13px 16px",borderRadius:12,border:`1px solid ${c}30`,
