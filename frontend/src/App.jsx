@@ -1080,7 +1080,10 @@ function SigPulseCard({meta, reading, selected, onClick}) {
   return (
     <div onClick={onClick}
       onMouseEnter={()=>setHov(true)} onMouseLeave={()=>setHov(false)}
-      style={{background: C.surf, border:`1px solid ${selected ? meta.col : hov ? C.txt+"28" : C.bdr}`,
+      style={{background: C.surf,
+        borderTop:`1px solid ${selected ? meta.col : hov ? C.txt+"28" : C.bdr}`,
+        borderRight:`1px solid ${selected ? meta.col : hov ? C.txt+"28" : C.bdr}`,
+        borderBottom:`1px solid ${selected ? meta.col : hov ? C.txt+"28" : C.bdr}`,
         borderLeft:`3px solid ${selected ? meta.col : vc}`,
         borderRadius:10, padding:"12px 14px", cursor:"pointer",
         transition:"border-color .15s", boxSizing:"border-box"}}>
