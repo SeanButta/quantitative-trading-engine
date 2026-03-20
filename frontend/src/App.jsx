@@ -306,10 +306,13 @@ function OverviewView({onNav, onDetail}) {
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           {mkt?.as_of && <Tag color={C.mut}>Updated {mkt.as_of.slice(11,16)} UTC</Tag>}
-          <button onClick={()=>doFetch(true)}
-            style={{display:"flex",alignItems:"center",gap:5,...mono(9,C.mut),padding:"5px 12px",
-              borderRadius:8,border:`1px solid ${C.bdr}`,background:"transparent",cursor:"pointer"}}>
-            <RefreshCw size={11}/> Refresh
+          <button onClick={()=>doFetch(true)} disabled={mktLoading}
+            style={{display:"flex",alignItems:"center",gap:5,...mono(9,mktLoading?C.grn:C.mut),
+              padding:"5px 12px",borderRadius:8,border:`1px solid ${mktLoading?C.grn+"55":C.bdr}`,
+              background:mktLoading?C.grnBg:"transparent",cursor:mktLoading?"not-allowed":"pointer",
+              transition:"all .2s"}}>
+            <RefreshCw size={11} style={{animation:mktLoading?"spin 0.8s linear infinite":undefined}}/>
+            {mktLoading ? "Fetching…" : "Refresh"}
           </button>
         </div>
       </div>
@@ -2171,10 +2174,12 @@ function FeedsView() {
             style={{padding:"7px 12px",borderRadius:8,border:`1.5px solid ${C.grn}55`,
               background:C.surf,color:C.headingTxt,...mono(12),outline:"none",
               width:200,boxSizing:"border-box"}}/>
-          <button onClick={searchSymbol}
+          <button onClick={searchSymbol} disabled={loading}
             style={{padding:"7px 14px",borderRadius:8,background:loading?C.dim:C.grn,
-              color:"#000",...mono(11,"#000",700),border:"none",cursor:"pointer"}}>
-            Search
+              color:loading?C.mut:"#000",...mono(11,loading?C.mut:"#000",700),
+              border:"none",cursor:loading?"not-allowed":"pointer",
+              opacity:loading?0.7:1,transition:"all .15s",minWidth:80}}>
+            {loading ? "Searching…" : "Search"}
           </button>
           <button onClick={()=>{ setInput(""); setSymMode(false); loadFeeds(activeCategory); }}
             title="Show all feeds"
@@ -6798,9 +6803,12 @@ function TechnicalView() {
               padding:"4px 10px",cursor:"pointer",display:"flex",alignItems:"center",gap:5,fontWeight:700}}>
               ⚡ God Mode
             </button>
-            <button onClick={load} style={{fontFamily:"monospace",fontSize:12,color:"#787b86",
-              background:"transparent",border:"1px solid #2a2e39",borderRadius:6,
-              padding:"4px 9px",cursor:"pointer"}} title="Refresh">↺</button>
+            <button onClick={load} disabled={loading} style={{fontFamily:"monospace",fontSize:12,
+              color:loading?"#555":"#787b86",background:"transparent",border:"1px solid #2a2e39",
+              borderRadius:6,padding:"4px 9px",cursor:loading?"not-allowed":"pointer",
+              opacity:loading?0.6:1,transition:"opacity .15s"}} title="Refresh">
+              {loading ? "…" : "↺"}
+            </button>
           </div>
         </div>
 
@@ -6851,9 +6859,13 @@ function TechnicalView() {
                 </div>
               ))}
             </div>
-            <button onClick={load} style={{fontFamily:"monospace",fontSize:10,color:TV_G,
-              background:"#26a69a15",border:"1px solid #26a69a40",borderRadius:6,
-              padding:"6px 16px",cursor:"pointer",marginTop:10}}>Apply & Reload</button>
+            <button onClick={load} disabled={loading} style={{fontFamily:"monospace",fontSize:10,
+              color:loading?"#555":TV_G,background:loading?"#1a1a1a":"#26a69a15",
+              border:`1px solid ${loading?"#333":"#26a69a40"}`,borderRadius:6,
+              padding:"6px 16px",cursor:loading?"not-allowed":"pointer",marginTop:10,
+              opacity:loading?0.7:1,transition:"all .15s"}}>
+              {loading ? "Loading…" : "Apply & Reload"}
+            </button>
           </div>
         )}
 
@@ -7704,11 +7716,15 @@ function MacroView() {
                 style={{fontFamily:"monospace",fontSize:10,color:C.txt,background:C.dim,
                   border:`1px solid ${C.bdr}`,borderRadius:14,padding:"3px 10px",width:110,outline:"none"}}/>
               <button onClick={()=>{ const v=tickerInput.trim().toUpperCase(); if(v){loadTicker(v);setTickerInput("");} }}
-                style={{fontFamily:"monospace",fontSize:11,fontWeight:700,color:C.grn,
-                  background:"none",border:`1px solid ${C.grn}44`,borderRadius:10,
-                  padding:"2px 8px",cursor:"pointer",lineHeight:1}}>↵</button>
+                disabled={loading}
+                style={{fontFamily:"monospace",fontSize:11,fontWeight:700,
+                  color:loading?C.mut:C.grn,background:"none",
+                  border:`1px solid ${loading?C.bdr:C.grn+"44"}`,borderRadius:10,
+                  padding:"2px 8px",cursor:loading?"not-allowed":"pointer",
+                  lineHeight:1,opacity:loading?0.6:1,transition:"all .15s"}}>
+                {loading ? "…" : "↵"}
+              </button>
             </div>
-            {loading && <span style={{fontFamily:"monospace",fontSize:9,color:C.mut}}>Loading…</span>}
             {tickerError && <span style={{fontFamily:"monospace",fontSize:9,color:C.red}}>{tickerError}</span>}
           </div>
 
