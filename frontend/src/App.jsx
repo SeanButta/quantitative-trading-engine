@@ -10,7 +10,7 @@ import {
   FlaskConical, Sun, Moon, Activity, Briefcase, TrendingUp, Settings,
   Database, Search, ChevronDown, ChevronUp, Plus, X, BookOpen,
   TrendingDown, AlertCircle, Eye, Maximize2, Minimize2,
-  Compass, Shuffle, Network, Layers, Shield, Cpu, Newspaper, Lock, Unlock
+  Compass, Shuffle, Network, Layers, Shield, Cpu, Newspaper, Lock, Unlock, Menu
 } from "lucide-react";
 
 // ── Theme tokens ────────────────────────────────────────
@@ -335,7 +335,7 @@ function OverviewView({onNav, onDetail}) {
             TIER 1 — VOLATILITY & REGIME
         ══════════════════════════════════════════════════════════════ */}
         <SectionSep label="Volatility & Regime"/>
-        <div style={{display:"grid",gridTemplateColumns:"1.1fr 1fr 1fr",gap:12}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"1.1fr 1fr 1fr",gap:12}}>
 
           {/* VIX card */}
           <div onClick={()=>onDetail?.("^VIX")}
@@ -445,7 +445,7 @@ function OverviewView({onNav, onDetail}) {
             TIER 2 — EQUITY INDICES
         ══════════════════════════════════════════════════════════════ */}
         <SectionSep label="Equity Indices"/>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:10}}>
           {mkt.indices.map(idx => {
             const names = {SPY:"S&P 500", QQQ:"Nasdaq 100", IWM:"Russell 2000", DIA:"Dow Jones"};
             return <MacroTile key={idx.symbol} sym={idx.symbol} name={names[idx.symbol]||idx.symbol}
@@ -457,7 +457,7 @@ function OverviewView({onNav, onDetail}) {
             TIER 3 — FIXED INCOME & CREDIT
         ══════════════════════════════════════════════════════════════ */}
         <SectionSep label="Fixed Income & Credit"/>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:10}}>
 
           {/* 10Y Treasury */}
           {[{sym:"^TNX",label:"10Y Treasury Yield",col:C.sky, val:fi.ten_year?.value,
@@ -507,7 +507,7 @@ function OverviewView({onNav, onDetail}) {
         ══════════════════════════════════════════════════════════════ */}
         <SectionSep label="Cross-Asset"/>
         {ca.length > 0 ? (
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+          <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:10}}>
             {ca.map(a => <MacroTile key={a.symbol} sym={a.symbol} name={a.name} price={a.price} chg={a.change_pct}
             onClick={()=>onDetail?.(a.symbol)}/>)}
           </div>
@@ -516,7 +516,7 @@ function OverviewView({onNav, onDetail}) {
         )}
 
         {/* Cross-asset signal legend */}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:8}}>
           {[
             ["GLD","Gold ↑ = flight-to-safety / inflation hedge",C.amb],
             ["USO","Oil ↑ = inflationary pressure / global demand",C.red],
@@ -592,7 +592,7 @@ function OverviewView({onNav, onDetail}) {
 
         {/* ── Quick Nav ── */}
         <SectionSep label="Actions"/>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"repeat(3,1fr)",gap:10}}>
           {[{l:"Options Monitor",v:"options",I:Activity,c:C.grn},
             {l:"Run Backtest",v:"lab",I:FlaskConical,c:C.sky},
             {l:"Optimize Portfolio",v:"portfolio",I:Target,c:C.amb}].map(({l,v,I,c})=>(
@@ -612,7 +612,7 @@ function OverviewView({onNav, onDetail}) {
       {/* ── Engine Status (always visible) ── */}
       <SectionSep label="Engine Status"/>
       <Card>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:8}}>
           {[["Data Layer","3 / 3",C.grn],["Signal Engine","5 active",C.grn],
             ["Options Feed","Live",C.grn],["Statistical Val","49 / 49",C.grn]].map(([k,v,c])=>(
             <div key={k} style={{padding:"10px 12px",borderRadius:10,background:c+"08",border:`1px solid ${c}22`}}>
@@ -784,7 +784,7 @@ function BacktestView() {
       <div><Lbl>Backtest Engine</Lbl><div style={mono(11,C.mut)}>Signal at t → Trade at open of t+1 · No lookahead bias guaranteed</div></div>
 
       <Card>
-        <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr",gap:12,marginBottom:14}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"2fr 1fr 1fr",gap:12,marginBottom:14}}>
           <div>
             <Lbl>Symbols (comma-separated)</Lbl>
             <input value={symbols} onChange={e=>setSymbols(e.target.value)} placeholder="SPY,QQQ,AAPL,MSFT"
@@ -805,7 +805,7 @@ function BacktestView() {
         <Lbl>Signals</Lbl>
         <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>{ALL.map(s=><Pill key={s} label={s} active={sigs.includes(s)} onClick={()=>toggle(s)}/>)}</div>
 
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:14}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"1fr 1fr 1fr",gap:12,marginBottom:14}}>
           {[["Fee (bps)",fee,setFee],["Slippage (bps)",slippage,setSlippage],["Risk-Free Rate %",rfr,setRfr]].map(([l,val,set])=>(
             <div key={l}><Lbl>{l}</Lbl>
               <input value={val} onChange={e=>set(e.target.value)}
@@ -843,7 +843,7 @@ function BacktestView() {
       {ran && (<>
         <ValBanner label={v.label||"likely_noise"}/>
 
-        <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:12}}>
           {[
             {l:"CAGR",         v:fmt.pct(m.cagr),            c:C.grn},
             {l:"Sharpe",       v:fmt.n4(m.sharpe_ratio),      c:C.grn, tip:TIPS.sharpe},
@@ -910,7 +910,7 @@ function BacktestView() {
 
         <Card>
           <Lbl>Statistical Validation</Lbl>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginTop:6}}>
+          <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:12,marginTop:6}}>
             {[
               ["t-stat",     v.t_stat?.toFixed(4)||"—",              C.sky,  TIPS.tstat],
               ["Raw p",      v.p_value_raw?.toFixed(4)||"—",         C.txt,  null],
@@ -935,7 +935,7 @@ function BacktestView() {
 
         <Card>
           <Lbl>Alpha Regression — Newey-West HAC</Lbl>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginTop:6}}>
+          <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:12,marginTop:6}}>
             {[
               ["Alpha (ann.)", m.alpha_annualized!=null?`${(m.alpha_annualized*100).toFixed(2)}%`:"—", C.grn],
               ["t-statistic",  m.alpha_t_stat?.toFixed(4)||"—",  C.sky],
@@ -2322,7 +2322,7 @@ function OptimizeView() {
 
       {/* Config card */}
       <Card>
-        <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:12,marginBottom:14}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"2fr 1fr",gap:12,marginBottom:14}}>
           <div>
             <Lbl>Assets (comma-separated)</Lbl>
             <input value={tickers} onChange={e=>setTickers(e.target.value)} placeholder="SPY,QQQ,IWM,TLT,GLD"
@@ -2393,13 +2393,13 @@ function OptimizeView() {
       })()}
 
       {/* Stats */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+      <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"repeat(3,1fr)",gap:12}}>
         <Stat label="Expected Return (ann.)" value={live&&result.portfolio_return!=null?`${(result.portfolio_return*100).toFixed(2)}%`:"—"} color={C.grn} sub={live?"Black-Litterman posterior":"run optimizer"}/>
         <Stat label="Portfolio Volatility"   value={live&&result.portfolio_vol!=null?`${(result.portfolio_vol*100).toFixed(2)}%`:"—"}    color={C.amb} sub={live?"annualised":"run optimizer"}/>
         <Stat label="Sharpe Ratio"           value={live&&result.portfolio_sharpe!=null?result.portfolio_sharpe.toFixed(3):"—"}            color={C.sky} sub={live?"risk-free adj.":"run optimizer"}/>
       </div>
 
-      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
+      <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"1fr 1fr",gap:16}}>
         {/* Weights bar chart */}
         <Card>
           <Lbl>{live?"Black-Litterman Optimal Weights":"Sample — Min Variance"}</Lbl>
@@ -2474,7 +2474,7 @@ function OptimizeView() {
       {/* Covariance estimators */}
       <Card>
         <Lbl>Covariance Estimators</Lbl>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginTop:8}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"1fr 1fr 1fr",gap:12,marginTop:8}}>
           {[
             {m:"Sample Cov",     d:"np.cov(R.T) — unbiased but noisy when p ≈ T",     a:true},
             {m:"Ledoit-Wolf",    d:"Shrinkage toward identity — reduces estimation error", a:false},
@@ -2662,7 +2662,7 @@ function StochasticView() {
       {tab==="gbm"&&(<>
         <Card>
           <Lbl>Parameters</Lbl>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:10,marginTop:8,marginBottom:14}}>
+          <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(3,1fr)":"repeat(5,1fr)",gap:10,marginTop:8,marginBottom:14}}>
             {[["μ drift",gbmMu,setGbmMu,"0.08"],["σ vol",gbmSigma,setGbmSigma,"0.20"],
               ["S₀ spot",gbmS0,setGbmS0,"100"],["T years",gbmT,setGbmT,"1"],["Paths",gbmN,setGbmN,"12"]
             ].map(([l,v,set,ph])=>(
@@ -3313,7 +3313,7 @@ function ReportView() {
         {v.label && (
           <Card>
             <Lbl>Statistical Validation</Lbl>
-            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginTop:8}}>
+            <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:12,marginTop:8}}>
               <KV k="Verdict"           v={<span style={{color:validColor,fontWeight:700}}>{v.label}</span>}/>
               <KV k="t-stat"            v={n4(v.t_stat)}/>
               <KV k="p-value (raw)"     v={n4(v.p_value_raw)}/>
@@ -3342,7 +3342,7 @@ function ReportView() {
         {/* ── Run configuration ── */}
         <Card>
           <Lbl>Run Configuration</Lbl>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginTop:8}}>
+          <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:12,marginTop:8}}>
             <KV k="Run Type"      v={run.run_type}/>
             <KV k="Date Range"    v={dateRange}/>
             <KV k="Symbols"       v={runSymbols}/>
@@ -4227,7 +4227,7 @@ function OptionsAdvancedPanel({ symbol, snapshotKey }) {
       )}
 
       {/* ── Row 2: HV Trend chart + Liquidity ── */}
-      <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:14}}>
+      <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"2fr 1fr",gap:14}}>
 
         {/* HV Trend */}
         {hvTrend.length > 10 ? (
@@ -4316,7 +4316,7 @@ function OptionsAdvancedPanel({ symbol, snapshotKey }) {
           <Lbl>Catalyst Calendar · {symbol}</Lbl>
           <div style={mono(9,C.mut)}>Options move around events — know what's ahead</div>
         </div>
-        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"repeat(3,1fr)",gap:10,marginBottom:14}}>
           {/* Earnings */}
           <div style={{padding:"12px 14px",borderRadius:8,background:C.dim,border:`2px solid ${earnings ? C.amb+"80" : C.bdr}`}}>
             <div style={{...mono(8,C.mut,700),letterSpacing:".12em",marginBottom:6}}>EARNINGS DATE</div>
@@ -6552,7 +6552,7 @@ function TechnicalView() {
               <span style={{fontFamily:"monospace",fontSize:8,color:"#555"}}>Trend · Momentum · Liquidity → Decision Engine</span>
             </div>
             {/* 3 columns */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:0}}>
+            <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"1fr 1fr 1fr",gap:0}}>
               {layers.map((layer,li) => {
                 const d = ms[layer.key];
                 const sc = stateColor(d.state);
@@ -8416,7 +8416,7 @@ function TradeAdvisorView() {
         )}
 
         {/* 3-column analysis grid */}
-        <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"repeat(3,1fr)",gap:10}}>
           {/* ML Signal */}
           <Card>
             <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
@@ -8526,7 +8526,7 @@ function TradeAdvisorView() {
               ? ((opt.max_pain - data.technical.latest_close)/data.technical.latest_close*100).toFixed(1)
               : null;
             return (
-              <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+              <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:8}}>
                 <Stat label="HV 20D"
                   value={opt.hv20!=null?(opt.hv20*100).toFixed(1)+"%":"—"}
                   sub="Realized volatility" color={C.sky}/>
@@ -10546,6 +10546,13 @@ export default function App() {
   const [view,setView]           = useState("markets");
   const [dark,setDark]           = useState(true);
   const [detailSym,setDetailSym] = useState(null);
+  const [navOpen,setNavOpen]     = useState(false);
+  const [isMobile,setIsMobile]   = useState(()=>window.innerWidth < 768);
+  useEffect(()=>{
+    const fn=()=>setIsMobile(window.innerWidth<768);
+    window.addEventListener("resize",fn);
+    return ()=>window.removeEventListener("resize",fn);
+  },[]);
   const C = dark ? DARK : LIGHT;
   const VIEWS={
     markets:   <MarketsView onNav={(v)=>{setDetailSym(null);setView(v);}} onDetail={setDetailSym}/>,
@@ -10560,23 +10567,44 @@ export default function App() {
     lab:       <LabView/>,
   };
   return (
-    <ThemeCtx.Provider value={C}>
-      <div style={{display:"flex",minHeight:"100vh",background:C.bg,fontFamily:"monospace"}}>
-        <aside style={{width:186,flexShrink:0,borderRight:`1px solid ${C.bdr}`,display:"flex",flexDirection:"column",background:C.surf}}>
-          <div style={{padding:"18px 16px 14px",borderBottom:`1px solid ${C.bdr}`}}>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-              <div style={{width:26,height:26,borderRadius:8,background:C.grnBg,border:`1px solid ${C.grn}30`,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                <BarChart2 size={14} style={{color:C.grn}}/>
+    <ThemeCtx.Provider value={{...C, isMobile}}>
+      <div style={{display:"flex",minHeight:"100vh",background:C.bg,fontFamily:"monospace",overflow:"hidden"}}>
+        {/* Mobile overlay backdrop */}
+        {isMobile && navOpen && (
+          <div onClick={()=>setNavOpen(false)}
+            style={{position:"fixed",inset:0,background:"#00000099",zIndex:40}}/>
+        )}
+        {/* Sidebar */}
+        <aside style={{
+          width:186,flexShrink:0,borderRight:`1px solid ${C.bdr}`,
+          display:"flex",flexDirection:"column",background:C.surf,
+          ...(isMobile ? {
+            position:"fixed",top:0,left:0,height:"100vh",zIndex:50,
+            transform:navOpen?"translateX(0)":"translateX(-100%)",
+            transition:"transform .25s ease",
+          } : {})
+        }}>
+          <div style={{padding:"18px 16px 14px",borderBottom:`1px solid ${C.bdr}`,display:"flex",alignItems:"flex-start",justifyContent:"space-between"}}>
+            <div>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
+                <div style={{width:26,height:26,borderRadius:8,background:C.grnBg,border:`1px solid ${C.grn}30`,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                  <BarChart2 size={14} style={{color:C.grn}}/>
+                </div>
+                <span style={mono(11,C.headingTxt,700)}>Picador</span>
               </div>
-              <span style={mono(11,C.headingTxt,700)}>Picador</span>
+              <div style={mono(9,C.mut)}>v1.0.0 · Quantitative Research Platform</div>
             </div>
-            <div style={mono(9,C.mut)}>v1.0.0 · Quantitative Research Platform</div>
+            {isMobile && (
+              <button onClick={()=>setNavOpen(false)} style={{background:"transparent",border:"none",cursor:"pointer",padding:"2px 4px",marginTop:2}}>
+                <X size={16} style={{color:C.mut}}/>
+              </button>
+            )}
           </div>
           <nav style={{flex:1,padding:"10px 8px",overflowY:"auto"}}>
             {NAV.map(({id,l,I})=>{
               const a=view===id;
               return (
-                <button key={id} onClick={()=>{setView(id);setDetailSym(null);}} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"8px 10px",borderRadius:8,marginBottom:2,border:`1px solid ${a?C.grn+"30":"transparent"}`,background:a?C.grnBg:"transparent",cursor:"pointer",transition:"all .15s",...mono(11,a?C.grn:C.mut,a?700:400)}}
+                <button key={id} onClick={()=>{setView(id);setDetailSym(null);if(isMobile)setNavOpen(false);}} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"8px 10px",borderRadius:8,marginBottom:2,border:`1px solid ${a?C.grn+"30":"transparent"}`,background:a?C.grnBg:"transparent",cursor:"pointer",transition:"all .15s",...mono(11,a?C.grn:C.mut,a?700:400)}}
                   onMouseEnter={e=>{if(!a)e.currentTarget.style.color=C.txt;}} onMouseLeave={e=>{if(!a)e.currentTarget.style.color=C.mut;}}>
                   <I size={13} style={{flexShrink:0}}/>{l}
                 </button>
@@ -10599,8 +10627,15 @@ export default function App() {
             <div style={{...mono(8,C.mut),marginTop:8,lineHeight:1.6}}>⚠ Not financial advice.<br/>Markets involve risk.</div>
           </div>
         </aside>
-        <main style={{flex:1,overflowY:"auto",padding:"26px 30px",background:C.bg}}>
-          <div style={{maxWidth:980,margin:"0 auto"}}>
+        <main style={{flex:1,overflowY:"auto",overflowX:"hidden",padding:isMobile?"14px 12px":"26px 30px",background:C.bg}}>
+          {/* Hamburger button — mobile only */}
+          {isMobile && (
+            <button onClick={()=>setNavOpen(true)}
+              style={{position:"fixed",top:10,left:10,zIndex:30,background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:8,padding:"7px 9px",cursor:"pointer",display:"flex",alignItems:"center",gap:6,boxShadow:"0 2px 8px #0006"}}>
+              <Menu size={15} style={{color:C.txt}}/>
+            </button>
+          )}
+          <div style={{maxWidth:980,margin:"0 auto",paddingTop:isMobile?36:0}}>
             {detailSym
               ? <MacroDetailView sym={detailSym} onBack={()=>setDetailSym(null)}/>
               : (VIEWS[view]||VIEWS.markets)}
