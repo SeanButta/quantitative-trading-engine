@@ -2010,8 +2010,8 @@ function DailySummaryTile() {
     <div style={{borderRadius:12,overflow:"hidden",background:C.surf,
       border:`1px solid ${C.bdr}`,borderLeft:`3px solid ${sentColor}`}}>
       {/* Header */}
-      <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 16px",
-        borderBottom:`1px solid ${C.bdr}`,flexWrap:"wrap",gap:8}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,padding:"12px 16px",
+        borderBottom:`1px solid ${C.bdr}`,flexWrap:"wrap"}}>
         <div style={mono(8,C.mut,700,{letterSpacing:1})}>DAILY MARKET SUMMARY</div>
         <div style={{padding:"2px 9px",borderRadius:20,background:sentColor+"20",
           border:`1px solid ${sentColor}40`,...mono(8,sentColor,700)}}>
