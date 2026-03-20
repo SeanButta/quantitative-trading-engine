@@ -9381,7 +9381,10 @@ function SectorsView() {
       .then(d=>{setSummaries(d);setLoadingOv(false);})
       .catch(e=>{setErr(String(e));setLoadingOv(false);});
   };
-  useEffect(()=>{fetchSummaries();},[]);
+  useEffect(()=>{
+    fetchSummaries();
+    if (C.isMobile) triggerRefresh();
+  },[]);
 
   useEffect(()=>{
     if (!jobId) return;
@@ -10068,9 +10071,15 @@ function SectorsView() {
             title="Refresh S&P 500 constituent list from Wikipedia">
             <Globe size={11}/> Update Universe
           </button>
-          <button onClick={()=>triggerRefresh()}
-            style={{...mono(9,C.mut),background:"transparent",border:`1px solid ${C.bdr}`,borderRadius:7,padding:"5px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:5}}>
-            <RefreshCw size={11}/> Refresh All
+          <button onClick={()=>triggerRefresh()} disabled={job?.status==="running"}
+            style={{...mono(9,job?.status==="running"?C.sky:C.mut),
+              background:job?.status==="running"?C.sky+"12":"transparent",
+              border:`1px solid ${job?.status==="running"?C.sky+"44":C.bdr}`,
+              borderRadius:7,padding:"5px 12px",
+              cursor:job?.status==="running"?"not-allowed":"pointer",
+              display:"flex",alignItems:"center",gap:5,transition:"all .2s"}}>
+            <RefreshCw size={11} style={{animation:job?.status==="running"?"spin 1s linear infinite":undefined}}/>
+            {job?.status==="running" ? "Refreshing…" : "Refresh All"}
           </button>
         </div>
       </div>
@@ -10094,7 +10103,12 @@ function SectorsView() {
                 onMouseLeave={e=>{e.currentTarget.style.background=C.surf;e.currentTarget.style.borderLeftColor=col;}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
                   <span style={mono(12,col,700)}>{s.sector}</span>
-                  <Tag color={col}>{s.etf}</Tag>
+                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                    {job?.status==="running" && (
+                      <RefreshCw size={11} style={{color:col,animation:"spin 1s linear infinite",opacity:0.8}}/>
+                    )}
+                    <Tag color={col}>{s.etf}</Tag>
+                  </div>
                 </div>
                 {!s.cached?(
                   <div style={{...mono(10,C.mut),padding:"12px 0",textAlign:"center",borderTop:`1px solid ${C.bdr}`}}>
