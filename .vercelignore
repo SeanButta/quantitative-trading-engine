@@ -1,0 +1,9 @@
+*.py
+requirements.txt
+__pycache__/
+*.db
+runs/
+*.sh
+*.jsx
+start_backend.sh
+start.sh
