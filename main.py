@@ -27,7 +27,7 @@ _ROOT = str(Path(__file__).parent)
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from models import Base, Project, Strategy, Run, OptionsRefreshJob, SignalReadingJob, PortfolioAnalysisJob, DailySummary
+from models import Base, Project, Strategy, Run, OptionsRefreshJob, SignalReadingJob, PortfolioAnalysisJob, DailySummary, SectorRefreshJob
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -66,6 +66,9 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 OPTIONS_DIR = Path(os.getenv("OPTIONS_DIR", str(Path(__file__).parent / "runs" / "options")))
 OPTIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+SECTORS_DIR = Path(os.getenv("SECTORS_DIR", str(Path(__file__).parent / "runs" / "sectors")))
+SECTORS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Default universe
 DEFAULT_SYMBOLS = ["SPY", "QQQ", "IWM", "TLT", "GLD"]
@@ -856,6 +859,77 @@ def options_analytics(symbol: str, expiration: Optional[str] = None):
 
     analytics = compute_analytics(symbol.upper(), df, df_prev, spot, price_history)
     return _sanitize(analytics)
+
+
+@app.get("/options/{symbol}/advanced")
+def options_advanced(symbol: str):
+    """Term structure, 25Δ skew, rolling HV trend, liquidity stats, and earnings catalyst."""
+    import yfinance as yf
+    import polars as pl
+    from options_feed import OptionsStore, compute_term_structure, compute_hv_trend
+
+    store   = OptionsStore(OPTIONS_DIR)
+    df_full = store.load(symbol.upper())
+    if df_full.is_empty():
+        raise HTTPException(status_code=404, detail=f"No options data for {symbol}. Fetch first.")
+
+    spot_col = df_full["spot"].drop_nulls().to_list()
+    spot     = float(spot_col[0]) if spot_col else 0.0
+
+    price_history: list[dict] = []
+    earnings_date: str | None = None
+    try:
+        ticker = yf.Ticker(symbol.upper())
+        hist   = ticker.history(period="1y")
+        if not hist.empty:
+            price_history = [
+                {"close": float(row["Close"]), "date": str(idx.date())}
+                for idx, row in hist.iterrows()
+            ]
+        try:
+            cal = ticker.calendar
+            if cal is not None:
+                if hasattr(cal, "columns") and "Earnings Date" in cal.columns:
+                    dates = cal["Earnings Date"].dropna().tolist()
+                    if dates:
+                        d = dates[0]
+                        earnings_date = str(d.date()) if hasattr(d, "date") else str(d)
+                elif isinstance(cal, dict) and "Earnings Date" in cal:
+                    ed = cal["Earnings Date"]
+                    if hasattr(ed, "__iter__") and not isinstance(ed, str):
+                        ed = list(ed)
+                        if ed:
+                            d = ed[0]
+                            earnings_date = str(d.date()) if hasattr(d, "date") else str(d)
+                    else:
+                        earnings_date = str(ed)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    term_structure = compute_term_structure(df_full, spot)
+    hv_trend       = compute_hv_trend(price_history)
+
+    # Liquidity breakdown per expiration
+    liq_stats: dict = {}
+    if not df_full.is_empty():
+        for exp in df_full["expiration"].unique().to_list():
+            exp_df = df_full.filter(pl.col("expiration") == exp)
+            liq_stats[exp] = {
+                "total":        len(exp_df),
+                "liquid_100":   int(exp_df.filter(pl.col("open_interest") >= 100).shape[0]),
+                "liquid_1000":  int(exp_df.filter(pl.col("open_interest") >= 1000).shape[0]),
+            }
+
+    return _sanitize({
+        "symbol":          symbol.upper(),
+        "spot":            spot,
+        "term_structure":  term_structure,
+        "hv_trend":        hv_trend,
+        "liquidity_stats": liq_stats,
+        "earnings_date":   earnings_date,
+    })
 
 
 @app.get("/options/{symbol}/{expiration}")
@@ -3038,6 +3112,181 @@ def get_feeds(category: str = "all", limit: int = 80, window_hours: int = 48):
     except Exception as exc:
         logger.exception("Feeds endpoint failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Sectors Endpoints
+# ---------------------------------------------------------------------------
+
+def _run_sector_refresh(job_id: str, sectors: list[str]) -> None:
+    from sectors_engine import SectorProvider, SectorStore
+    provider = SectorProvider()
+    store    = SectorStore(SECTORS_DIR.parent)
+    db = SessionLocal()
+    errors: dict[str, str] = {}
+    done = 0
+    try:
+        for sector in sectors:
+            try:
+                snap = provider.fetch_sector(sector)
+                store.save(sector, snap)
+                logger.info("Sector refresh complete: %s (%d tickers)", sector, len(snap.tickers))
+            except Exception as exc:
+                errors[sector] = str(exc)[:200]
+                logger.warning("Sector refresh failed for %s: %s", sector, exc)
+            done += 1
+            try:
+                job = db.query(SectorRefreshJob).filter(SectorRefreshJob.id == job_id).first()
+                if job:
+                    job.sectors_done   = done
+                    job.sectors_failed = errors
+                    db.commit()
+            except Exception:
+                pass
+        try:
+            job = db.query(SectorRefreshJob).filter(SectorRefreshJob.id == job_id).first()
+            if job:
+                job.status       = "complete"
+                job.completed_at = datetime.utcnow()
+                job.sectors_failed = errors
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+@app.get("/sectors")
+def get_sectors_overview():
+    """Lightweight summary of all 11 GICS sectors (from cache)."""
+    from sectors_engine import SectorStore
+    store = SectorStore(SECTORS_DIR.parent)
+    return _sanitize(store.all_summaries())
+
+
+@app.get("/sectors/universe")
+def get_sectors_universe():
+    """Return the active ticker universe per sector (S&P 500 dynamic or hardcoded fallback)."""
+    from sectors_engine import _get_active_universe, SECTOR_ETF, SECTOR_COLOR
+    universe = _get_active_universe()
+    return {
+        s: {
+            "etf":     SECTOR_ETF.get(s, ""),
+            "color":   SECTOR_COLOR.get(s, "#607D8B"),
+            "tickers": tickers,
+            "count":   len(tickers),
+        }
+        for s, tickers in universe.items()
+    }
+
+
+@app.post("/sectors/universe/refresh")
+def refresh_sp500_universe():
+    """Force-refresh the S&P 500 universe list from Wikipedia."""
+    try:
+        from sp500_universe import get_sp500_universe
+        data = get_sp500_universe(force_refresh=True)
+        if not data:
+            raise HTTPException(status_code=503,
+                detail="Could not fetch S&P 500 list from Wikipedia. Using cached/fallback.")
+        return {
+            "status":     "ok",
+            "total":      data.get("total", 0),
+            "sectors":    {s: len(t) for s, t in data["universe"].items()},
+            "fetched_at": data.get("fetched_at"),
+            "source":     data.get("source", "wikipedia"),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/sectors/ticker/{symbol}/sec")
+def get_ticker_sec_facts(symbol: str):
+    """SEC EDGAR XBRL annual financials for a ticker (up to 15 years)."""
+    from sp500_universe import get_cik
+    from sec_feed import SecFeed
+    cik = get_cik(symbol.upper())
+    if not cik:
+        raise HTTPException(status_code=404,
+            detail=f"{symbol} not found in S&P 500 universe / CIK map. Fetch universe first.")
+    feed = SecFeed()
+    facts = feed.company_facts(cik)
+    if not facts:
+        raise HTTPException(status_code=503,
+            detail=f"SEC EDGAR returned no data for {symbol} (CIK {cik}).")
+    return _sanitize(facts)
+
+
+@app.get("/sectors/ticker/{symbol}/filings")
+def get_ticker_filings(symbol: str, limit: int = 20):
+    """Recent SEC filings (8-K, 10-K, 10-Q) for a ticker."""
+    from sp500_universe import get_cik
+    from sec_feed import SecFeed
+    cik = get_cik(symbol.upper())
+    if not cik:
+        raise HTTPException(status_code=404,
+            detail=f"{symbol} not found in S&P 500 CIK map.")
+    feed = SecFeed()
+    return feed.recent_filings(cik, limit=limit)
+
+
+@app.post("/sectors/refresh")
+def refresh_sectors(background_tasks: BackgroundTasks, body: Optional[dict] = None):
+    """Trigger background refresh of one or all sectors. Body: {sectors?: [str]}"""
+    from sectors_engine import SECTOR_UNIVERSE
+    target = (body or {}).get("sectors") or list(SECTOR_UNIVERSE.keys())
+    job_id = str(uuid.uuid4())
+    db = SessionLocal()
+    try:
+        db.add(SectorRefreshJob(id=job_id, status="running",
+                                sectors_total=len(target), sectors_done=0))
+        db.commit()
+    finally:
+        db.close()
+    background_tasks.add_task(_run_sector_refresh, job_id, target)
+    return {"job_id": job_id, "sectors_total": len(target), "status": "running"}
+
+
+@app.get("/sectors/refresh/{job_id}")
+def get_sector_refresh_status(job_id: str):
+    db = SessionLocal()
+    try:
+        job = db.query(SectorRefreshJob).filter(SectorRefreshJob.id == job_id).first()
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return _sanitize({
+            "job_id": job_id, "status": job.status,
+            "sectors_done": job.sectors_done, "sectors_total": job.sectors_total,
+            "sectors_failed": job.sectors_failed,
+            "started_at": job.started_at.isoformat() if job.started_at else None,
+            "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        })
+    finally:
+        db.close()
+
+
+@app.get("/sectors/{sector_name}")
+def get_sector(sector_name: str):
+    """Full cached snapshot for a sector (all tickers with all metrics)."""
+    from sectors_engine import SectorStore
+    import dataclasses
+    store = SectorStore(SECTORS_DIR.parent)
+    # Allow URL-encoded spaces and underscores
+    sector = sector_name.replace("_", " ")
+    snap = store.load(sector)
+    if not snap:
+        raise HTTPException(status_code=404,
+            detail=f"No data for '{sector}'. POST /sectors/refresh to fetch.")
+    return _sanitize(dataclasses.asdict(snap))
+
+
+@app.get("/sectors/ticker/{symbol}/financials")
+def get_ticker_financials(symbol: str):
+    """Quarterly financials, earnings history, analyst upgrades, and news for a ticker."""
+    from sectors_engine import get_ticker_deep_dive
+    return _sanitize(get_ticker_deep_dive(symbol.upper()))
 
 
 # ---------------------------------------------------------------------------

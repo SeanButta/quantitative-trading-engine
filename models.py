@@ -102,6 +102,18 @@ class PortfolioAnalysisJob(Base):
     completed_at = Column(DateTime, nullable=True)
 
 
+class SectorRefreshJob(Base):
+    __tablename__ = "sector_refresh_jobs"
+
+    id              = Column(String, primary_key=True)
+    status          = Column(String, default="running")   # running / complete / failed
+    sectors_total   = Column(Integer, default=0)
+    sectors_done    = Column(Integer, default=0)
+    sectors_failed  = Column(JSON, default=dict)          # {sector: error_message}
+    started_at      = Column(DateTime, default=datetime.utcnow)
+    completed_at    = Column(DateTime, nullable=True)
+
+
 class DailySummary(Base):
     __tablename__ = "daily_summaries"
 

@@ -507,6 +507,114 @@ def compute_analytics(
     return result
 
 
+def compute_term_structure(df_full: "pl.DataFrame", spot: float = 0.0) -> list[dict]:
+    """IV term structure: ATM IV, 25-delta put/call IV, and skew per expiration."""
+    import datetime as _dt
+
+    result: list[dict] = []
+    today = _dt.date.today()
+    exps = sorted(df_full["expiration"].unique().to_list())
+
+    for exp in exps:
+        try:
+            dte = (_dt.date.fromisoformat(str(exp)) - today).days
+        except Exception:
+            dte = None
+
+        df_exp = df_full.filter(pl.col("expiration") == exp)
+
+        # ATM IV: |delta| 0.35–0.65 (preferred) or closest-to-spot fallback
+        atm_df = df_exp.filter(
+            (pl.col("delta").abs() >= 0.35) & (pl.col("delta").abs() <= 0.65)
+        )
+        atm_iv_vals = [
+            v for v in atm_df["implied_vol"].drop_nulls().to_list()
+            if not math.isnan(v) and v > 0
+        ]
+        atm_iv = float(np.median(atm_iv_vals)) if atm_iv_vals else None
+
+        # Fallback: if no delta-filtered ATM IV, use strike closest to spot
+        if atm_iv is None and spot > 0 and not df_exp.is_empty():
+            try:
+                strikes_list = df_exp["strike"].to_list()
+                closest = min(strikes_list, key=lambda k: abs(k - spot))
+                near_df = df_exp.filter(
+                    (pl.col("strike") == closest)
+                    & (pl.col("implied_vol").is_not_null())
+                )
+                fallback_vals = [
+                    v for v in near_df["implied_vol"].to_list()
+                    if v is not None and not math.isnan(v) and v > 0
+                ]
+                if fallback_vals:
+                    atm_iv = float(np.median(fallback_vals))
+            except Exception:
+                pass
+
+        # 25-delta put IV (put delta ≈ −0.25, |delta| 0.18–0.32)
+        puts_25d = df_exp.filter(
+            (pl.col("option_type") == "put")
+            & (pl.col("delta").abs() >= 0.18)
+            & (pl.col("delta").abs() <= 0.32)
+        )
+        p_iv = [
+            v for v in puts_25d["implied_vol"].drop_nulls().to_list()
+            if not math.isnan(v) and v > 0
+        ]
+        put_25d_iv = float(np.mean(p_iv)) if p_iv else None
+
+        # 25-delta call IV (call delta ≈ +0.25)
+        calls_25d = df_exp.filter(
+            (pl.col("option_type") == "call")
+            & (pl.col("delta") >= 0.18)
+            & (pl.col("delta") <= 0.32)
+        )
+        c_iv = [
+            v for v in calls_25d["implied_vol"].drop_nulls().to_list()
+            if not math.isnan(v) and v > 0
+        ]
+        call_25d_iv = float(np.mean(c_iv)) if c_iv else None
+
+        skew = (
+            (put_25d_iv - call_25d_iv)
+            if put_25d_iv is not None and call_25d_iv is not None
+            else None
+        )
+
+        result.append({
+            "expiration":  exp,
+            "dte":         dte,
+            "atm_iv":      atm_iv,
+            "put_25d_iv":  put_25d_iv,
+            "call_25d_iv": call_25d_iv,
+            "skew":        skew,
+        })
+
+    return result
+
+
+def compute_hv_trend(price_history: list[dict], window: int = 20) -> list[dict]:
+    """Rolling HV(window) over the most recent 90 trading days, annualised."""
+    entries = [(p.get("date", ""), p["close"]) for p in price_history if p.get("close") is not None]
+    if len(entries) < window + 1:
+        return []
+
+    dates  = [e[0] for e in entries]
+    prices = np.array([e[1] for e in entries], dtype=float)
+    log_rets = np.diff(np.log(prices))
+
+    result: list[dict] = []
+    start_i = max(0, len(log_rets) - 90)
+    for i in range(start_i, len(log_rets)):
+        if i >= window - 1:
+            w  = log_rets[i - window + 1 : i + 1]
+            hv = float(np.std(w) * np.sqrt(252))
+            date_label = dates[i + 1] if i + 1 < len(dates) else ""
+            result.append({"date": date_label, "hv": round(hv * 100, 2)})
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
