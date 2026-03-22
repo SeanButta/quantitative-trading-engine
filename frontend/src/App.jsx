@@ -8276,7 +8276,7 @@ function TradeAdvisorView() {
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div>
-        <Lbl>Trade Advisor</Lbl>
+        <Lbl>Research</Lbl>
         <div style={mono(10,C.mut)}>Synthesizes ML signal · news sentiment · technicals · options analytics → actionable trade recommendation</div>
       </div>
 
@@ -8333,6 +8333,96 @@ function TradeAdvisorView() {
       {err && <Card><div style={mono(11,C.red)}>⚠ {err}</div></Card>}
 
       {data && (<>
+        {/* ── Full Analysis ────────────────────────────────────────────── */}
+        {(()=>{
+          const parts = [];
+          if (data.ml_signal) {
+            const ml = data.ml_signal;
+            const pUp  = (ml.p_up*100).toFixed(0);
+            const pDn  = (100 - ml.p_up*100).toFixed(0);
+            const conf = (ml.confidence*100).toFixed(0);
+            const acc  = (ml.accuracy*100).toFixed(1);
+            const feat = ml.top_feature ? ml.top_feature.replace(/_/g," ") : "recent momentum patterns";
+            const isBearish = ml.direction === "bearish";
+            parts.push(
+              isBearish
+                ? `Our machine learning model is predicting a decline for ${data.symbol} with ${conf}% confidence — it puts the probability of a price drop over the next 5 trading days at ${pDn}%. The biggest driver of this call is ${feat}. For context, this model has been correct about ${acc}% of the time historically, which is modest but better than a coin flip.`
+                : `Our machine learning model is predicting an increase for ${data.symbol} with ${conf}% confidence — it puts the probability of a price rise over the next 5 trading days at ${pUp}%. The biggest driver behind this call is ${feat}. For context, this model has been correct about ${acc}% of the time historically.`
+            );
+          }
+          if (data.technical) {
+            const ta = data.technical;
+            const rsi = ta.rsi;
+            const maStr = ta.above_ma50 && ta.above_ma200
+              ? `${data.symbol} is currently trading above both its 50-day and 200-day moving averages — these are trend lines that traders watch closely, and being above them is generally considered a healthy sign.`
+              : !ta.above_ma50 && !ta.above_ma200
+              ? `${data.symbol} is sitting below both its 50-day and 200-day moving averages. When a stock falls under these levels, they often act as overhead resistance — meaning the price has to work harder to recover.`
+              : ta.above_ma50
+              ? `${data.symbol} is above its short-term (50-day) average but still below its long-term (200-day) one — a mixed chart picture that suggests some recent strength without a full trend reversal.`
+              : `${data.symbol} is above its long-term (200-day) average but struggling below the short-term (50-day) one — a slight near-term soft patch in an otherwise intact longer trend.`;
+            const rsiStr = rsi != null
+              ? rsi > 70
+                ? ` The RSI momentum indicator reads ${rsi.toFixed(0)}, which puts it in "overbought" territory — a warning sign that the recent rally may be getting stretched.`
+                : rsi < 30
+                ? ` The RSI momentum indicator reads ${rsi.toFixed(0)}, putting it in "oversold" territory — which can sometimes signal a bounce is near, though it doesn't mean a recovery is guaranteed.`
+                : ` The RSI momentum indicator reads ${rsi.toFixed(0)}, which is squarely in neutral territory — no strong signal either way from momentum.`
+              : "";
+            parts.push(`${maStr}${rsiStr}`);
+          }
+          if (data.sentiment) {
+            const s = data.sentiment;
+            const scoreDesc = s.score > 0.3 ? "clearly positive" : s.score > 0.05 ? "mildly positive" : s.score < -0.3 ? "clearly negative" : s.score < -0.05 ? "mildly negative" : "roughly neutral";
+            const momStr = s.momentum > 0.1 ? " and the tone has been improving recently" : s.momentum < -0.1 ? " and the tone has been softening recently" : "";
+            const counterStr = s.score > 0.05 && data.composite?.score < -0.1
+              ? " This is a mild counterpoint to the overall bearish signal — worth keeping in mind."
+              : s.score < -0.05 && data.composite?.score > 0.1
+              ? " This negative tone runs somewhat against the bullish technical setup."
+              : "";
+            parts.push(`Scanning ${s.articles} news articles from the last 24 hours, coverage of ${data.symbol} is ${scoreDesc}${momStr}.${counterStr}`);
+          }
+          if (data.options) {
+            const o = data.options;
+            const ivRankPct = o.iv_rank != null ? o.iv_rank * 100 : null;
+            const ivDesc = ivRankPct != null
+              ? ivRankPct > 70
+                ? `options on ${data.symbol} are relatively expensive right now compared to their recent history — meaning the market is pricing in larger-than-normal swings ahead`
+                : ivRankPct < 30
+                ? `options on ${data.symbol} are fairly cheap relative to recent history — the market isn't expecting much movement`
+                : `options are priced in line with recent norms — no unusual volatility expectations`
+              : null;
+            const pcDesc = o.put_call_ratio != null
+              ? o.put_call_ratio > 1.2
+                ? `more traders are buying put options (bets on a decline) than calls right now`
+                : o.put_call_ratio < 0.8
+                ? `more traders are buying call options (bets on a rise) than puts right now`
+                : `put and call activity is roughly balanced`
+              : null;
+            const mpStr = o.max_pain && data.technical?.latest_close
+              ? ` The "max pain" level — the price where the most options expire worthless, which can act like a gravitational pull near expiration — sits at $${Number(o.max_pain).toFixed(0)}.`
+              : "";
+            if (ivDesc || pcDesc) {
+              parts.push(`In the options market, ${[ivDesc, pcDesc].filter(Boolean).join(", and ")}.${mpStr}`);
+            }
+          }
+          if (parts.length === 0) return null;
+          return (
+            <div style={{borderRadius:12,border:`1px solid ${C.pur}30`,background:C.pur+"08",padding:"14px 18px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                <Cpu size={13} style={{color:C.pur}}/>
+                <span style={mono(9,C.pur,700)}>FULL ANALYSIS · {data.symbol}</span>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {parts.map((p,i)=>(
+                  <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                    <span style={{...mono(9,C.pur),marginTop:3,flexShrink:0}}>›</span>
+                    <span style={{...mono(10,C.txt),lineHeight:1.8}}>{p}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+
         {/* ── Bottom Line Strip ─────────────────────────────────────────── */}
         {data.composite && (()=>{
           const score = data.composite.score;
@@ -8670,96 +8760,6 @@ function TradeAdvisorView() {
             <div style={mono(10,C.mut)}>Fetch options data and re-analyze to generate strategy recommendations.</div>
           )}
         </Card>
-
-        {/* ── Narrative Summary (supporting detail, moved to bottom) ──── */}
-        {(()=>{
-          const parts = [];
-          if (data.ml_signal) {
-            const ml = data.ml_signal;
-            const pUp  = (ml.p_up*100).toFixed(0);
-            const pDn  = (100 - ml.p_up*100).toFixed(0);
-            const conf = (ml.confidence*100).toFixed(0);
-            const acc  = (ml.accuracy*100).toFixed(1);
-            const feat = ml.top_feature ? ml.top_feature.replace(/_/g," ") : "recent momentum patterns";
-            const isBearish = ml.direction === "bearish";
-            parts.push(
-              isBearish
-                ? `Our machine learning model is predicting a decline for ${data.symbol} with ${conf}% confidence — it puts the probability of a price drop over the next 5 trading days at ${pDn}%. The biggest driver of this call is ${feat}. For context, this model has been correct about ${acc}% of the time historically, which is modest but better than a coin flip.`
-                : `Our machine learning model is predicting an increase for ${data.symbol} with ${conf}% confidence — it puts the probability of a price rise over the next 5 trading days at ${pUp}%. The biggest driver behind this call is ${feat}. For context, this model has been correct about ${acc}% of the time historically.`
-            );
-          }
-          if (data.technical) {
-            const ta = data.technical;
-            const rsi = ta.rsi;
-            const maStr = ta.above_ma50 && ta.above_ma200
-              ? `${data.symbol} is currently trading above both its 50-day and 200-day moving averages — these are trend lines that traders watch closely, and being above them is generally considered a healthy sign.`
-              : !ta.above_ma50 && !ta.above_ma200
-              ? `${data.symbol} is sitting below both its 50-day and 200-day moving averages. When a stock falls under these levels, they often act as overhead resistance — meaning the price has to work harder to recover.`
-              : ta.above_ma50
-              ? `${data.symbol} is above its short-term (50-day) average but still below its long-term (200-day) one — a mixed chart picture that suggests some recent strength without a full trend reversal.`
-              : `${data.symbol} is above its long-term (200-day) average but struggling below the short-term (50-day) one — a slight near-term soft patch in an otherwise intact longer trend.`;
-            const rsiStr = rsi != null
-              ? rsi > 70
-                ? ` The RSI momentum indicator reads ${rsi.toFixed(0)}, which puts it in "overbought" territory — a warning sign that the recent rally may be getting stretched.`
-                : rsi < 30
-                ? ` The RSI momentum indicator reads ${rsi.toFixed(0)}, putting it in "oversold" territory — which can sometimes signal a bounce is near, though it doesn't mean a recovery is guaranteed.`
-                : ` The RSI momentum indicator reads ${rsi.toFixed(0)}, which is squarely in neutral territory — no strong signal either way from momentum.`
-              : "";
-            parts.push(`${maStr}${rsiStr}`);
-          }
-          if (data.sentiment) {
-            const s = data.sentiment;
-            const scoreDesc = s.score > 0.3 ? "clearly positive" : s.score > 0.05 ? "mildly positive" : s.score < -0.3 ? "clearly negative" : s.score < -0.05 ? "mildly negative" : "roughly neutral";
-            const momStr = s.momentum > 0.1 ? " and the tone has been improving recently" : s.momentum < -0.1 ? " and the tone has been softening recently" : "";
-            const counterStr = s.score > 0.05 && data.composite?.score < -0.1
-              ? " This is a mild counterpoint to the overall bearish signal — worth keeping in mind."
-              : s.score < -0.05 && data.composite?.score > 0.1
-              ? " This negative tone runs somewhat against the bullish technical setup."
-              : "";
-            parts.push(`Scanning ${s.articles} news articles from the last 24 hours, coverage of ${data.symbol} is ${scoreDesc}${momStr}.${counterStr}`);
-          }
-          if (data.options) {
-            const o = data.options;
-            const ivRankPct = o.iv_rank != null ? o.iv_rank * 100 : null;
-            const ivDesc = ivRankPct != null
-              ? ivRankPct > 70
-                ? `options on ${data.symbol} are relatively expensive right now compared to their recent history — meaning the market is pricing in larger-than-normal swings ahead`
-                : ivRankPct < 30
-                ? `options on ${data.symbol} are fairly cheap relative to recent history — the market isn't expecting much movement`
-                : `options are priced in line with recent norms — no unusual volatility expectations`
-              : null;
-            const pcDesc = o.put_call_ratio != null
-              ? o.put_call_ratio > 1.2
-                ? `more traders are buying put options (bets on a decline) than calls right now`
-                : o.put_call_ratio < 0.8
-                ? `more traders are buying call options (bets on a rise) than puts right now`
-                : `put and call activity is roughly balanced`
-              : null;
-            const mpStr = o.max_pain && data.technical?.latest_close
-              ? ` The "max pain" level — the price where the most options expire worthless, which can act like a gravitational pull near expiration — sits at $${Number(o.max_pain).toFixed(0)}.`
-              : "";
-            if (ivDesc || pcDesc) {
-              parts.push(`In the options market, ${[ivDesc, pcDesc].filter(Boolean).join(", and ")}.${mpStr}`);
-            }
-          }
-          if (parts.length === 0) return null;
-          return (
-            <div style={{borderRadius:12,border:`1px solid ${C.pur}30`,background:C.pur+"08",padding:"14px 18px"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-                <Cpu size={13} style={{color:C.pur}}/>
-                <span style={mono(9,C.pur,700)}>FULL ANALYSIS · {data.symbol}</span>
-              </div>
-              <div style={{display:"flex",flexDirection:"column",gap:10}}>
-                {parts.map((p,i)=>(
-                  <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
-                    <span style={{...mono(9,C.pur),marginTop:3,flexShrink:0}}>›</span>
-                    <span style={{...mono(10,C.txt),lineHeight:1.8}}>{p}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          );
-        })()}
 
         {data.warnings?.filter(w=>w).length > 0 && (
           <Card>
@@ -10300,7 +10300,7 @@ function SectorsView() {
 // ── App ─────────────────────────────────────────────────
 const NAV=[
   {id:"markets",   l:"Markets",   I:BarChart2},   // Overview + News
-  {id:"advisor",   l:"Advisor",   I:Compass},
+  {id:"advisor",   l:"Research",  I:Compass},
   {id:"macro",     l:"Macro",     I:Database},
   {id:"technical", l:"Technical", I:TrendingUp},
   {id:"options",   l:"Options",   I:Activity},
