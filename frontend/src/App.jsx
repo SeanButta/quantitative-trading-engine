@@ -8254,6 +8254,7 @@ function TradeAdvisorView() {
   const [loading, setLoading] = useState(false);
   const [data,    setData]    = useState(null);
   const [err,     setErr]     = useState(null);
+  const [optExpanded, setOptExpanded] = useState(false);
 
   const run = () => {
     const sym = input.trim().toUpperCase();
@@ -8332,96 +8333,70 @@ function TradeAdvisorView() {
       {err && <Card><div style={mono(11,C.red)}>⚠ {err}</div></Card>}
 
       {data && (<>
-        {/* Qualitative narrative */}
-        {(()=>{
-          const parts = [];
-          if (data.ml_signal) {
-            const ml = data.ml_signal;
-            const pUp = (ml.p_up*100).toFixed(0);
-            const conf = (ml.confidence*100).toFixed(0);
-            const acc = (ml.accuracy*100).toFixed(1);
-            parts.push(
-              `The ML model assigns a ${pUp}% probability of upside over the next 5 sessions, pointing ${(ml.direction||"").toLowerCase()} with ${conf}% confidence (${acc}% out-of-sample accuracy).`
-            );
-          }
-          if (data.technical) {
-            const ta = data.technical;
-            const rsiStr = ta.rsi != null
-              ? (ta.rsi > 70 ? `overbought RSI of ${ta.rsi.toFixed(0)}`
-                : ta.rsi < 30 ? `oversold RSI of ${ta.rsi.toFixed(0)}`
-                : `neutral RSI of ${ta.rsi.toFixed(0)}`)
-              : null;
-            const maStr = ta.above_ma50 && ta.above_ma200
-              ? "above both its 50- and 200-day moving averages"
-              : !ta.above_ma50 && !ta.above_ma200
-              ? "below both its 50- and 200-day moving averages"
-              : ta.above_ma50 ? "above its 50-day MA but below the 200-day"
-              : "below its 50-day MA but above the 200-day";
-            const bias = ta.ta_bias ? `Technicals lean ${(ta.ta_bias||"").toLowerCase()}` : "Technically";
-            const hv = ta.hv20 != null ? ` Historical volatility (HV20) is at ${(ta.hv20*100).toFixed(1)}%.` : "";
-            parts.push(
-              `${bias}, with ${data.symbol} currently ${maStr}${rsiStr ? ` and a ${rsiStr}` : ""}.${hv}`
-            );
-          }
-          if (data.sentiment) {
-            const s = data.sentiment;
-            const scoreDesc = s.score > 0.3 ? "strongly positive" : s.score > 0 ? "mildly positive" : s.score < -0.3 ? "strongly negative" : "mildly negative";
-            const momStr = s.momentum && typeof s.momentum === "string" ? ` with ${s.momentum.toLowerCase()} momentum` : "";
-            parts.push(
-              `News sentiment across ${s.articles} recent articles is ${scoreDesc}${momStr}.`
-            );
-          }
-          if (data.options) {
-            const o = data.options;
-            const ivDesc = o.iv_rank != null
-              ? (o.iv_rank > 70 ? `elevated (rank ${o.iv_rank.toFixed(0)})` : o.iv_rank < 30 ? `compressed (rank ${o.iv_rank.toFixed(0)})` : `moderate (rank ${o.iv_rank.toFixed(0)})`)
-              : null;
-            const pcDesc = o.put_call_ratio != null
-              ? (o.put_call_ratio > 1.2 ? "bearish put/call skew" : o.put_call_ratio < 0.8 ? "bullish put/call skew" : "neutral put/call ratio")
-              : null;
-            if (ivDesc || pcDesc) {
-              parts.push(
-                `Options market shows ${[ivDesc ? `${ivDesc} implied volatility` : null, pcDesc].filter(Boolean).join(" and ")}.`
-              );
-            }
-          }
-          if (parts.length === 0) return null;
+        {/* ── Bottom Line Strip ─────────────────────────────────────────── */}
+        {data.composite && (()=>{
+          const score = data.composite.score;
+          const overall = data.composite.overall || "Neutral";
+          const conviction = (data.composite.conviction||"").toLowerCase();
+          const sc = sCol(score);
+          const mlDir = data.ml_signal?.direction;
+          const taDir = data.technical?.ta_bias;
+          const sentDir = data.sentiment?.direction;
+          const signalParts = [];
+          if (mlDir) signalParts.push(`ML ${mlDir}`);
+          if (taDir) signalParts.push(`technicals ${taDir==="neutral"?"neutral":"lean "+taDir}`);
+          if (sentDir) signalParts.push(`news ${sentDir}`);
+          const convLine = conviction==="high"
+            ? "Signals are well-aligned — higher-confidence view."
+            : conviction==="moderate"
+            ? "Some mixed signals present — use moderate confidence."
+            : "Signals are conflicting — low-conviction environment.";
           return (
-            <div style={{borderRadius:12,border:`1px solid ${C.pur}30`,background:C.pur+"08",padding:"14px 18px"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-                <Cpu size={13} style={{color:C.pur}}/>
-                <span style={mono(9,C.pur,700)}>NARRATIVE SUMMARY · {data.symbol}</span>
+            <div style={{borderRadius:12,border:`2px solid ${sc}`,background:sc+"12",padding:"14px 18px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6,flexWrap:"wrap"}}>
+                <span style={mono(9,C.mut,500)}>BOTTOM LINE</span>
+                <span style={mono(16,sc,800)}>{overall.toUpperCase()}</span>
+                <Tag color={C.sky} style={{marginLeft:"auto"}}>{conviction.toUpperCase()} CONVICTION</Tag>
               </div>
-              <div style={{display:"flex",flexDirection:"column",gap:6}}>
-                {parts.map((p,i)=>(
-                  <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
-                    <span style={{...mono(9,C.pur),marginTop:2,flexShrink:0}}>›</span>
-                    <span style={{...mono(10,C.txt),lineHeight:1.75}}>{p}</span>
-                  </div>
-                ))}
+              <div style={{...mono(11,C.txt),lineHeight:1.7}}>
+                {signalParts.join(" · ")}{signalParts.length?". ":""}{convLine}
               </div>
             </div>
           );
         })()}
 
-        {/* Composite Score Banner */}
+        {/* ── Composite Score Banner ────────────────────────────────────── */}
         {data.composite && (
           <div style={{borderRadius:14,border:`2px solid ${sCol(data.composite.score)}50`,
-            background:sCol(data.composite.score)+"0a",padding:"16px 22px",display:"flex",gap:20,alignItems:"center"}}>
+            background:sCol(data.composite.score)+"0a",padding:"16px 22px",display:"flex",gap:20,alignItems:"center",flexWrap:"wrap"}}>
             <div style={{textAlign:"center",minWidth:80}}>
               <div style={{...mono(40,sCol(data.composite.score),800),lineHeight:1}}>
                 {data.composite.score>=0?"+":""}{(data.composite.score*100).toFixed(0)}
               </div>
               <div style={mono(8,C.mut)}>COMPOSITE</div>
             </div>
-            <div style={{flex:1}}>
-              <div style={{...mono(22,sCol(data.composite.score),700),marginBottom:6}}>
+            <div style={{flex:1,minWidth:200}}>
+              <div style={{...mono(22,sCol(data.composite.score),700),marginBottom:10}}>
                 {data.composite.overall}
               </div>
-              <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:6}}>
-                {Object.entries(data.composite.components||{}).map(([k,v])=>(
-                  <Tag key={k} color={sCol(v)}>{k.replace("_"," ")}: {v>=0?"+":""}{(v*100).toFixed(0)}</Tag>
-                ))}
+              {/* Mini signal bars */}
+              <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:8}}>
+                {Object.entries(data.composite.components||{}).map(([k,v])=>{
+                  const col = sCol(v);
+                  const pct = Math.min(Math.abs(v)*100,100);
+                  const label = k.replace(/_/g," ").replace(/\b\w/g,c=>c.toUpperCase());
+                  return (
+                    <div key={k} style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{...mono(8,C.mut),minWidth:90,textTransform:"capitalize"}}>{label}</span>
+                      <div style={{flex:1,height:4,borderRadius:2,background:C.dim,overflow:"hidden"}}>
+                        <div style={{height:"100%",width:pct+"%",background:col,borderRadius:2,transition:"width .4s"}}/>
+                      </div>
+                      <span style={{...mono(8,col,600),minWidth:28,textAlign:"right"}}>
+                        {v>=0?"+":""}{(v*100).toFixed(0)}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
               <div style={mono(9,C.mut)}>
                 Conviction: <span style={{color:C.sky,fontWeight:700}}>{data.composite.conviction?.toUpperCase()}</span>
@@ -8431,18 +8406,21 @@ function TradeAdvisorView() {
           </div>
         )}
 
-        {/* 3-column analysis grid */}
+        {/* ── 3-column analysis grid ────────────────────────────────────── */}
         <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"repeat(3,1fr)",gap:10}}>
           {/* ML Signal */}
           <Card>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-              <Cpu size={13} style={{color:C.pur}}/><span style={mono(9,C.pur,700)}>ML SIGNAL</span>
+            <div style={{marginBottom:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                <Cpu size={13} style={{color:C.pur}}/><span style={mono(9,C.pur,700)}>ML SIGNAL</span>
+              </div>
+              <div style={mono(9,C.mut)}>What our model predicts</div>
             </div>
             {data.ml_signal ? (<>
               <div style={{...mono(28,dCol(data.ml_signal.direction),700),marginBottom:2}}>
                 {dIco(data.ml_signal.direction)} {(data.ml_signal.p_up*100).toFixed(0)}%
               </div>
-              <div style={mono(9,C.mut)}>P(up) · next 5 days</div>
+              <div style={mono(9,C.mut)}>chance of price rise · next 5 days</div>
               <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:3}}>
                 <KV k="Direction"  v={data.ml_signal.direction}/>
                 <KV k="Confidence" v={(data.ml_signal.confidence*100).toFixed(0)+"%"}/>
@@ -8457,8 +8435,11 @@ function TradeAdvisorView() {
 
           {/* Sentiment */}
           <Card>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-              <Network size={13} style={{color:C.sky}}/><span style={mono(9,C.sky,700)}>NEWS SENTIMENT</span>
+            <div style={{marginBottom:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                <Network size={13} style={{color:C.sky}}/><span style={mono(9,C.sky,700)}>NEWS SENTIMENT</span>
+              </div>
+              <div style={mono(9,C.mut)}>How the market is talking about this</div>
             </div>
             {data.sentiment ? (<>
               <div style={{...mono(28,dCol(data.sentiment.direction),700),marginBottom:2}}>
@@ -8479,8 +8460,11 @@ function TradeAdvisorView() {
 
           {/* Technical */}
           <Card>
-            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-              <TrendingUp size={13} style={{color:C.grn}}/><span style={mono(9,C.grn,700)}>TECHNICAL</span>
+            <div style={{marginBottom:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
+                <TrendingUp size={13} style={{color:C.grn}}/><span style={mono(9,C.grn,700)}>TECHNICAL</span>
+              </div>
+              <div style={mono(9,C.mut)}>What the price chart is saying</div>
             </div>
             {data.technical ? (<>
               <div style={{...mono(26,dCol(data.technical.ta_bias),700),marginBottom:2}}>
@@ -8514,16 +8498,37 @@ function TradeAdvisorView() {
           </Card>
         </div>
 
-        {/* Options context + Strategy Recommendations */}
-        {/* ── Options Context (full width, more detail) ─────────────────── */}
+        {/* ── Options Context (collapsed by default) ────────────────────── */}
         <Card>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-            <Layers size={13} style={{color:C.amb}}/><span style={mono(9,C.amb,700)}>OPTIONS CONTEXT</span>
-            {data.options && !data.options.max_pain && (
-              <Tag color={C.mut}>Run options refresh for full context</Tag>
-            )}
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",
+            marginBottom:optExpanded?10:0}}>
+            <Layers size={13} style={{color:C.amb}}/>
+            <span style={mono(9,C.amb,700)}>OPTIONS CONTEXT</span>
+            {!optExpanded && data.options && (()=>{
+              const opt = data.options;
+              const ivRankPct = opt.iv_rank!=null ? opt.iv_rank*100 : null;
+              const ivLabel = ivRankPct==null?null:ivRankPct>70?"Vol rich":ivRankPct<30?"Vol cheap":"Vol fair";
+              const ivCol   = ivRankPct==null?C.mut:ivRankPct>70?C.red:ivRankPct<30?C.grn:C.amb;
+              const pcLabel = opt.put_call_ratio!=null
+                ? opt.put_call_ratio>1.2?"Bearish skew":opt.put_call_ratio<0.8?"Bullish skew":"Neutral skew"
+                : null;
+              const pcCol = opt.put_call_ratio!=null
+                ? opt.put_call_ratio>1.2?C.red:opt.put_call_ratio<0.8?C.grn:C.txt : C.txt;
+              return (
+                <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                  {ivLabel && <Tag color={ivCol}>{ivLabel}</Tag>}
+                  {pcLabel && <Tag color={pcCol}>{pcLabel}</Tag>}
+                  {opt.max_pain && <Tag color={C.mut}>Max pain ${Number(opt.max_pain).toFixed(0)}</Tag>}
+                </div>
+              );
+            })()}
+            <button onClick={()=>setOptExpanded(x=>!x)}
+              style={{marginLeft:"auto",background:"none",border:`1px solid ${C.bdr}`,
+                borderRadius:6,padding:"2px 8px",cursor:"pointer",...mono(9,C.mut)}}>
+              {optExpanded?"Hide ↑":"Expand ↓"}
+            </button>
           </div>
-          {data.options ? (()=>{
+          {optExpanded && (data.options ? (()=>{
             const opt = data.options;
             const ivRankPct  = opt.iv_rank!=null ? opt.iv_rank*100 : null;
             const ivRegime   = ivRankPct==null?"—":ivRankPct>70?"RICH (sell premium)":ivRankPct<30?"CHEAP (buy premium)":"FAIR";
@@ -8543,31 +8548,18 @@ function TradeAdvisorView() {
               : null;
             return (
               <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:8}}>
-                <Stat label="HV 20D"
-                  value={opt.hv20!=null?(opt.hv20*100).toFixed(1)+"%":"—"}
-                  sub="Realized volatility" color={C.sky}/>
-                <Stat label="Avg IV"
-                  value={opt.avg_iv!=null?(opt.avg_iv*100).toFixed(1)+"%":"—"}
-                  sub="Implied volatility" color={C.txt}/>
-                <Stat label="IV Rank"
-                  value={ivRankPct!=null?ivRankPct.toFixed(0)+"th pct":"—"}
-                  sub={ivRegime} color={ivRegimeC}/>
-                <Stat label="IV−HV Spread"
-                  value={spreadPct!=null?(spreadPct>0?"+":"")+spreadPct.toFixed(1)+"%":"—"}
-                  sub={spreadLabel} color={spreadC}/>
-                <Stat label="Max Pain"
-                  value={opt.max_pain?"$"+Number(opt.max_pain).toFixed(0):"—"}
+                <Stat label="HV 20D" value={opt.hv20!=null?(opt.hv20*100).toFixed(1)+"%":"—"} sub="Realized volatility" color={C.sky}/>
+                <Stat label="Avg IV" value={opt.avg_iv!=null?(opt.avg_iv*100).toFixed(1)+"%":"—"} sub="Implied volatility" color={C.txt}/>
+                <Stat label="IV Rank" value={ivRankPct!=null?ivRankPct.toFixed(0)+"th pct":"—"} sub={ivRegime} color={ivRegimeC}/>
+                <Stat label="IV−HV Spread" value={spreadPct!=null?(spreadPct>0?"+":"")+spreadPct.toFixed(1)+"%":"—"} sub={spreadLabel} color={spreadC}/>
+                <Stat label="Max Pain" value={opt.max_pain?"$"+Number(opt.max_pain).toFixed(0):"—"}
                   sub={mpDiff!=null?(mpDiff>0?"+":"")+mpDiff+"% vs spot":"OI-weighted pinning level"}
                   color={mpDiff!=null&&Math.abs(mpDiff)<1?C.grn:C.txt}/>
-                <Stat label="P/C Ratio"
-                  value={opt.put_call_ratio!=null?Number(opt.put_call_ratio).toFixed(2):"—"}
+                <Stat label="P/C Ratio" value={opt.put_call_ratio!=null?Number(opt.put_call_ratio).toFixed(2):"—"}
                   sub={opt.put_call_ratio>1.3?"Bearish skew":opt.put_call_ratio<0.7?"Bullish skew":"Neutral"}
                   color={opt.put_call_ratio>1.3?C.red:opt.put_call_ratio<0.7?C.grn:C.txt}/>
-                <Stat label="Max Γ Strike"
-                  value={opt.max_gamma_strike?"$"+Number(opt.max_gamma_strike).toFixed(0):"—"}
-                  sub="Dealer hedge magnet"/>
-                <Stat label="Snapshot"
-                  value={snapshotAge||"—"}
+                <Stat label="Max Γ Strike" value={opt.max_gamma_strike?"$"+Number(opt.max_gamma_strike).toFixed(0):"—"} sub="Dealer hedge magnet"/>
+                <Stat label="Snapshot" value={snapshotAge||"—"}
                   sub={opt.snapshot_at?opt.snapshot_at.slice(0,10):"No options data fetched"}
                   color={snapshotAge&&snapshotAge.includes("d")?C.red:C.mut}/>
                 {totalOI>0 && (
@@ -8588,10 +8580,8 @@ function TradeAdvisorView() {
               </div>
             );
           })() : (
-            <div style={{...mono(10,C.mut),padding:"12px 0"}}>
-              No options or price data available.
-            </div>
-          )}
+            <div style={{...mono(10,C.mut),padding:"12px 0"}}>No options or price data available.</div>
+          ))}
         </Card>
 
         {/* ── Strategy Recommendations (full width) ───────────────────── */}
@@ -8680,6 +8670,96 @@ function TradeAdvisorView() {
             <div style={mono(10,C.mut)}>Fetch options data and re-analyze to generate strategy recommendations.</div>
           )}
         </Card>
+
+        {/* ── Narrative Summary (supporting detail, moved to bottom) ──── */}
+        {(()=>{
+          const parts = [];
+          if (data.ml_signal) {
+            const ml = data.ml_signal;
+            const pUp  = (ml.p_up*100).toFixed(0);
+            const pDn  = (100 - ml.p_up*100).toFixed(0);
+            const conf = (ml.confidence*100).toFixed(0);
+            const acc  = (ml.accuracy*100).toFixed(1);
+            const feat = ml.top_feature ? ml.top_feature.replace(/_/g," ") : "recent momentum patterns";
+            const isBearish = ml.direction === "bearish";
+            parts.push(
+              isBearish
+                ? `Our machine learning model is predicting a decline for ${data.symbol} with ${conf}% confidence — it puts the probability of a price drop over the next 5 trading days at ${pDn}%. The biggest driver of this call is ${feat}. For context, this model has been correct about ${acc}% of the time historically, which is modest but better than a coin flip.`
+                : `Our machine learning model is predicting an increase for ${data.symbol} with ${conf}% confidence — it puts the probability of a price rise over the next 5 trading days at ${pUp}%. The biggest driver behind this call is ${feat}. For context, this model has been correct about ${acc}% of the time historically.`
+            );
+          }
+          if (data.technical) {
+            const ta = data.technical;
+            const rsi = ta.rsi;
+            const maStr = ta.above_ma50 && ta.above_ma200
+              ? `${data.symbol} is currently trading above both its 50-day and 200-day moving averages — these are trend lines that traders watch closely, and being above them is generally considered a healthy sign.`
+              : !ta.above_ma50 && !ta.above_ma200
+              ? `${data.symbol} is sitting below both its 50-day and 200-day moving averages. When a stock falls under these levels, they often act as overhead resistance — meaning the price has to work harder to recover.`
+              : ta.above_ma50
+              ? `${data.symbol} is above its short-term (50-day) average but still below its long-term (200-day) one — a mixed chart picture that suggests some recent strength without a full trend reversal.`
+              : `${data.symbol} is above its long-term (200-day) average but struggling below the short-term (50-day) one — a slight near-term soft patch in an otherwise intact longer trend.`;
+            const rsiStr = rsi != null
+              ? rsi > 70
+                ? ` The RSI momentum indicator reads ${rsi.toFixed(0)}, which puts it in "overbought" territory — a warning sign that the recent rally may be getting stretched.`
+                : rsi < 30
+                ? ` The RSI momentum indicator reads ${rsi.toFixed(0)}, putting it in "oversold" territory — which can sometimes signal a bounce is near, though it doesn't mean a recovery is guaranteed.`
+                : ` The RSI momentum indicator reads ${rsi.toFixed(0)}, which is squarely in neutral territory — no strong signal either way from momentum.`
+              : "";
+            parts.push(`${maStr}${rsiStr}`);
+          }
+          if (data.sentiment) {
+            const s = data.sentiment;
+            const scoreDesc = s.score > 0.3 ? "clearly positive" : s.score > 0.05 ? "mildly positive" : s.score < -0.3 ? "clearly negative" : s.score < -0.05 ? "mildly negative" : "roughly neutral";
+            const momStr = s.momentum > 0.1 ? " and the tone has been improving recently" : s.momentum < -0.1 ? " and the tone has been softening recently" : "";
+            const counterStr = s.score > 0.05 && data.composite?.score < -0.1
+              ? " This is a mild counterpoint to the overall bearish signal — worth keeping in mind."
+              : s.score < -0.05 && data.composite?.score > 0.1
+              ? " This negative tone runs somewhat against the bullish technical setup."
+              : "";
+            parts.push(`Scanning ${s.articles} news articles from the last 24 hours, coverage of ${data.symbol} is ${scoreDesc}${momStr}.${counterStr}`);
+          }
+          if (data.options) {
+            const o = data.options;
+            const ivRankPct = o.iv_rank != null ? o.iv_rank * 100 : null;
+            const ivDesc = ivRankPct != null
+              ? ivRankPct > 70
+                ? `options on ${data.symbol} are relatively expensive right now compared to their recent history — meaning the market is pricing in larger-than-normal swings ahead`
+                : ivRankPct < 30
+                ? `options on ${data.symbol} are fairly cheap relative to recent history — the market isn't expecting much movement`
+                : `options are priced in line with recent norms — no unusual volatility expectations`
+              : null;
+            const pcDesc = o.put_call_ratio != null
+              ? o.put_call_ratio > 1.2
+                ? `more traders are buying put options (bets on a decline) than calls right now`
+                : o.put_call_ratio < 0.8
+                ? `more traders are buying call options (bets on a rise) than puts right now`
+                : `put and call activity is roughly balanced`
+              : null;
+            const mpStr = o.max_pain && data.technical?.latest_close
+              ? ` The "max pain" level — the price where the most options expire worthless, which can act like a gravitational pull near expiration — sits at $${Number(o.max_pain).toFixed(0)}.`
+              : "";
+            if (ivDesc || pcDesc) {
+              parts.push(`In the options market, ${[ivDesc, pcDesc].filter(Boolean).join(", and ")}.${mpStr}`);
+            }
+          }
+          if (parts.length === 0) return null;
+          return (
+            <div style={{borderRadius:12,border:`1px solid ${C.pur}30`,background:C.pur+"08",padding:"14px 18px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                <Cpu size={13} style={{color:C.pur}}/>
+                <span style={mono(9,C.pur,700)}>FULL ANALYSIS · {data.symbol}</span>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {parts.map((p,i)=>(
+                  <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                    <span style={{...mono(9,C.pur),marginTop:3,flexShrink:0}}>›</span>
+                    <span style={{...mono(10,C.txt),lineHeight:1.8}}>{p}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
 
         {data.warnings?.filter(w=>w).length > 0 && (
           <Card>
