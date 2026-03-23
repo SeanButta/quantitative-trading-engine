@@ -11625,9 +11625,84 @@ function PaperTradingView(){
 
 // ── Inner App (inside AuthProvider) ──────────────────────────────────────────
 function AppInner() {
-  // Auth backend is available (login/register work) but the gate is open —
-  // all users land directly in the app. Re-enable the guard below when ready.
-  return <AppShell />;
+  const { isAuthenticated, ready } = useAuth();
+  const [showGate, setShowGate] = useState(false);
+
+  // Refs avoid stale closures inside the fetch interceptor (which is set up
+  // once on mount and must read current values without re-registering).
+  const isAuthRef     = useRef(false);
+  const fetchCountRef = useRef(0);
+  const timerFiredRef = useRef(false);
+  const isDemoRef     = useRef(false);
+  const demoFetchRef  = useRef(0);
+  const demoStartRef  = useRef(0);
+
+  // Keep isAuthRef in sync; hide gate immediately on successful login.
+  useEffect(() => {
+    isAuthRef.current = isAuthenticated;
+    if (isAuthenticated) setShowGate(false);
+  }, [isAuthenticated]);
+
+  // 20-second timer — fires once. If the user has already made ≥1 API call
+  // and is not authenticated, open the gate.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      timerFiredRef.current = true;
+      if (fetchCountRef.current >= 1 && !isAuthRef.current && !isDemoRef.current)
+        setShowGate(true);
+    }, 20000);
+    return () => clearTimeout(t);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Patch window.fetch once on mount to count /api/ calls (excluding /auth/).
+  useEffect(() => {
+    const orig = window.fetch.bind(window);
+    window.fetch = (...args) => {
+      const url = typeof args[0] === "string" ? args[0] : (args[0]?.url ?? "");
+      if (url.startsWith("/api/") && !url.includes("/api/auth/")) {
+        fetchCountRef.current += 1;
+        const c = fetchCountRef.current;
+
+        // Not authed, not in demo → show gate after (timer fired + 2 fetches)
+        // or after 3 fetches regardless of timer.
+        if (!isAuthRef.current && !isDemoRef.current) {
+          if ((timerFiredRef.current && c >= 2) || c >= 3) setShowGate(true);
+        }
+
+        // In demo mode → re-prompt after 10 more fetches or 5 minutes.
+        if (isDemoRef.current) {
+          demoFetchRef.current += 1;
+          const elapsed = Date.now() - demoStartRef.current;
+          if (demoFetchRef.current >= 10 || elapsed >= 5 * 60 * 1000) {
+            isDemoRef.current = false;
+            setShowGate(true);
+          }
+        }
+      }
+      return orig(...args);
+    };
+    return () => { window.fetch = orig; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // While auth context is still rehydrating from sessionStorage, render nothing
+  // (avoids a flash of the gate for returning signed-in users).
+  if (!ready) return null;
+
+  return (
+    <>
+      <AppShell />
+      {showGate && !isAuthenticated && (
+        <AuthScreen
+          onDemoMode={() => {
+            isDemoRef.current    = true;
+            demoStartRef.current = Date.now();
+            demoFetchRef.current = 0;
+            setShowGate(false);
+          }}
+        />
+      )}
+    </>
+  );
 }
 
 function AppShell() {
