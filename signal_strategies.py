@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 STRATEGY_REGISTRY: list[tuple[str, str, str]] = [
     # (id, display_name, default_direction)
+    # ── Event / crossover signals (high specificity, fire infrequently) ───
     ("golden_cross",             "Golden Cross",              "bull"),
     ("death_cross",              "Death Cross",               "bear"),
     ("triple_bull",              "Triple Confirm ↑",          "bull"),
@@ -48,6 +49,16 @@ STRATEGY_REGISTRY: list[tuple[str, str, str]] = [
     ("wr_rollover",              "WR Rollover ↓",             "bear"),
     ("momentum_reload",          "Momentum Reload",           "bull"),
     ("rsi_bull_divergence",      "RSI Divergence ↑",          "bull"),
+    # ── State / structural signals (always-on, fire from current values) ─
+    # These ensure confidence > 0 even when no crossover events are present.
+    ("sma200_trend_bull",        "Above 200-MA",              "bull"),
+    ("sma200_trend_bear",        "Below 200-MA",              "bear"),
+    ("rsi_momentum_bull",        "RSI Bull Zone",             "bull"),
+    ("rsi_momentum_bear",        "RSI Bear Zone",             "bear"),
+    ("macd_hist_positive",       "MACD Hist ↑",               "bull"),
+    ("macd_hist_negative",       "MACD Hist ↓",               "bear"),
+    ("vwap_above_price",         "Above VWAP",                "bull"),
+    ("vwap_below_price",         "Below VWAP",                "bear"),
 ]
 
 _PLACEHOLDER_TEMPLATE = {
@@ -610,15 +621,174 @@ class StrategyEngine:
                 "action": "BUY",
             }
 
+    # ── State / structural signal detectors ─────────────────────────────────
+    # These fire from current indicator VALUES, not crossover events, ensuring
+    # God Mode always has at least some signals and confidence > 0%.
+
+    def _sma200_trend_bull(self) -> dict | None:
+        sma200 = self._valid("sma", "200")
+        price  = self._ohlcv_col("close")
+        if not sma200 or not price:
+            return None
+        last_sma, last_p = sma200[-1], price[-1]
+        if last_p > last_sma * 1.005:  # at least 0.5% above to avoid noise
+            gap_pct = (last_p - last_sma) / last_sma * 100
+            return {
+                "id": "sma200_trend_bull", "name": "Above 200-MA",
+                "direction": "bull", "strength": 4,
+                "desc": (
+                    f"Price ${last_p:.2f} is {gap_pct:.1f}% above the 200-day MA "
+                    f"(${last_sma:.2f}) — structural uptrend intact. "
+                    "Long-term buyers control price."
+                ),
+                "action": "Hold longs; use 200-MA as long-term stop reference.",
+            }
+        return None
+
+    def _sma200_trend_bear(self) -> dict | None:
+        sma200 = self._valid("sma", "200")
+        price  = self._ohlcv_col("close")
+        if not sma200 or not price:
+            return None
+        last_sma, last_p = sma200[-1], price[-1]
+        if last_p < last_sma * 0.995:  # at least 0.5% below
+            gap_pct = (last_sma - last_p) / last_sma * 100
+            return {
+                "id": "sma200_trend_bear", "name": "Below 200-MA",
+                "direction": "bear", "strength": 4,
+                "desc": (
+                    f"Price ${last_p:.2f} is {gap_pct:.1f}% below the 200-day MA "
+                    f"(${last_sma:.2f}) — structural downtrend in force. "
+                    "Long-term sellers dominate."
+                ),
+                "action": "Reduce longs; consider shorts on bounces toward 200-MA.",
+            }
+        return None
+
+    def _rsi_momentum_bull(self) -> dict | None:
+        rsi = self._last("rsi")
+        if rsi is None:
+            return None
+        if 55 <= rsi <= 75:
+            return {
+                "id": "rsi_momentum_bull", "name": "RSI Bull Zone",
+                "direction": "bull", "strength": 3,
+                "desc": (
+                    f"RSI {rsi:.0f} is in bullish momentum territory (55–75) — "
+                    "buyers in control without being overbought. "
+                    "Momentum supports higher prices."
+                ),
+                "action": "Momentum favors longs; watch for push toward 70.",
+            }
+        return None
+
+    def _rsi_momentum_bear(self) -> dict | None:
+        rsi = self._last("rsi")
+        if rsi is None:
+            return None
+        if 25 <= rsi <= 45:
+            return {
+                "id": "rsi_momentum_bear", "name": "RSI Bear Zone",
+                "direction": "bear", "strength": 3,
+                "desc": (
+                    f"RSI {rsi:.0f} is in bearish momentum territory (25–45) — "
+                    "sellers in control without being oversold. "
+                    "Momentum supports lower prices."
+                ),
+                "action": "Momentum favors shorts; watch for push toward 30.",
+            }
+        return None
+
+    def _macd_hist_positive(self) -> dict | None:
+        hist = self._valid("macd", "histogram")
+        if len(hist) < 3:
+            return None
+        last = hist[-1]
+        if last > 0:
+            rising = hist[-1] > hist[-2] > hist[-3]
+            qualifier = " and accelerating" if rising else ""
+            return {
+                "id": "macd_hist_positive", "name": "MACD Hist ↑",
+                "direction": "bull", "strength": 2,
+                "desc": (
+                    f"MACD histogram {last:.4f} is positive{qualifier} — "
+                    "bullish momentum in force. "
+                    "Buyers outpacing sellers on the recent swing."
+                ),
+                "action": "Positive histogram supports long positions.",
+            }
+        return None
+
+    def _macd_hist_negative(self) -> dict | None:
+        hist = self._valid("macd", "histogram")
+        if len(hist) < 3:
+            return None
+        last = hist[-1]
+        if last < 0:
+            deepening = hist[-1] < hist[-2] < hist[-3]
+            qualifier = " and deepening" if deepening else ""
+            return {
+                "id": "macd_hist_negative", "name": "MACD Hist ↓",
+                "direction": "bear", "strength": 2,
+                "desc": (
+                    f"MACD histogram {last:.4f} is negative{qualifier} — "
+                    "bearish momentum in force. "
+                    "Sellers outpacing buyers on the recent swing."
+                ),
+                "action": "Negative histogram supports short/defensive positions.",
+            }
+        return None
+
+    def _vwap_above_price(self) -> dict | None:
+        vwap  = self._valid("vwap")
+        price = self._ohlcv_col("close")
+        if not vwap or not price:
+            return None
+        last_vwap, last_p = vwap[-1], price[-1]
+        if last_p > last_vwap:
+            pct = (last_p - last_vwap) / last_vwap * 100
+            return {
+                "id": "vwap_above_price", "name": "Above VWAP",
+                "direction": "bull", "strength": 2,
+                "desc": (
+                    f"Price ${last_p:.2f} is {pct:.1f}% above VWAP ${last_vwap:.2f} — "
+                    "institutional buyers dominating session flow. "
+                    "VWAP acts as dynamic support."
+                ),
+                "action": "VWAP support; add longs on pullbacks to VWAP.",
+            }
+        return None
+
+    def _vwap_below_price(self) -> dict | None:
+        vwap  = self._valid("vwap")
+        price = self._ohlcv_col("close")
+        if not vwap or not price:
+            return None
+        last_vwap, last_p = vwap[-1], price[-1]
+        if last_p < last_vwap:
+            pct = (last_vwap - last_p) / last_vwap * 100
+            return {
+                "id": "vwap_below_price", "name": "Below VWAP",
+                "direction": "bear", "strength": 2,
+                "desc": (
+                    f"Price ${last_p:.2f} is {pct:.1f}% below VWAP ${last_vwap:.2f} — "
+                    "institutional sellers controlling session flow. "
+                    "VWAP acts as dynamic resistance."
+                ),
+                "action": "VWAP resistance; short bounces toward VWAP.",
+            }
+        return None
+
     # ── Main entry ───────────────────────────────────────────────────────────
 
     def check_all(self) -> list[dict]:
         """
-        Run all 20 strategy detectors.
-        Always returns exactly 20 dicts in STRATEGY_REGISTRY order.
+        Run all strategy detectors.
+        Always returns exactly len(STRATEGY_REGISTRY) dicts in registry order.
         Triggered signals have triggered=True; others have triggered=False.
         """
         detectors = {
+            # Event / crossover signals
             "golden_cross":             self._golden_cross,
             "death_cross":              self._death_cross,
             "triple_bull":              self._triple_bull,
@@ -639,6 +809,15 @@ class StrategyEngine:
             "wr_rollover":              self._wr_rollover,
             "momentum_reload":          self._momentum_reload,
             "rsi_bull_divergence":      self._rsi_bull_divergence,
+            # State / structural signals (always fire from current values)
+            "sma200_trend_bull":        self._sma200_trend_bull,
+            "sma200_trend_bear":        self._sma200_trend_bear,
+            "rsi_momentum_bull":        self._rsi_momentum_bull,
+            "rsi_momentum_bear":        self._rsi_momentum_bear,
+            "macd_hist_positive":       self._macd_hist_positive,
+            "macd_hist_negative":       self._macd_hist_negative,
+            "vwap_above_price":         self._vwap_above_price,
+            "vwap_below_price":         self._vwap_below_price,
         }
 
         results: list[dict] = []
