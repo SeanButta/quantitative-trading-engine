@@ -30,6 +30,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from models import Base, Project, Strategy, Run, OptionsRefreshJob, SignalReadingJob, PortfolioAnalysisJob, DailySummary, SectorRefreshJob, CacheEntry
+from auth import router as _auth_router, get_current_user
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -51,6 +52,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Auth router — registers /auth/register, /auth/login, /auth/me, etc.
+app.include_router(_auth_router)
 
 # ---------------------------------------------------------------------------
 # Database engine — SQLite (local dev) or PostgreSQL/Supabase (production)
@@ -527,7 +531,7 @@ def cache_warm(background_tasks: BackgroundTasks):
 # ---------------------------------------------------------------------------
 
 @app.post("/projects")
-def create_project(req: CreateProjectRequest):
+def create_project(req: CreateProjectRequest, _user: dict = Depends(get_current_user)):
     db = SessionLocal()
     try:
         project_id = str(uuid.uuid4())[:8]
@@ -769,7 +773,8 @@ def explore_conditional_prob(project_id: str, req: ConditionalProbExplorerReques
 # ---------------------------------------------------------------------------
 
 @app.post("/projects/{project_id}/runs/backtest")
-def run_backtest(project_id: str, req: RunBacktestRequest, background_tasks: BackgroundTasks):
+def run_backtest(project_id: str, req: RunBacktestRequest, background_tasks: BackgroundTasks,
+                 _user: dict = Depends(get_current_user)):
     db = SessionLocal()
     try:
         project = db.query(Project).filter(Project.id == project_id).first()
@@ -815,7 +820,8 @@ def run_backtest(project_id: str, req: RunBacktestRequest, background_tasks: Bac
 
 
 @app.post("/projects/{project_id}/runs/walkforward")
-def run_walkforward(project_id: str, req: RunWalkForwardRequest):
+def run_walkforward(project_id: str, req: RunWalkForwardRequest,
+                    _user: dict = Depends(get_current_user)):
     db = SessionLocal()
     try:
         project = db.query(Project).filter(Project.id == project_id).first()
@@ -994,7 +1000,8 @@ def price_option(req: OptionPriceRequest):
 # ---------------------------------------------------------------------------
 
 @app.post("/options/refresh")
-def options_refresh(req: OptionsRefreshRequest, background_tasks: BackgroundTasks):
+def options_refresh(req: OptionsRefreshRequest, background_tasks: BackgroundTasks,
+                    _user: dict = Depends(get_current_user)):
     """Trigger a background fetch of options chains + Greeks for a symbol list."""
     from options_feed import SP500_UNIVERSE
     symbols = req.symbols or SP500_UNIVERSE
@@ -1309,6 +1316,7 @@ def create_signal_reading(
     project_id: str,
     req: SignalReadingRequest,
     background_tasks: BackgroundTasks,
+    _user: dict = Depends(get_current_user),
 ):
     """Start a background job that computes all 5 live signal readings for a symbol."""
     db = SessionLocal()
@@ -2306,7 +2314,8 @@ def market_overview():
 # ---------------------------------------------------------------------------
 
 @app.post("/portfolio/analyze")
-def portfolio_analyze(req: PortfolioAnalyzeRequest, background_tasks: BackgroundTasks):
+def portfolio_analyze(req: PortfolioAnalyzeRequest, background_tasks: BackgroundTasks,
+                      _user: dict = Depends(get_current_user)):
     """Kick off an async portfolio analysis job. Poll GET /portfolio/job/{job_id}."""
     job_id = str(uuid.uuid4())[:12]
     holdings_data = [h.model_dump() for h in req.holdings]
@@ -3581,7 +3590,7 @@ def get_sectors_universe():
 
 
 @app.post("/sectors/universe/refresh")
-def refresh_sp500_universe():
+def refresh_sp500_universe(_user: dict = Depends(get_current_user)):
     """Force-refresh the S&P 500 universe list from Wikipedia."""
     try:
         from sp500_universe import get_sp500_universe
@@ -3633,7 +3642,8 @@ def get_ticker_filings(symbol: str, limit: int = 20):
 
 
 @app.post("/sectors/refresh")
-def refresh_sectors(background_tasks: BackgroundTasks, body: Optional[dict] = None):
+def refresh_sectors(background_tasks: BackgroundTasks, body: Optional[dict] = None,
+                    _user: dict = Depends(get_current_user)):
     """Trigger background refresh of one or all sectors. Body: {sectors?: [str]}"""
     from sectors_engine import SECTOR_UNIVERSE
     target = (body or {}).get("sectors") or list(SECTOR_UNIVERSE.keys())
@@ -3832,7 +3842,7 @@ def pairs_signal(sym_a: str, sym_b: str, z_entry: float = 2.0, z_exit: float = 0
 # ---------------------------------------------------------------------------
 
 @app.post("/advisor")
-def trade_advisor(req: TradeAdvisorRequest):
+def trade_advisor(req: TradeAdvisorRequest, _user: dict = Depends(get_current_user)):
     """
     Trade Advisor: synthesizes technical signals, ML prediction, sentiment,
     options analytics, and macro context into structured trade recommendations.
