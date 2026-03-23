@@ -255,3 +255,34 @@ class DailySummary(Base):
     top_tags        = Column(JSON, default=list)
     article_count   = Column(Integer, default=0)
     sources_used    = Column(JSON, default=list)
+
+
+# ===========================================================================
+# Persistent Response Cache
+# ===========================================================================
+
+class CacheEntry(Base):
+    """
+    Persistent key-value response cache stored in the primary DB.
+
+    Survives process restarts (unlike in-memory dicts), is shared across
+    all threads in a multi-worker deployment (unlike module-level dicts),
+    and requires no extra infrastructure (unlike Redis).
+
+    Design:
+      - key is a namespaced string: "market:overview", "sentiment:SPY", etc.
+      - value_json holds the JSON-serialised API response payload.
+      - expires_at gates reads; stale rows are cleaned up by the warmer.
+      - hit_count, size_bytes, source are observability fields exposed by
+        the /cache/status admin endpoint.
+    """
+    __tablename__ = "cache_entries"
+
+    key          = Column(String, primary_key=True)         # namespaced lookup key
+    value_json   = Column(Text, nullable=False)             # JSON-serialised payload
+    expires_at   = Column(DateTime, nullable=False, index=True)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    refreshed_at = Column(DateTime, default=datetime.utcnow)
+    hit_count    = Column(Integer, default=0)
+    size_bytes   = Column(Integer, default=0)
+    source       = Column(String, default="")               # endpoint label for /cache/status

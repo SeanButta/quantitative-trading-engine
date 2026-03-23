@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "quant-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
+      "port": 5173,
+      "autoPort": true
+    },
+    {
+      "name": "quant-backend",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["/Users/sean_dlresearch/Desktop/Quantative Trading Engine/start_backend.sh"],
+      "port": 8002,
+      "autoPort": true
+    }
+  ]
+}

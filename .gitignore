@@ -10,3 +10,4 @@ frontend/dist/
 .env
 *.log
 .vercel
+quant_engine.db*
