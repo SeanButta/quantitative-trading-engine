@@ -1657,12 +1657,17 @@ function SignalsView() {
   }, [symbol]);
 
   const analyze = async () => {
-    if (!selProject || pollActive) return;
+    if (pollActive) return;
     setResults(null);
     setJobStatus("pending");
     setPollActive(false);
     try {
-      const r = await fetch(`/api/projects/${selProject}/signals/reading`, {
+      // Use project-based endpoint when a project exists; otherwise quick mode
+      // (quick mode fetches data on-the-fly — no pre-built project needed)
+      const url = selProject
+        ? `/api/projects/${selProject}/signals/reading`
+        : `/api/signals/quick`;
+      const r = await fetch(url, {
         method:  "POST",
         headers: {"Content-Type":"application/json"},
         body:    JSON.stringify({symbol: symbol.trim().toUpperCase()}),
@@ -1714,11 +1719,11 @@ function SignalsView() {
               borderRadius:6,padding:"5px 8px",width:100,outline:"none"}}/>
           {/* Analyze */}
           <SpinRing active={isRunning}>
-          <button onClick={analyze} disabled={!selProject || isRunning}
+          <button onClick={analyze} disabled={isRunning}
             style={{...mono(10, isRunning ? C.mut : C.bg, 700),
               background: isRunning ? C.dim : C.grn,
               border:"none",borderRadius:6,padding:"6px 16px",
-              cursor: selProject && !isRunning ? "pointer" : "not-allowed",
+              cursor: !isRunning ? "pointer" : "not-allowed",
               transition:"background .15s", display:"flex",alignItems:"center",gap:6}}>
             {isRunning && <RefreshCw size={11} style={{animation:"spin 1s linear infinite"}}/>}
             {isRunning ? "Analyzing…" : "Analyze"}
@@ -1727,11 +1732,12 @@ function SignalsView() {
         </div>
       </div>
 
-      {/* No project */}
-      {!selProject && (
+      {/* No project — quick mode notice */}
+      {!selProject && !isRunning && !results && jobStatus !== "failed" && (
         <Card>
-          <div style={{...mono(11,C.mut),textAlign:"center",padding:"36px 0"}}>
-            No project found. Create a project and compute features first, then come back here.
+          <div style={{...mono(11,C.mut),textAlign:"center",padding:"36px 0",lineHeight:2}}>
+            Enter a ticker and click <strong style={{color:C.txt}}>Analyze</strong> to run all 5 signals.<br/>
+            <span style={mono(9,C.mut)}>Quick mode — fetches data on-the-fly · 20–40 s</span>
           </div>
         </Card>
       )}
@@ -1760,7 +1766,7 @@ function SignalsView() {
         </Card>
       )}
 
-      {/* Empty prompt */}
+      {/* Empty prompt (project exists) */}
       {!results && !isRunning && selProject && jobStatus !== "failed" && (
         <Card>
           <div style={{...mono(11,C.mut),textAlign:"center",padding:"40px 0",lineHeight:2}}>

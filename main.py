@@ -1433,6 +1433,106 @@ def _run_signal_reading(job_id: str, project_id: str, symbol: str, feat_path: Pa
 
 
 # ---------------------------------------------------------------------------
+# Quick Signal Reading — no project required, fetches data on-the-fly
+# ---------------------------------------------------------------------------
+
+@app.post("/signals/quick")
+def create_quick_signal_reading(req: SignalReadingRequest, background_tasks: BackgroundTasks):
+    """
+    Start a quick signal-reading job for any symbol without needing a pre-built project.
+    Downloads 3y of price data via yfinance, computes features on-the-fly, then runs
+    all 5 quantitative signals. Poll /signals/reading/{job_id} for results.
+    """
+    db = SessionLocal()
+    try:
+        job_id = str(uuid.uuid4())[:8]
+        job = SignalReadingJob(
+            id=job_id,
+            project_id="__quick__",
+            symbol=req.symbol.upper(),
+            status="pending",
+        )
+        db.add(job)
+        db.commit()
+        background_tasks.add_task(_run_quick_signal_reading, job_id, req.symbol.upper())
+        return {"job_id": job_id, "status": "pending", "symbol": req.symbol.upper()}
+    finally:
+        db.close()
+
+
+def _run_quick_signal_reading(job_id: str, symbol: str):
+    """
+    Background worker: build features from yfinance data then reuse
+    _run_signal_reading with a temp parquet file.
+    """
+    tmp_path: Optional[Path] = None
+    # Mark job as running then close the session before the long yfinance fetch
+    db = SessionLocal()
+    try:
+        job = db.query(SignalReadingJob).filter(SignalReadingJob.id == job_id).first()
+        if job:
+            job.status = "running"
+            db.commit()
+    finally:
+        db.close()
+
+    try:
+
+        _load_quant_modules()
+        import yfinance as yf
+        import polars as pl
+        from feature_engine import FeatureEngine
+
+        hist = yf.Ticker(symbol).history(period="3y")
+        if hist.empty:
+            raise ValueError(f"No price data for {symbol}")
+
+        # Build Polars DataFrame without pyarrow (same pattern used elsewhere)
+        idx = hist.index
+        if hasattr(idx.dtype, "tz") and idx.dtype.tz:
+            ts_us = [int(t.timestamp() * 1_000_000) for t in idx]
+        else:
+            ts_us = [int(t.value // 1_000) for t in idx]
+        prices_df = pl.DataFrame({
+            "timestamp": ts_us,
+            "open":      hist["Open"].astype(float).tolist(),
+            "high":      hist["High"].astype(float).tolist(),
+            "low":       hist["Low"].astype(float).tolist(),
+            "close":     hist["Close"].astype(float).tolist(),
+            "volume":    hist["Volume"].astype(float).tolist(),
+            "symbol":    [symbol] * len(hist),
+        }).with_columns([pl.col("timestamp").cast(pl.Datetime("us"))])
+
+        features = FeatureEngine().compute(prices_df)
+
+        # Write to a temp parquet so _run_signal_reading can consume it
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as f:
+            tmp_path = Path(f.name)
+        features.write_parquet(tmp_path)
+
+        _run_signal_reading(job_id, "__quick__", symbol, tmp_path)
+
+    except Exception as e:
+        logger.error(f"Quick signal reading {job_id} failed: {e}", exc_info=True)
+        db2 = SessionLocal()
+        try:
+            job2 = db2.query(SignalReadingJob).filter(SignalReadingJob.id == job_id).first()
+            if job2:
+                job2.status = "failed"
+                job2.error  = str(e)
+                db2.commit()
+        finally:
+            db2.close()
+    finally:
+        if tmp_path and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Signals Reference
 # ---------------------------------------------------------------------------
 
@@ -2523,14 +2623,23 @@ def ml_signal(req: MLSignalRequest, project_id: Optional[str] = None):
                 if hist.empty:
                     raise ValueError(f"No price data for {sym}")
 
-                # Convert to polars-compatible dict
-                prices_df = pl.from_pandas(
-                    hist[["Open","High","Low","Close","Volume"]].reset_index().rename(
-                        columns={"Date":"timestamp","Open":"open","High":"high",
-                                 "Low":"low","Close":"close","Volume":"volume"}
-                    )
-                ).with_columns([
-                    pl.lit(sym).alias("symbol"),
+                # Build Polars DataFrame from plain Python lists — avoids the
+                # pyarrow dependency that pl.from_pandas triggers when yfinance
+                # returns nullable Int64/Float64 or tz-aware DatetimeTZDtype.
+                idx = hist.index
+                if hasattr(idx.dtype, "tz") and idx.dtype.tz:
+                    ts_us = [int(t.timestamp() * 1_000_000) for t in idx]
+                else:
+                    ts_us = [int(t.value // 1_000) for t in idx]  # ns → µs
+                prices_df = pl.DataFrame({
+                    "timestamp": ts_us,
+                    "open":      hist["Open"].astype(float).tolist(),
+                    "high":      hist["High"].astype(float).tolist(),
+                    "low":       hist["Low"].astype(float).tolist(),
+                    "close":     hist["Close"].astype(float).tolist(),
+                    "volume":    hist["Volume"].astype(float).tolist(),
+                    "symbol":    [sym] * len(hist),
+                }).with_columns([
                     pl.col("timestamp").cast(pl.Datetime("us")),
                 ])
                 fe = FeatureEngine()
