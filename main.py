@@ -3457,6 +3457,7 @@ def trade_advisor(req: TradeAdvisorRequest):
         sma = ta.get("sma", {})
         sma20 = (sma.get("20") or [None])[-1] if isinstance(sma.get("20"), list) else sma.get("20")
         sma50 = (sma.get("50") or [None])[-1] if isinstance(sma.get("50"), list) else sma.get("50")
+        sma200 = (sma.get("200") or [None])[-1] if isinstance(sma.get("200"), list) else sma.get("200")
         result["technical"] = {
             "triggered_count": len(triggered),
             "bull_signals":    bull_count,
@@ -3470,6 +3471,8 @@ def trade_advisor(req: TradeAdvisorRequest):
             "sma20":           round(float(sma20), 2) if sma20 is not None else None,
             "sma50":           round(float(sma50), 2) if sma50 is not None else None,
             "change_pct":      ta.get("change_pct"),
+            "above_ma50":      (latest_close > float(sma50)) if (latest_close and sma50) else None,
+            "above_ma200":     (latest_close > float(sma200)) if (latest_close and sma200) else None,
         }
     except Exception as e:
         errors.append(f"technical: {e}")
@@ -3702,6 +3705,69 @@ def trade_advisor(req: TradeAdvisorRequest):
     except Exception as e:
         errors.append(f"composite: {e}")
         result["composite"] = {"score": 0, "overall": "Hold", "components": {}}
+
+    # ── 7. Fundamentals (for Synthesis tile) ─────────────────────────────────
+    try:
+        import yfinance as _yf2
+        _t = _yf2.Ticker(sym)
+        _info = _t.info or {}
+        _price = (result.get("technical") or {}).get("latest_close")
+        # Analyst price target upside
+        _target_upside = None
+        try:
+            _apt = _t.analyst_price_targets
+            if _apt is not None:
+                _apt_d = _apt.to_dict() if hasattr(_apt, "to_dict") else _apt
+                _mean_target = _apt_d.get("mean") or _apt_d.get("current")
+                if _price and _mean_target and float(_price) > 0:
+                    _target_upside = round((float(_mean_target) - float(_price)) / float(_price) * 100, 1)
+        except Exception:
+            pass
+        # Earnings streak & last surprise
+        _earnings_streak = 0
+        _last_eps_surprise = None
+        try:
+            _eh = _t.earnings_history
+            if _eh is not None and not _eh.empty and "surprisePercent" in _eh.columns:
+                _recent = _eh["surprisePercent"].dropna().tolist()
+                _streak = 0
+                for _x in reversed(_recent):
+                    if _x > 0:
+                        _streak += 1
+                    else:
+                        break
+                _earnings_streak = _streak
+                if _recent:
+                    _last_eps_surprise = round(float(_recent[-1]) * 100, 1)
+        except Exception:
+            pass
+        _ta_data = result.get("technical") or {}
+        def _pct(v):
+            return round(float(v) * 100, 1) if v is not None else None
+        def _sf(v):
+            try: return round(float(v), 2) if v is not None else None
+            except Exception: return None
+        result["fundamentals"] = {
+            "symbol":          sym,
+            "pe_ratio":        _sf(_info.get("trailingPE")),
+            "forward_pe":      _sf(_info.get("forwardPE")),
+            "peg_ratio":       _sf(_info.get("pegRatio")),
+            "target_upside":   _target_upside,
+            "analyst_count":   _info.get("numberOfAnalystOpinions"),
+            "roe":             _pct(_info.get("returnOnEquity")),
+            "net_margin":      _pct(_info.get("profitMargins")),
+            "debt_to_equity":  _sf(_info.get("debtToEquity")),
+            "revenue_growth":  _pct(_info.get("revenueGrowth")),
+            "eps_growth":      _pct(_info.get("earningsGrowth")),
+            "earnings_streak": _earnings_streak,
+            "last_eps_surprise": _last_eps_surprise,
+            "above_ma50":      _ta_data.get("above_ma50"),
+            "above_ma200":     _ta_data.get("above_ma200"),
+            "rsi_14":          _ta_data.get("rsi"),
+        }
+    except Exception as e:
+        errors.append(f"fundamentals: {e}")
+        result["fundamentals"] = None
 
     result["warnings"] = errors
     return _sanitize(result)

@@ -13,7 +13,7 @@ import {
   Compass, Shuffle, Network, Layers, Shield, Cpu, Newspaper, Lock, Unlock, Menu
 } from "lucide-react";
 
-// ── Theme tokens ────────────────────────────────────────
+// ── Theme tokens ─────────────────────────────────────────
 const DARK = {
   bg:"#050508", surf:"#0c0c12", bdr:"#181824", txt:"#c8c8da",
   mut:"#56566e", dim:"#1c1c28", grn:"#00e676", grnBg:"rgba(0,230,118,.07)",
@@ -29,6 +29,10 @@ const LIGHT = {
 
 const ThemeCtx = createContext(DARK);
 const useC = () => useContext(ThemeCtx);
+
+// Global loading indicator — any component can signal "something is in flight"
+const LoadingCtx = createContext({active:false, push:()=>{}, pop:()=>{}});
+const useLoading = () => useContext(LoadingCtx);
 
 // ── ChartPanel — expandable fullscreen chart wrapper ────────────────────────
 function ChartPanel({ title, defaultHeight, children }) {
@@ -199,6 +203,18 @@ function Tag({children,color}) {
   const col = color || C.mut;
   return <span style={{...mono(9,col,700),background:col+"15",border:`1px solid ${col}30`,borderRadius:20,padding:"2px 8px"}}>{children}</span>;
 }
+function SpinRing({active, children, radius=8, color}) {
+  const C = useC();
+  const {push, pop} = useLoading();
+  const col = color || C.grn;
+  useEffect(()=>{ if(active){ push(); return ()=>pop(); } }, [active]);
+  return (
+    <div style={{position:"relative",display:"inline-flex"}}>
+      {active && <div style={{position:"absolute",inset:-3,borderRadius:radius+3,border:`2px solid ${col}33`,borderTopColor:col,animation:"spin 0.75s linear infinite",pointerEvents:"none",zIndex:1}}/>}
+      {children}
+    </div>
+  );
+}
 function CodeBox({children}) {
   const C = useC();
   return <div style={{padding:"12px 14px",borderRadius:10,background:C.dim}}><code style={{...mono(10,C.sky),lineHeight:1.9,whiteSpace:"pre",display:"block"}}>{children}</code></div>;
@@ -306,6 +322,7 @@ function OverviewView({onNav, onDetail}) {
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           {mkt?.as_of && <Tag color={C.mut}>Updated {mkt.as_of.slice(11,16)} UTC</Tag>}
+          <SpinRing active={mktLoading}>
           <button onClick={()=>doFetch(true)} disabled={mktLoading}
             style={{display:"flex",alignItems:"center",gap:5,...mono(9,mktLoading?C.grn:C.mut),
               padding:"5px 12px",borderRadius:8,border:`1px solid ${mktLoading?C.grn+"55":C.bdr}`,
@@ -314,6 +331,7 @@ function OverviewView({onNav, onDetail}) {
             <RefreshCw size={11} style={{animation:mktLoading?"spin 0.8s linear infinite":undefined}}/>
             {mktLoading ? "Fetching…" : "Refresh"}
           </button>
+          </SpinRing>
         </div>
       </div>
 
@@ -693,6 +711,17 @@ function BacktestView() {
   const [sigs, setSigs] = useState(["conditional_probability","pca_regime"]);
   const toggle = s => setSigs(p => p.includes(s) ? p.filter(x=>x!==s) : [...p,s]);
 
+  // Signal hover tooltip (auto-dismisses after 5s)
+  const [hovSig, setHovSig] = useState(null);
+  const hovTimer = useRef(null);
+  const SIG_TIPS = {
+    conditional_probability: "Detects when a market condition (e.g. high volume) historically precedes up-days at a rate above chance. Fires when the statistical edge clears the significance threshold.",
+    bayesian_update:         "Maintains a running estimate of expected daily return, blending prior belief with each new day's data. Adapts to regime changes via a built-in decay factor.",
+    regression_alpha:        "Strips out known factors (volume, momentum) to isolate the unexplained portion of returns — pure edge. Signal strength = the alpha t-statistic.",
+    pca_regime:              "Detects whether stocks are moving in lockstep (systemic risk-off) or independently (risk-on) by measuring concentration in the return covariance matrix.",
+    fat_tail_risk:           "Fits a fat-tailed distribution to recent returns and sizes positions so your daily VaR stays within a 2% target. Output is a recommended position size, not a direction.",
+  };
+
   // Run state
   const [step, setStep] = useState(null);
   const [errMsg, setErrMsg] = useState(null);
@@ -806,7 +835,21 @@ function BacktestView() {
         </div>
 
         <Lbl>Signals</Lbl>
-        <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>{ALL.map(s=><Pill key={s} label={s} active={sigs.includes(s)} onClick={()=>toggle(s)}/>)}</div>
+        <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:6}}>
+          {ALL.map(s=>(
+            <div key={s}
+              onMouseEnter={()=>{ if(hovTimer.current) clearTimeout(hovTimer.current); setHovSig(s); hovTimer.current=setTimeout(()=>setHovSig(null),5000); }}
+            >
+              <Pill label={s} active={sigs.includes(s)} onClick={()=>toggle(s)}/>
+            </div>
+          ))}
+        </div>
+        {hovSig && SIG_TIPS[hovSig] && (
+          <div style={{...mono(10,C.mut),background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:8,padding:"8px 12px",marginBottom:8,lineHeight:1.6}}>
+            <span style={{...mono(9,C.sky,600)}}>{SIG_META.find(m=>m.id===hovSig)?.label} · </span>
+            {SIG_TIPS[hovSig]}
+          </div>
+        )}
 
         <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"1fr 1fr 1fr",gap:12,marginBottom:14}}>
           {[["Fee (bps)",fee,setFee],["Slippage (bps)",slippage,setSlippage],["Risk-Free Rate %",rfr,setRfr]].map(([l,val,set])=>(
@@ -817,10 +860,12 @@ function BacktestView() {
           ))}
         </div>
 
+        <SpinRing active={!!running}>
         <button onClick={go} disabled={!!running}
           style={{display:"flex",alignItems:"center",gap:8,padding:"9px 20px",borderRadius:8,border:"none",cursor:running?"not-allowed":"pointer",background:running?C.dim:C.grn,color:running?C.mut:"#000",...mono(12,running?C.mut:"#000",700),transition:"all .15s"}}>
           {running ? <><RefreshCw size={14}/>Running…</> : <><Play size={14}/>Run Backtest</>}
         </button>
+        </SpinRing>
 
         {running && (
           <div style={{marginTop:14,display:"flex",flexDirection:"column",gap:4}}>
@@ -1667,6 +1712,7 @@ function SignalsView() {
             style={{...mono(10,C.txt),background:C.surf,border:`1px solid ${C.bdr}`,
               borderRadius:6,padding:"5px 8px",width:100,outline:"none"}}/>
           {/* Analyze */}
+          <SpinRing active={isRunning}>
           <button onClick={analyze} disabled={!selProject || isRunning}
             style={{...mono(10, isRunning ? C.mut : C.bg, 700),
               background: isRunning ? C.dim : C.grn,
@@ -1676,6 +1722,7 @@ function SignalsView() {
             {isRunning && <RefreshCw size={11} style={{animation:"spin 1s linear infinite"}}/>}
             {isRunning ? "Analyzing…" : "Analyze"}
           </button>
+          </SpinRing>
         </div>
       </div>
 
@@ -2028,11 +2075,13 @@ function DailySummaryTile() {
         </div>
         <div style={{marginLeft:"auto",display:"flex",gap:6,alignItems:"center"}}>
           {data.cached && <span style={mono(8,C.mut)}>cached</span>}
+          <SpinRing active={refreshing} radius={6}>
           <button onClick={()=>load(true)} disabled={refreshing}
             style={{...mono(8,C.sky,700),background:"transparent",border:`1px solid ${C.sky}30`,
               borderRadius:6,padding:"2px 8px",cursor:"pointer"}}>
             {refreshing ? "…" : "↺ Refresh"}
           </button>
+          </SpinRing>
         </div>
       </div>
 
@@ -2174,6 +2223,7 @@ function FeedsView() {
             style={{padding:"7px 12px",borderRadius:8,border:`1.5px solid ${C.grn}55`,
               background:C.surf,color:C.headingTxt,...mono(12),outline:"none",
               width:200,boxSizing:"border-box"}}/>
+          <SpinRing active={loading}>
           <button onClick={searchSymbol} disabled={loading}
             style={{padding:"7px 14px",borderRadius:8,background:loading?C.dim:C.grn,
               color:loading?C.mut:"#000",...mono(11,loading?C.mut:"#000",700),
@@ -2181,6 +2231,7 @@ function FeedsView() {
               opacity:loading?0.7:1,transition:"all .15s",minWidth:80}}>
             {loading ? "Searching…" : "Search"}
           </button>
+          </SpinRing>
           <button onClick={()=>{ setInput(""); setSymMode(false); loadFeeds(activeCategory); }}
             title="Show all feeds"
             style={{padding:"7px 9px",borderRadius:8,background:"transparent",
@@ -2342,12 +2393,14 @@ function OptimizeView() {
             <div style={{...mono(8,C.mut),marginTop:3}}>1 = aggressive · 3 = moderate · 5 = conservative</div>
           </div>
         </div>
+        <SpinRing active={loading}>
         <button onClick={run} disabled={loading}
           style={{display:"flex",alignItems:"center",gap:8,padding:"9px 20px",borderRadius:8,border:"none",
             cursor:loading?"not-allowed":"pointer",background:loading?C.dim:C.grn,
             color:loading?C.mut:"#000",...mono(12,loading?C.mut:"#000",700),transition:"all .15s"}}>
           {loading ? <><RefreshCw size={14} style={{animation:"spin 1s linear infinite"}}/>Optimizing…</> : <><Target size={14}/>Optimize Portfolio</>}
         </button>
+        </SpinRing>
         {error && <div style={{marginTop:10,padding:10,borderRadius:8,background:C.red+"12",border:`1px solid ${C.red}30`,...mono(10,C.red)}}>⚠ {error}</div>}
       </Card>
 
@@ -2640,6 +2693,7 @@ function StochasticView() {
             placeholder="Load symbol…"
             style={{...mono(11,C.txt),width:130,padding:"6px 10px",borderRadius:8,
               background:C.dim,border:`1px solid ${C.bdr}`,outline:"none"}}/>
+          <SpinRing active={ctxLoading}>
           <button onClick={loadCtx} disabled={ctxLoading}
             style={{display:"flex",alignItems:"center",gap:5,padding:"6px 14px",borderRadius:8,
               border:`1px solid ${C.bdr}`,background:"transparent",cursor:"pointer",...mono(10,C.mut)}}>
@@ -2648,6 +2702,7 @@ function StochasticView() {
               : <Search size={11}/>}
             {ctxLoading ? "Loading…" : "Load"}
           </button>
+          </SpinRing>
           {ctxData && (
             <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",borderRadius:8,
               border:`1px solid ${C.grn}25`,background:C.grnBg,...mono(10,C.grn)}}>
@@ -2680,12 +2735,14 @@ function StochasticView() {
             ))}
           </div>
           <div style={{display:"flex",alignItems:"center",gap:14,flexWrap:"wrap"}}>
+            <SpinRing active={gbmLoad}>
             <button onClick={runGBM} disabled={gbmLoad}
               style={{display:"flex",alignItems:"center",gap:7,padding:"8px 18px",borderRadius:8,
                 border:"none",cursor:gbmLoad?"not-allowed":"pointer",
                 background:gbmLoad?C.dim:C.grn,color:"#000",...mono(12,"#000",700)}}>
               {gbmLoad ? <><RefreshCw size={13} style={{animation:"spin 1s linear infinite"}}/>Simulating…</> : <>▶ Simulate</>}
             </button>
+            </SpinRing>
             {gbmRes && (<>
               <div style={{display:"flex",gap:16}}>
                 <span style={mono(10,C.mut)}>final mean: <span style={{color:C.grn}}>${gbmRes.final_mean?.toFixed(2)}</span></span>
@@ -2860,12 +2917,14 @@ function StochasticView() {
               </div>
             </div>
           </div>
+          <SpinRing active={bsLoad}>
           <button onClick={runBS} disabled={bsLoad}
             style={{display:"flex",alignItems:"center",gap:7,padding:"8px 18px",borderRadius:8,
               border:"none",cursor:"pointer",background:bsLoad?C.dim:C.grn,
               color:"#000",...mono(12,"#000",700)}}>
             {bsLoad ? <><RefreshCw size={13} style={{animation:"spin 1s linear infinite"}}/>Pricing…</> : <>▶ Price Option</>}
           </button>
+          </SpinRing>
         </Card>
 
         {/* ── BS Synthesis tile ── */}
@@ -3273,6 +3332,73 @@ function ReportView() {
 
       {run && <>
 
+        {/* ── Report Synthesis (top) ── */}
+        {(() => {
+          const sharpe  = m.sharpe_ratio    ?? 0;
+          const cagr    = m.cagr            ?? 0;
+          const dd      = m.max_drawdown    ?? 0;
+          const nTrades = m.n_trades        ?? 0;
+          const nDays   = m.n_days ?? (v.n_observations ?? 252);
+          const yrs     = Math.max(nDays / 252, 0.01);
+          const pCorr   = v.p_value_corrected    ?? 1;
+          const tStat   = Math.abs(v.t_stat      ?? 0);
+          const alpha   = m.alpha_annualized     ?? 0;
+
+          const statSig  = pCorr < 0.05 && tStat > 1.96;
+          const perfGood = sharpe > 1.0 && cagr > 0.08;
+          const riskOK   = Math.abs(dd) < 0.30;
+
+          const avgHold  = nTrades > 0 ? (yrs * 252 / nTrades) : 0;
+          const style    = avgHold < 2  ? "Intraday"
+                         : avgHold < 10 ? "Swing"
+                         : avgHold < 60 ? "Position"
+                         : "Trend-Following";
+
+          const tfNote   = avgHold < 2  ? "Intraday requires low-latency execution; brokerage costs erode edge fast."
+                         : avgHold < 10 ? "Swing-style (2–9 days); overnight gap risk demands disciplined sizing."
+                         : avgHold < 60 ? "Position-trade horizon (weeks); momentum & earnings events dominate."
+                         : "Trend-following horizon (months+); macro regime shifts are the primary risk.";
+
+          let verdict, bc, summary, action;
+          if (statSig && perfGood && riskOK) {
+            verdict = "DEPLOY CANDIDATE"; bc = C.grn;
+            summary = `Statistically significant edge confirmed (p=${n4(pCorr)}, |t|=${n4(v.t_stat)}) with Sharpe ${n4(sharpe)} and CAGR ${pct(cagr)} over ${yrs.toFixed(1)} yr${yrs>=2?"s":""}. Max drawdown ${pct(dd)} is within acceptable risk bounds. ${style} execution inferred from ${nTrades} trades across ${runSymbols}.`;
+            action  = `Evidence supports forward-testing with small live capital. Enforce position sizing discipline and monitor drawdown weekly. Consider 2–4 weeks of paper trading before scaling.`;
+          } else if (statSig && (perfGood || riskOK)) {
+            verdict = "PROMISING — REFINE"; bc = C.amb;
+            summary = `Detectable edge (p=${n4(pCorr)}) but ${!perfGood ? `performance metrics are below threshold (Sharpe ${n4(sharpe)}, CAGR ${pct(cagr)})` : `drawdown ${pct(dd)} is elevated`}. ${style} style across ${yrs.toFixed(1)} yr${yrs>=2?"s":""}. Alpha ${pct(alpha)} annualized.`;
+            action  = `Review signal combinations, fee assumptions (${cfg.fee_bps ?? 1}bp), and risk controls. Tighten drawdown limits or re-weight signals before committing capital. Re-run validation with n≥1000 permutations.`;
+          } else if (perfGood && riskOK) {
+            verdict = "MARGINAL — CAUTION"; bc = C.amb;
+            summary = `Returns appear favorable (CAGR ${pct(cagr)}, Sharpe ${n4(sharpe)}) but statistical validation is insufficient (p=${n4(pCorr)}, required <0.05). Over ${yrs.toFixed(1)} yr${yrs>=2?"s":""} results may reflect overfitting or data-mining bias.`;
+            action  = `Do not deploy. Extend the out-of-sample period and add a holdout test. Increase permutations and verify with walk-forward analysis before reconsidering.`;
+          } else {
+            verdict = "NOT VALIDATED"; bc = C.red;
+            summary = `Strategy shows no consistent edge: Sharpe ${n4(sharpe)}, CAGR ${pct(cagr)}, max drawdown ${pct(dd)}, p-value ${n4(pCorr)}. Validation: ${v.label || "N/A"}. Over ${yrs.toFixed(1)} yr${yrs>=2?"s":""} results are consistent with random performance.`;
+            action  = `Do not trade this configuration. Revisit the signal hypothesis, entry/exit logic, or universe selection. Consider different timeframes, fundamental inputs, or alternative signal combinations.`;
+          }
+
+          return (
+            <div style={{padding:"18px 20px",borderRadius:12,
+              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>REPORT SYNTHESIS</div>
+                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
+                  background:bc+"18",border:`1px solid ${bc}40`}}>{verdict}</div>
+              </div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>{summary}</div>
+              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>WHAT THIS INDICATES</div>
+              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:10}}>{action}</div>
+              <div style={{...mono(10,C.mut),borderTop:`1px solid ${bc}25`,paddingTop:8,lineHeight:1.7}}>
+                ⏱ <span style={{color:C.mut}}>Trading style:</span>{" "}
+                <span style={{color:bc,fontWeight:700}}>{style}</span>
+                {avgHold > 0 && <span style={{color:C.mut}}> · avg {avgHold.toFixed(1)} day{avgHold!==1?"s":""}/trade</span>}
+                <span style={{color:C.mut}}> — {tfNote}</span>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* ── Equity curve ── */}
         <Card>
           <Lbl>Equity Curve</Lbl>
@@ -3375,73 +3501,6 @@ function ReportView() {
             <p style={{...mono(11,C.mut),lineHeight:1.8,marginTop:6}}>{s.b}</p>
           </Card>
         ))}
-
-        {/* ── Report Synthesis ── */}
-        {(() => {
-          const sharpe  = m.sharpe_ratio    ?? 0;
-          const cagr    = m.cagr            ?? 0;
-          const dd      = m.max_drawdown    ?? 0;
-          const nTrades = m.n_trades        ?? 0;
-          const nDays   = m.n_days ?? (v.n_observations ?? 252);
-          const yrs     = Math.max(nDays / 252, 0.01);
-          const pCorr   = v.p_value_corrected    ?? 1;
-          const tStat   = Math.abs(v.t_stat      ?? 0);
-          const alpha   = m.alpha_annualized     ?? 0;
-
-          const statSig  = pCorr < 0.05 && tStat > 1.96;
-          const perfGood = sharpe > 1.0 && cagr > 0.08;
-          const riskOK   = Math.abs(dd) < 0.30;
-
-          const avgHold  = nTrades > 0 ? (yrs * 252 / nTrades) : 0;
-          const style    = avgHold < 2  ? "Intraday"
-                         : avgHold < 10 ? "Swing"
-                         : avgHold < 60 ? "Position"
-                         : "Trend-Following";
-
-          const tfNote   = avgHold < 2  ? "Intraday requires low-latency execution; brokerage costs erode edge fast."
-                         : avgHold < 10 ? "Swing-style (2–9 days); overnight gap risk demands disciplined sizing."
-                         : avgHold < 60 ? "Position-trade horizon (weeks); momentum & earnings events dominate."
-                         : "Trend-following horizon (months+); macro regime shifts are the primary risk.";
-
-          let verdict, bc, summary, action;
-          if (statSig && perfGood && riskOK) {
-            verdict = "DEPLOY CANDIDATE"; bc = C.grn;
-            summary = `Statistically significant edge confirmed (p=${n4(pCorr)}, |t|=${n4(v.t_stat)}) with Sharpe ${n4(sharpe)} and CAGR ${pct(cagr)} over ${yrs.toFixed(1)} yr${yrs>=2?"s":""}. Max drawdown ${pct(dd)} is within acceptable risk bounds. ${style} execution inferred from ${nTrades} trades across ${runSymbols}.`;
-            action  = `Evidence supports forward-testing with small live capital. Enforce position sizing discipline and monitor drawdown weekly. Consider 2–4 weeks of paper trading before scaling.`;
-          } else if (statSig && (perfGood || riskOK)) {
-            verdict = "PROMISING — REFINE"; bc = C.amb;
-            summary = `Detectable edge (p=${n4(pCorr)}) but ${!perfGood ? `performance metrics are below threshold (Sharpe ${n4(sharpe)}, CAGR ${pct(cagr)})` : `drawdown ${pct(dd)} is elevated`}. ${style} style across ${yrs.toFixed(1)} yr${yrs>=2?"s":""}. Alpha ${pct(alpha)} annualized.`;
-            action  = `Review signal combinations, fee assumptions (${cfg.fee_bps ?? 1}bp), and risk controls. Tighten drawdown limits or re-weight signals before committing capital. Re-run validation with n≥1000 permutations.`;
-          } else if (perfGood && riskOK) {
-            verdict = "MARGINAL — CAUTION"; bc = C.amb;
-            summary = `Returns appear favorable (CAGR ${pct(cagr)}, Sharpe ${n4(sharpe)}) but statistical validation is insufficient (p=${n4(pCorr)}, required <0.05). Over ${yrs.toFixed(1)} yr${yrs>=2?"s":""} results may reflect overfitting or data-mining bias.`;
-            action  = `Do not deploy. Extend the out-of-sample period and add a holdout test. Increase permutations and verify with walk-forward analysis before reconsidering.`;
-          } else {
-            verdict = "NOT VALIDATED"; bc = C.red;
-            summary = `Strategy shows no consistent edge: Sharpe ${n4(sharpe)}, CAGR ${pct(cagr)}, max drawdown ${pct(dd)}, p-value ${n4(pCorr)}. Validation: ${v.label || "N/A"}. Over ${yrs.toFixed(1)} yr${yrs>=2?"s":""} results are consistent with random performance.`;
-            action  = `Do not trade this configuration. Revisit the signal hypothesis, entry/exit logic, or universe selection. Consider different timeframes, fundamental inputs, or alternative signal combinations.`;
-          }
-
-          return (
-            <div style={{padding:"18px 20px",borderRadius:12,
-              background:bc+"09",border:`1px solid ${bc}35`,borderLeft:`3px solid ${bc}`}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                <div style={{...mono(9,C.mut,700),letterSpacing:".08em"}}>REPORT SYNTHESIS</div>
-                <div style={{...mono(9,bc,700),padding:"2px 10px",borderRadius:99,
-                  background:bc+"18",border:`1px solid ${bc}40`}}>{verdict}</div>
-              </div>
-              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:12}}>{summary}</div>
-              <div style={{...mono(9,C.mut,600),letterSpacing:".06em",marginBottom:6}}>WHAT THIS INDICATES</div>
-              <div style={{...mono(11,C.txt),lineHeight:1.8,marginBottom:10}}>{action}</div>
-              <div style={{...mono(10,C.mut),borderTop:`1px solid ${bc}25`,paddingTop:8,lineHeight:1.7}}>
-                ⏱ <span style={{color:C.mut}}>Trading style:</span>{" "}
-                <span style={{color:bc,fontWeight:700}}>{style}</span>
-                {avgHold > 0 && <span style={{color:C.mut}}> · avg {avgHold.toFixed(1)} day{avgHold!==1?"s":""}/trade</span>}
-                <span style={{color:C.mut}}> — {tfNote}</span>
-              </div>
-            </div>
-          );
-        })()}
 
       </>}
     </div>
@@ -4612,14 +4671,18 @@ function OptionsView() {
               onKeyDown={e=>e.key==="Enter"&&handleLoad()}
               placeholder="SPY" style={{...mono(13,C.txt),width:"100%",padding:"7px 11px",borderRadius:8,background:C.dim,border:`1px solid ${C.grn}60`,outline:"none",boxSizing:"border-box"}}/>
           </div>
+          <SpinRing active={loading} color={C.sky}>
           <button onClick={handleLoad} disabled={loading}
             style={{padding:"8px 18px",borderRadius:8,border:"none",background:C.sky,color:"#000",...mono(11,"#000",700),cursor:loading?"not-allowed":"pointer"}}>
             {loading ? <><RefreshCw size={12}/> Loading…</> : "Load Chain"}
           </button>
+          </SpinRing>
+          <SpinRing active={refreshing}>
           <button onClick={fetchRefresh} disabled={refreshing}
             style={{padding:"8px 18px",borderRadius:8,border:`1px solid ${C.grn}50`,background:"transparent",...mono(11,refreshing?C.mut:C.grn,700),cursor:refreshing?"not-allowed":"pointer"}}>
             {refreshing ? <><RefreshCw size={12}/> Fetching…</> : "↓ Fetch / Refresh"}
           </button>
+          </SpinRing>
         </div>
         {snapshotAt && <div style={{...mono(9,C.mut),marginTop:8}}>Snapshot: {snapshotAt.slice(0,19)} UTC</div>}
         {refreshing && jobStatus && (
@@ -5584,6 +5647,7 @@ function PortfolioView() {
                 padding:"3px 6px",color:C.txt,...mono(11)}}/>
             <span style={mono(10,C.txt)}>%</span>
           </div>
+          <SpinRing active={loading}>
           <button onClick={runAnalysis} disabled={loading||holdings.length===0}
             style={{padding:"7px 22px",borderRadius:8,border:`1px solid ${C.grn}`,
               background:loading?C.grnBg:`${C.grn}18`,cursor:loading?"not-allowed":"pointer",
@@ -5592,6 +5656,7 @@ function PortfolioView() {
               ? <><RefreshCw size={12} style={{animation:"spin 1s linear infinite"}}/> Analysing…</>
               : <><Play size={12}/> Run Analysis</>}
           </button>
+          </SpinRing>
           {job?.status==="complete" && (
             <span style={mono(10,C.grn)}>✓ Done · {results?.as_of?.slice(0,19).replace("T"," ")} UTC · {results?.n_days} trading days</span>
           )}
@@ -5901,6 +5966,7 @@ function PortfolioView() {
         <div>
           <SectionSep label="Stress Test · Historical Shock Scenarios"/>
           <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:12}}>
+            <SpinRing active={stressLoad} color={C.red}>
             <button onClick={runStressTest} disabled={stressLoad||!results}
               style={{padding:"7px 20px",borderRadius:8,
                 border:`1px solid ${C.red}`,
@@ -5912,6 +5978,7 @@ function PortfolioView() {
                 ? <><RefreshCw size={12} style={{animation:"spin 1s linear infinite"}}/> Running scenarios…</>
                 : <><Shield size={12}/> Run Stress Test</>}
             </button>
+            </SpinRing>
             {stressRes && <span style={mono(9,C.grn)}>✓ {stressRes.scenarios?.length} scenarios computed</span>}
           </div>
           {stressRes?.scenarios?.length > 0 && (
@@ -6859,6 +6926,7 @@ function TechnicalView() {
                 </div>
               ))}
             </div>
+            <SpinRing active={loading} color={TV_G}>
             <button onClick={load} disabled={loading} style={{fontFamily:"monospace",fontSize:10,
               color:loading?"#555":TV_G,background:loading?"#1a1a1a":"#26a69a15",
               border:`1px solid ${loading?"#333":"#26a69a40"}`,borderRadius:6,
@@ -6866,6 +6934,7 @@ function TechnicalView() {
               opacity:loading?0.7:1,transition:"all .15s"}}>
               {loading ? "Loading…" : "Apply & Reload"}
             </button>
+            </SpinRing>
           </div>
         )}
 
@@ -7333,11 +7402,13 @@ function MacroNarrativePanel() {
         <Globe size={13} style={{color:C.sky}}/>
         <span style={mono(9,C.sky,700)}>MACRO OUTLOOK · SYNTHESIZED OVERVIEW</span>
         <span style={{...mono(8,C.mut),marginLeft:"auto"}}>{ts ? `Updated ${ts.toLocaleTimeString()}` : ""}</span>
+        <SpinRing active={loading} radius={6}>
         <button onClick={fetch_} disabled={loading}
           style={{background:"none",border:`1px solid ${C.bdr}`,borderRadius:6,padding:"3px 8px",
             cursor:"pointer",display:"flex",alignItems:"center",gap:4,...mono(8,C.mut)}}>
           <RefreshCw size={9} style={{animation:loading?"spin 1s linear infinite":"none"}}/> Refresh
         </button>
+        </SpinRing>
       </div>
 
       {/* Key indicator chips */}
@@ -8316,6 +8387,7 @@ function TradeAdvisorView() {
               ))}
             </div>
           </div>
+          <SpinRing active={loading} color={C.sky}>
           <button onClick={run} disabled={loading}
             style={{padding:"9px 24px",borderRadius:8,border:"none",
               background:loading?C.dim:C.sky,
@@ -8327,6 +8399,7 @@ function TradeAdvisorView() {
             {loading && <RefreshCw size={12} style={{animation:"spin 1s linear infinite"}}/>}
             {loading ? "Analyzing…" : "Analyze"}
           </button>
+          </SpinRing>
         </div>
       </Card>
 
@@ -8454,6 +8527,9 @@ function TradeAdvisorView() {
             </div>
           );
         })()}
+
+        {/* ── Fundamentals Synthesis ───────────────────────────────────── */}
+        {data.fundamentals && <StockSynthesisTile snap={data.fundamentals}/>}
 
         {/* ── Composite Score Banner ────────────────────────────────────── */}
         {data.composite && (
@@ -9003,12 +9079,14 @@ function PairsView() {
               style={{width:68,padding:"8px 10px",borderRadius:8,border:`1px solid ${C.bdr}`,
                 background:C.dim,color:C.txt,...mono(12)}}/>
           </div>
+          <SpinRing active={loading} color={C.sky}>
           <button onClick={screen} disabled={loading}
             style={{padding:"9px 20px",borderRadius:8,border:"none",
               background:loading?C.mut:C.sky,color:"#000",...mono(11,undefined,700),
               cursor:loading?"not-allowed":"pointer"}}>
             {loading ? "Screening…" : "Screen Pairs"}
           </button>
+          </SpinRing>
         </div>
         <div style={{...mono(9,C.mut),marginTop:10}}>
           Quick load: {PRESETS.map(([n,s])=>(
@@ -9261,7 +9339,7 @@ function PortfolioHubView() {
   return (
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
       <div style={{display:"flex",gap:8}}>
-        {[["holdings","Holdings"],["optimizer","Optimizer"]].map(([id,l])=>(
+        {[["holdings","Portfolio Risk"],["optimizer","Optimization"]].map(([id,l])=>(
           <Pill key={id} label={l} active={tab===id} onClick={()=>setTab(id)}/>
         ))}
       </div>
@@ -10151,6 +10229,7 @@ function SectorsView() {
             title="Refresh S&P 500 constituent list from Wikipedia">
             <Globe size={11}/> Update Universe
           </button>
+          <SpinRing active={job?.status==="running"} color={C.sky}>
           <button onClick={()=>triggerRefresh()} disabled={job?.status==="running"}
             style={{...mono(9,job?.status==="running"?C.sky:C.mut),
               background:job?.status==="running"?C.sky+"12":"transparent",
@@ -10161,6 +10240,7 @@ function SectorsView() {
             <RefreshCw size={11} style={{animation:job?.status==="running"?"spin 1s linear infinite":undefined}}/>
             {job?.status==="running" ? "Refreshing…" : "Refresh All"}
           </button>
+          </SpinRing>
         </div>
       </div>
 
@@ -10302,12 +10382,13 @@ const NAV=[
   {id:"markets",   l:"Markets",   I:BarChart2},   // Overview + News
   {id:"advisor",   l:"Research",  I:Compass},
   {id:"macro",     l:"Macro",     I:Database},
-  {id:"technical", l:"Technical", I:TrendingUp},
-  {id:"options",   l:"Options",   I:Activity},
   {id:"sectors",   l:"Sectors",   I:Layers},
-  {id:"signals",   l:"Signals",   I:Zap},
+  {id:"options",   l:"Options",   I:Activity},
+  {id:"technical", l:"Technical", I:TrendingUp},
+  {id:"signals",   l:"Quant",     I:Zap},
   {id:"pairs",     l:"Pairs",     I:Shuffle},
   {id:"portfolio", l:"Portfolio", I:Briefcase},   // Holdings + Optimizer
+  {id:"paper",     l:"Paper",     I:BookOpen},    // Paper trading
   {id:"lab",       l:"Lab",       I:FlaskConical},// Backtest + Report + Stochastic
 ];
 
@@ -10389,6 +10470,93 @@ const TICKER_META = {
     desc:"Tracks DXY — a trade-weighted USD basket vs 6 currencies. Dollar strength = risk-off signal, headwind for EM assets, commodities, and US multinational earnings."},
 };
 
+// ── MacroDetailView summary generator ────────────────────────────────────────
+function generateMarketSummary(sym, meta, last, ret3m, ret6m, ret9m, ret12m, hi52, lo52, vol1y, isYield) {
+  if (last == null) return null;
+  const fmtR = r => r == null ? "—" : `${r >= 0 ? "+" : ""}${r.toFixed(1)}%`;
+  const fmtP = v => v == null ? "—" : isYield
+    ? `${v.toFixed(2)}%`
+    : `$${v.toLocaleString("en", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  // Position within 52W range
+  let rangePos = "mid-range";
+  if (hi52 != null && lo52 != null) {
+    const range = hi52 - lo52;
+    const pos = range > 0 ? (last - lo52) / range : 0.5;
+    if (pos > 0.85)      rangePos = "near its 52-week highs";
+    else if (pos < 0.15) rangePos = "near its 52-week lows";
+    else if (pos > 0.6)  rangePos = "in the upper half of its 52-week range";
+    else                 rangePos = "in the lower half of its 52-week range";
+  }
+
+  // Momentum: compare recent 3M pace to 12M average pace
+  let momentumNote = "";
+  if (ret3m != null && ret12m != null) {
+    const annualised3m = ret3m * 4;
+    if (annualised3m > ret12m + 12 && ret3m > 0)       momentumNote = " Momentum is accelerating — the most recent quarter is outpacing the 12-month trend, suggesting the move is gaining strength.";
+    else if (annualised3m < ret12m - 12 && ret12m > 0)  momentumNote = " However, near-term momentum is fading relative to the prior year, which may signal a consolidation phase ahead.";
+    else if (ret3m > 0 && ret12m < 0)                   momentumNote = " Notably, the 3-month trend has turned positive despite a negative 12-month backdrop — a potential early inflection point worth monitoring.";
+    else if (ret3m < 0 && ret12m > 0)                   momentumNote = " Caution: the 3-month trend has rolled over despite a positive 12-month picture, suggesting a possible short-term correction underway.";
+  }
+
+  // Paragraph 1 — factual trend narrative
+  let p1 = `${meta.name} (${sym}) is currently ${rangePos} at ${fmtP(last)}`;
+  if (ret12m != null) p1 += `, ${ret12m >= 0 ? "up" : "down"} ${fmtR(Math.abs(ret12m))} over the trailing 12 months`;
+  p1 += ". ";
+  if (ret3m != null && ret6m != null && ret9m != null) {
+    p1 += `Breaking down by period: 3-month ${fmtR(ret3m)} · 6-month ${fmtR(ret6m)} · 9-month ${fmtR(ret9m)} · 12-month ${fmtR(ret12m)}.`;
+    p1 += momentumNote;
+  }
+
+  // Paragraph 2 — asset-specific conclusion
+  let p2 = "";
+  if (sym === "^TNX") {
+    if (last > 4.5) p2 = "At current levels, 10-year yields remain elevated by post-2008 standards. This sustains pressure on equity valuations — each 10bps rise in the risk-free rate mechanically reduces the present value of future earnings. Mortgage rates stay high, weighing on housing. The path lower requires either a clear inflation reversal or a growth scare that forces the Fed's hand.";
+    else if (last > 4.0) p2 = "Yields in the 4–4.5% range reflect the market pricing meaningful Fed uncertainty — neither fully hawkish nor dovish. Financial conditions remain moderately tight. Equity multiples are compressed relative to the 2020–21 zero-rate era, but not extreme. Watch the 3M/10Y spread: if still inverted, the recession clock is ticking.";
+    else p2 = "A yield below 4% signals a meaningful shift toward easier financial conditions, typically supportive for rate-sensitive equities, growth stocks, and housing. The question is whether the move reflects a soft landing or a harder growth scare — the distinction matters significantly for how equity markets interpret the signal.";
+    if (ret3m != null) p2 += ret3m > 0.25 ? " The recent rise in yields is tightening conditions in real time." : ret3m < -0.25 ? " The recent decline in yields is providing near-term relief to risk assets." : "";
+  } else if (sym === "^IRX") {
+    p2 = "The 3-month T-bill yield is the market's best read on near-term Fed funds expectations. When it exceeds the 10-year yield (inverted curve), historical recession probability within 12–18 months rises sharply. ";
+    if (last > 4.5) p2 += "Current short-term rates remain high, consistent with a still-restrictive Fed posture. Any pivot signal from the FOMC would compress this yield rapidly.";
+    else p2 += "The current level suggests the market is beginning to price in eventual cuts, though timing remains uncertain. Monitor Fed statement language closely.";
+  } else if (["SPY","QQQ","IWM","DIA"].includes(sym)) {
+    const bench = sym === "QQQ" ? "Nasdaq 100" : sym === "IWM" ? "Russell 2000 small-caps" : sym === "DIA" ? "Dow blue-chips" : "S&P 500";
+    if (ret12m != null && ret12m > 20) p2 = `The ${bench}'s strong 12-month run reflects a combination of earnings resilience and/or multiple expansion. At this point in the cycle, the key risk is whether valuations have run ahead of fundamentals. Watch forward P/E relative to the earnings growth rate.`;
+    else if (ret12m != null && ret12m > 5) p2 = `The ${bench} has delivered solid returns over the past year — consistent with a maturing bull market. The challenge is whether earnings growth can continue to justify current multiples as interest rates stay elevated.`;
+    else if (ret12m != null && ret12m < -10) p2 = `The ${bench}'s 12-month drawdown reflects either a fundamental earnings deterioration or a valuation reset driven by higher rates. Look for stabilisation in forward earnings estimates as the key signal that a base is forming.`;
+    else p2 = `The ${bench}'s relatively flat 12-month return masks underlying volatility and reflects a market in equilibrium between rate pressure and earnings resilience. A decisive break in either inflation data or corporate guidance would likely resolve the range.`;
+  } else if (sym === "^VIX") {
+    if (last < 15) p2 = "VIX below 15 signals broad complacency. Risk assets can continue to grind higher in this environment, but tail risk is significantly underpriced. This is the environment where surprises — geopolitical, macro, or earnings — cause the largest vol spikes. Consider it a low-cost window to hedge.";
+    else if (last < 20) p2 = "VIX in the 15–20 zone reflects normal market uncertainty. Not complacent, not panicked. The market is appropriately pricing near-term risk. Watch for a break above 20 as an early signal of deteriorating sentiment.";
+    else if (last < 30) p2 = "VIX above 20 signals elevated fear. Participants are paying up for downside protection. Historically, elevated VIX environments precede higher forward equity returns as risk is more fairly priced, but the path there can be painful.";
+    else p2 = "VIX above 30 is panic territory. These spikes are historically mean-reverting, but can persist during systemic stress. The key question is whether the shock is transitory (buy the spike) or the beginning of a regime change (stay defensive).";
+  } else if (sym === "GLD") {
+    if (ret12m != null && ret12m > 15) p2 = "Gold's strong run reflects a combination of real yield uncertainty, central bank accumulation, and geopolitical risk demand. The dollar relationship has loosened — gold has rallied even during periods of USD strength, suggesting structural demand from non-Western central banks diversifying away from Treasuries.";
+    else p2 = "Gold's outlook hinges on three factors: real yields (inverse relationship), dollar direction (inverse), and geopolitical/safe-haven demand. A genuine Fed pivot lower or a dollar weakening cycle would be the most powerful bullish catalyst. Watch TIP (TIPS ETF) as a real-yield proxy.";
+  } else if (sym === "USO") {
+    if (ret12m != null && ret12m > 10) p2 = "Oil's strength signals healthy global demand or supply constraints (OPEC+ discipline, geopolitical disruptions). Sustained crude above $80 starts feeding through to headline CPI with a 4–6 week lag, complicating the Fed's inflation narrative. Energy sector earnings are directly correlated.";
+    else if (ret12m != null && ret12m < -10) p2 = "Falling crude signals softening global demand, easing supply constraints, or demand destruction from prior high prices. This provides disinflationary relief to the Fed and reduces energy cost pressure on consumer spending, but also signals possible global growth weakness.";
+    else p2 = "Oil at current levels reflects balanced supply/demand dynamics. The marginal driver at this point is China demand (economic recovery pace) and OPEC+ supply discipline. A Chinese demand surprise or OPEC production change would be the most likely catalysts for a directional break.";
+  } else if (sym === "COPX") {
+    if (ret12m != null && ret12m > 10) p2 = "'Dr. Copper' performing well is a positive global growth signal, particularly for industrial activity and China's manufacturing recovery. Structurally, the energy transition (EVs, grid infrastructure) creates a multi-year demand tailwind that sets a higher base for copper prices.";
+    else p2 = "Copper's weakness is often a leading indicator of slowing global growth, particularly Chinese industrial output. Monitor PMI data from China and Germany as directional guides. Longer-term, energy transition demand provides structural support, but cyclical headwinds can overwhelm that in the near term.";
+  } else if (sym === "HYG") {
+    if (ret12m != null && ret12m > 5) p2 = "High-yield bonds performing well signals healthy corporate credit conditions — companies can service debt, and default rates are contained. This is a positive backdrop for equities broadly. When HYG leads equities, it typically signals genuine risk appetite rather than just momentum.";
+    else if (ret12m != null && ret12m < -5) p2 = "HYG underperformance signals widening credit spreads — the market is demanding more compensation for lending to lower-quality borrowers. This is an early warning of tightening financial conditions and rising default expectations. Historically, sustained HYG weakness precedes equity market stress by 3–6 months.";
+    else p2 = "High-yield spreads at moderate levels suggest neither euphoria nor stress in credit markets. Watch for spread widening (HYG falling relative to LQD) as the earliest warning signal of changing credit conditions — it typically leads equity volatility by several weeks.";
+  } else if (sym === "LQD") {
+    p2 = "Investment-grade corporate bonds are primarily driven by duration (interest rate sensitivity) rather than credit risk. LQD tends to fall when rates rise and rally when the Fed pivots. Compare LQD vs HYG: if LQD outperforms, it signals rate concerns driving bonds lower rather than credit concerns — a different risk entirely.";
+  } else if (sym === "UUP") {
+    if (ret12m != null && ret12m > 5) p2 = "Dollar strength creates tangible headwinds: US multinational earnings face FX translation losses, commodity prices fall (dollar-denominated), and EM economies with dollar-denominated debt see financial conditions tighten. It often signals US economic outperformance but can self-limit by slowing exports.";
+    else if (ret12m != null && ret12m < -5) p2 = "Dollar weakness provides a meaningful tailwind: commodity prices rise, US multinationals' overseas earnings translate back favorably, and EM assets typically outperform. Watch whether this reflects genuine Fed dovishness or just a rebalancing of relative growth expectations.";
+    else p2 = "The dollar's relative stability suggests balanced global macro conditions with no dominant directional catalyst. A significant shift in US vs. rest-of-world growth differentials or a surprise Fed pivot would be the most likely trigger for a sustained directional move.";
+  } else {
+    p2 = "Compare this performance against correlated assets to assess whether the move is asset-specific or part of a broader macro shift. Sustained divergence from historical correlations is often the most actionable signal.";
+  }
+
+  return { p1, p2 };
+}
+
 // ── MacroDetailView ─────────────────────────────────────────────────────────
 function MacroDetailView({ sym, onBack }) {
   const C        = useC();
@@ -10435,6 +10603,18 @@ function MacroDetailView({ sym, onBack }) {
   const ret5y  = (last && fiveYrFirst)  ? (last/fiveYrFirst  - 1)*100 : null;
   const ret1y  = (last && oneYrAgoPrice) ? (last/oneYrAgoPrice - 1)*100 : null;
   const fromHi = (last && hi52)          ? (last/hi52          - 1)*100 : null;
+
+  const ms3m  = Date.now() -  91 * 24 * 60 * 60 * 1000;
+  const ms6m  = Date.now() - 182 * 24 * 60 * 60 * 1000;
+  const ms9m  = Date.now() - 273 * 24 * 60 * 60 * 1000;
+  const p3m   = allData.findLast?.(d => new Date(d.date).getTime() <= ms3m)?.close ?? null;
+  const p6m   = allData.findLast?.(d => new Date(d.date).getTime() <= ms6m)?.close ?? null;
+  const p9m   = allData.findLast?.(d => new Date(d.date).getTime() <= ms9m)?.close ?? null;
+  const ret3m = (last && p3m) ? (last/p3m - 1)*100 : null;
+  const ret6m = (last && p6m) ? (last/p6m - 1)*100 : null;
+  const ret9m = (last && p9m) ? (last/p9m - 1)*100 : null;
+
+  const summary = generateMarketSummary(sym, meta, last, ret3m, ret6m, ret9m, ret1y, hi52, lo52, vol1y, isYield);
 
   const fmt = {
     price: v => v == null ? "—" : isYield ? `${v.toFixed(2)}%` : `$${v.toLocaleString("en",{minimumFractionDigits:2,maximumFractionDigits:2})}`,
@@ -10510,6 +10690,25 @@ function MacroDetailView({ sym, onBack }) {
       )}
 
       {chartData.length > 0 && <>
+
+        {/* ── Market Summary ── */}
+        {summary && (
+          <Card>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+              <div style={{width:3,height:28,borderRadius:2,background:meta.col,flexShrink:0}}/>
+              <div>
+                <div style={{...mono(8,meta.col,700),letterSpacing:"0.1em"}}>MARKET ANALYSIS</div>
+                <div style={mono(8,C.mut)}>Based on 3 · 6 · 9 · 12 month performance</div>
+              </div>
+            </div>
+            <div style={{...mono(11,C.txt),lineHeight:1.85,marginBottom:12,paddingLeft:11,borderLeft:`1px solid ${meta.col}20`}}>
+              {summary.p1}
+            </div>
+            <div style={{...mono(10,C.mut),lineHeight:1.85,paddingLeft:11,borderLeft:`1px solid ${C.bdr}`}}>
+              {summary.p2}
+            </div>
+          </Card>
+        )}
 
         {/* ── Chart ── */}
         <Card>
@@ -10652,10 +10851,646 @@ function MacroDetailView({ sym, onBack }) {
   );
 }
 
+// ── Paper Trading ─────────────────────────────────────────────────────────────
+function normCdf(x){
+  const a=[0.31938153,-0.356563782,1.781477937,-1.821255978,1.330274429];
+  const t=1/(1+0.2316419*Math.abs(x));
+  let p=0,ti=t; for(let i=0;i<5;i++){p+=a[i]*ti;ti*=t;}
+  const v=1-(1/Math.sqrt(2*Math.PI))*Math.exp(-0.5*x*x)*p;
+  return x>=0?v:1-v;
+}
+function bsPrice(S,K,T,r,sigma,isCall){
+  if(T<=0)return Math.max(0,isCall?S-K:K-S);
+  const d1=(Math.log(S/K)+(r+0.5*sigma*sigma)*T)/(sigma*Math.sqrt(T));
+  const d2=d1-sigma*Math.sqrt(T);
+  return isCall?S*normCdf(d1)-K*Math.exp(-r*T)*normCdf(d2):K*Math.exp(-r*T)*normCdf(-d2)-S*normCdf(-d1);
+}
+function dte(exp){return Math.max(0,(new Date(exp)-Date.now())/86400000);}
+function ppLoad(key,def){try{const s=localStorage.getItem(key);return s?JSON.parse(s):def;}catch{return def;}}
+function ppSave(key,val){try{localStorage.setItem(key,JSON.stringify(val));}catch{}}
+function ppId(){return Date.now().toString(36)+Math.random().toString(36).slice(2);}
+
+function CloseDialog({pos,prices,onClose,onConfirm}){
+  const C=useC();
+  const [cp,setCp]=useState(prices[pos.symbol]?String(prices[pos.symbol].toFixed(2)):"");
+  const [fetching,setFetching]=useState(false);
+  const inp={background:C.dim,border:`1px solid ${C.bdr}`,borderRadius:8,padding:"8px 11px",color:C.txt,fontFamily:"monospace",fontSize:11,width:"100%",outline:"none"};
+  async function fetchCurrent(){
+    setFetching(true);
+    try{
+      const r=await fetch(`/api/market/price/${pos.symbol}?period=1mo`);
+      const d=await r.json();
+      const arr=Array.isArray(d)?d:d.prices||[];
+      if(arr.length)setCp(arr[arr.length-1].close.toFixed(2));
+    }catch{}
+    setFetching(false);
+  }
+  const closePrice=parseFloat(cp);
+  const isOpt=pos.type!=="equity";
+  let previewPnl=null;
+  if(!isNaN(closePrice)&&closePrice>0){
+    if(!isOpt) previewPnl=(closePrice-pos.entryPrice)*pos.qty*(pos.side==="long"?1:-1);
+    else{
+      const T=dte(pos.expiry)/365;
+      const prem=bsPrice(closePrice,pos.strike,T,0.045,pos.iv/100,pos.type==="call");
+      previewPnl=(pos.side==="buy"?1:-1)*(prem-pos.entryPremium)*pos.contracts*100;
+    }
+  }
+  return (
+    <div style={{position:"fixed",inset:0,background:"#000b",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center"}} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:14,padding:24,width:"min(420px,92vw)"}}>
+        <div style={{...mono(14,C.txt,700),marginBottom:4}}>Close {pos.symbol}</div>
+        <div style={{...mono(10,C.mut),marginBottom:16}}>
+          {isOpt?`${pos.type.toUpperCase()} $${pos.strike} · exp ${pos.expiry} · ${pos.contracts} contract${pos.contracts>1?"s":""}`:`${pos.side.toUpperCase()} · ${pos.qty} shares · entry $${pos.entryPrice.toFixed(2)}`}
+        </div>
+        <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:6}}>{isOpt?"Current Underlying ($)":"Close Price ($)"}</div>
+        <div style={{display:"flex",gap:8,marginBottom:12}}>
+          <input type="number" value={cp} onChange={e=>setCp(e.target.value)} placeholder="0.00" style={{...inp,flex:1}}/>
+          <button onClick={fetchCurrent} disabled={fetching} style={{...mono(10,C.sky,600),border:`1px solid ${C.sky}30`,background:`${C.sky}10`,borderRadius:8,padding:"7px 14px",cursor:"pointer"}}>{fetching?"…":"Fetch"}</button>
+        </div>
+        {previewPnl!=null&&(
+          <div style={{background:C.dim,borderRadius:8,padding:12,marginBottom:14,textAlign:"center"}}>
+            <div style={mono(9,C.mut)}>Estimated P&L</div>
+            <div style={{...mono(20,previewPnl>=0?C.grn:C.red,700),marginTop:4}}>{previewPnl>=0?"+":""}${previewPnl.toFixed(2)}</div>
+          </div>
+        )}
+        <div style={{display:"flex",gap:10}}>
+          <button onClick={onClose} style={{...mono(10,C.mut,600),flex:1,border:`1px solid ${C.bdr}`,background:"transparent",borderRadius:8,padding:"9px",cursor:"pointer"}}>Cancel</button>
+          <button onClick={()=>onConfirm(closePrice)} disabled={isNaN(closePrice)||closePrice<=0} style={{...mono(10,C.grn,600),flex:1,border:`1px solid ${C.grn}30`,background:`${C.grn}12`,borderRadius:8,padding:"9px",cursor:"pointer",opacity:(isNaN(closePrice)||closePrice<=0)?0.4:1}}>Confirm Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PaperTradingView(){
+  const C=useC();
+  const [cash,   setCash0] = useState(()=>ppLoad("pp_cash",100000));
+  const [pos,    setPos0]  = useState(()=>ppLoad("pp_pos",[]));
+  const [jnl,    setJnl0]  = useState(()=>ppLoad("pp_jnl",[]));
+  const [prices, setPrices]= useState({});
+  const [sub,    setSub]   = useState("positions");
+  const [busy,   setBusy]  = useState(false);
+  const [msg,    setMsg]   = useState(null);
+  const [closeT, setCloseT]= useState(null);
+  const [kind,   setKind]  = useState("equity");
+  const [eqF,    setEqF]   = useState({sym:"",qty:"",side:"long",notes:""});
+  const [eqQ,    setEqQ]   = useState(null);
+  const [optSym,        setOptSym]        = useState("");
+  const [optU,          setOptU]          = useState(null);
+  const [optExpiries,   setOptExpiries]   = useState([]);
+  const [optSelExp,     setOptSelExp]     = useState(null);
+  const [optChain,      setOptChain]      = useState([]);
+  const [optTypeFilter, setOptTypeFilter] = useState("call");
+  const [optSelC,       setOptSelC]       = useState(null);
+  const [optQty,        setOptQty]        = useState("1");
+  const [optSide,       setOptSide]       = useState("buy");
+  const [optNotes,      setOptNotes]      = useState("");
+  const [chainBusy,     setChainBusy]     = useState(false);
+
+  const setCash = v=>{setCash0(v);ppSave("pp_cash",v);};
+  const setPos  = v=>{setPos0(v); ppSave("pp_pos",v);};
+  const setJnl  = v=>{setJnl0(v); ppSave("pp_jnl",v);};
+  const flash   = (t,ok=true)=>{setMsg({t,ok});setTimeout(()=>setMsg(null),3500);};
+
+  async function fetchQ(sym){
+    const r=await fetch(`/api/market/price/${sym.toUpperCase()}?period=1mo`);
+    if(!r.ok)throw new Error(`No data: ${sym}`);
+    const d=await r.json();
+    const a=Array.isArray(d)?d:d.data||d.prices||[];
+    if(!a.length)throw new Error(`Empty: ${sym}`);
+    return a[a.length-1].close;
+  }
+
+  async function refreshPrices(){
+    if(!pos.length){flash("No open positions",false);return;}
+    setBusy(true);
+    const syms=[...new Set(pos.map(p=>p.symbol))];
+    const res={};
+    await Promise.all(syms.map(async s=>{try{res[s]=await fetchQ(s);}catch{}}));
+    setPrices(prev=>({...prev,...res}));
+    flash(`Prices updated for ${Object.keys(res).length} symbol(s)`);
+    setBusy(false);
+  }
+
+  async function doGetEqQ(){
+    if(!eqF.sym)return;
+    setBusy(true);
+    try{const p=await fetchQ(eqF.sym);setEqQ(p);setPrices(prev=>({...prev,[eqF.sym.toUpperCase()]:p}));}
+    catch(e){flash(e.message,false);}
+    setBusy(false);
+  }
+
+  async function fetchOptChain(){
+    if(!optSym)return;
+    setChainBusy(true);
+    try{
+      // fetch underlying price and expirations in parallel
+      const sym=optSym.toUpperCase();
+      const [p, r] = await Promise.all([
+        fetchQ(sym),
+        fetch(`/api/options/${sym}/expirations`),
+      ]);
+      setOptU(p);
+      setPrices(prev=>({...prev,[sym]:p}));
+
+      if(r.status===404){
+        // no cached chain — trigger a single-symbol refresh from yfinance
+        flash(`No cached chain for ${sym} — fetching live data…`,true);
+        const jr=await fetch('/api/options/refresh',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({symbols:[sym],risk_free_rate:0.045,max_workers:1}),
+        });
+        if(!jr.ok)throw new Error(`Could not start options refresh for ${sym}`);
+        const {job_id}=await jr.json();
+        // poll until complete (max 60s)
+        for(let i=0;i<30;i++){
+          await new Promise(res=>setTimeout(res,2000));
+          const pr=await fetch(`/api/options/refresh/${job_id}`);
+          const pd=await pr.json();
+          if(pd.status==='complete')break;
+          if(pd.status==='failed')throw new Error(`Options refresh failed for ${sym}`);
+        }
+        // retry expirations
+        const r2=await fetch(`/api/options/${sym}/expirations`);
+        if(!r2.ok)throw new Error(`Still no options data for ${sym} after refresh`);
+        const d2=await r2.json();
+        setOptExpiries(d2.expirations||[]);
+      } else {
+        if(!r.ok)throw new Error(`Failed to load expirations for ${sym}`);
+        const d=await r.json();
+        setOptExpiries(d.expirations||[]);
+      }
+      setOptSelExp(null);
+      setOptChain([]);
+      setOptSelC(null);
+      flash(`Chain loaded for ${sym}`,true);
+    }catch(e){flash(e.message,false);}
+    setChainBusy(false);
+  }
+
+  async function fetchExpiry(exp){
+    setOptSelExp(exp);
+    setOptSelC(null);
+    setChainBusy(true);
+    try{
+      const r=await fetch(`/api/options/${optSym.toUpperCase()}?expiration=${exp}&limit=300`);
+      if(!r.ok)throw new Error(`Failed to load chain for ${exp}`);
+      const d=await r.json();
+      setOptChain(d.data||[]);
+    }catch(e){flash(e.message,false);}
+    setChainBusy(false);
+  }
+
+  function openEquity(){
+    const sym=eqF.sym.toUpperCase(), qty=parseInt(eqF.qty);
+    if(!sym||!qty||qty<=0||!eqQ)return flash("Enter symbol, qty, and get quote first",false);
+    const cost=eqQ*qty;
+    if(eqF.side==="long"&&cost>cash)return flash("Insufficient cash",false);
+    const p={id:ppId(),type:"equity",symbol:sym,side:eqF.side,qty,entryPrice:eqQ,entryDate:new Date().toISOString(),notes:eqF.notes};
+    setPos([...pos,p]);
+    setCash(eqF.side==="long"?cash-cost:cash+cost);
+    const action=eqF.side==="long"?"BUY":"SELL SHORT";
+    setJnl([{id:ppId(),date:new Date().toISOString(),action,type:"equity",symbol:sym,qty,price:eqQ,total:cost,pnl:null,notes:eqF.notes},...jnl]);
+    setEqF({sym:"",qty:"",side:"long",notes:""});setEqQ(null);
+    flash(`${action} ${qty}× ${sym} @ $${eqQ.toFixed(2)}`);
+    setSub("positions");
+  }
+
+  function openOptions(){
+    if(!optSelC||!optU)return flash("Select a contract from the chain first",false);
+    const contracts=parseInt(optQty)||1;
+    const entryPremium=optSelC.last_price>0?optSelC.last_price:(optSelC.bid+optSelC.ask)/2||0;
+    if(!entryPremium)return flash("No valid price for this contract",false);
+    const total=entryPremium*contracts*100;
+    if(optSide==="buy"&&total>cash)return flash("Insufficient cash",false);
+    const sym=optSym.toUpperCase();
+    const p={id:ppId(),type:optSelC.option_type,symbol:sym,strike:optSelC.strike,expiry:optSelC.expiration,side:optSide,contracts,entryPremium,underlyingAtEntry:optU,iv:optSelC.implied_vol*100,delta:optSelC.delta,entryDate:new Date().toISOString(),notes:optNotes};
+    setPos([...pos,p]);
+    setCash(optSide==="buy"?cash-total:cash+total);
+    const action=`${optSide==="buy"?"BUY":"WRITE"} ${optSelC.option_type.toUpperCase()}`;
+    setJnl([{id:ppId(),date:new Date().toISOString(),action,type:optSelC.option_type,symbol:sym,strike:optSelC.strike,expiry:optSelC.expiration,contracts,price:entryPremium,total,pnl:null,notes:optNotes},...jnl]);
+    setOptSelC(null);setOptQty("1");setOptNotes("");
+    flash(`${action} ${contracts}× ${sym} $${optSelC.strike} exp ${optSelC.expiration}`);
+    setSub("positions");
+  }
+
+  function closePos(p,closePrice){
+    let pnl,cashDelta;
+    if(p.type==="equity"){
+      pnl=(closePrice-p.entryPrice)*p.qty*(p.side==="long"?1:-1);
+      cashDelta=p.side==="long"?closePrice*p.qty:-(closePrice*p.qty);
+    }else{
+      const T=dte(p.expiry)/365;
+      const prem=bsPrice(closePrice,p.strike,T,0.045,p.iv/100,p.type==="call");
+      pnl=(p.side==="buy"?1:-1)*(prem-p.entryPremium)*p.contracts*100;
+      cashDelta=p.side==="buy"?prem*p.contracts*100:-(prem*p.contracts*100);
+    }
+    const action=p.type==="equity"?(p.side==="long"?"SELL (CLOSE)":"BUY (COVER)"):`CLOSE ${p.type.toUpperCase()}`;
+    setJnl([{id:ppId(),date:new Date().toISOString(),action,type:p.type,symbol:p.symbol,strike:p.strike,expiry:p.expiry,qty:p.qty||p.contracts,price:closePrice,total:Math.abs(cashDelta),pnl:Math.round(pnl*100)/100,notes:p.notes},...jnl]);
+    setPos(pos.filter(x=>x.id!==p.id));
+    setCash(cash+cashDelta);
+    setCloseT(null);
+    flash(`${p.symbol} closed · P&L: ${pnl>=0?"+":""}$${pnl.toFixed(2)}`,pnl>=0);
+  }
+
+  function unrealPnL(p){
+    const cp=prices[p.symbol];
+    if(!cp)return null;
+    if(p.type==="equity")return(cp-p.entryPrice)*p.qty*(p.side==="long"?1:-1);
+    const T=dte(p.expiry)/365;
+    const prem=bsPrice(cp,p.strike,T,0.045,p.iv/100,p.type==="call");
+    return(p.side==="buy"?1:-1)*(prem-p.entryPremium)*p.contracts*100;
+  }
+
+  const posValue=useMemo(()=>pos.reduce((acc,p)=>{
+    if(p.type==="equity"){const cp=prices[p.symbol]??p.entryPrice;return acc+(p.side==="long"?cp*p.qty:-(cp*p.qty));}
+    const cp=prices[p.symbol]??p.underlyingAtEntry;
+    const T=dte(p.expiry)/365;
+    const prem=bsPrice(cp,p.strike,T,0.045,p.iv/100,p.type==="call");
+    return acc+(p.side==="buy"?prem*p.contracts*100:-(prem*p.contracts*100));
+  },0),[pos,prices]);
+  const portValue=cash+posValue;
+  const totalPnL=portValue-100000;
+  const closed=jnl.filter(j=>j.pnl!=null);
+  const wins=closed.filter(j=>j.pnl>0).length;
+  const realPnL=closed.reduce((a,j)=>a+(j.pnl||0),0);
+
+  const inp={background:C.dim,border:`1px solid ${C.bdr}`,borderRadius:8,padding:"8px 11px",color:C.txt,fontFamily:"monospace",fontSize:11,width:"100%",outline:"none"};
+  const sbtn=(col,active)=>({...mono(10,active?col:C.mut,600),border:`1px solid ${active?col+"40":C.bdr}`,background:active?col+"10":"transparent",borderRadius:8,padding:"6px 14px",cursor:"pointer"});
+  const fmt2=n=>n.toLocaleString("en",{minimumFractionDigits:2,maximumFractionDigits:2});
+
+  return(
+    <div style={{padding:20,maxWidth:1100,margin:"0 auto"}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12,marginBottom:20}}>
+        <div>
+          <div style={{...mono(9,C.sky,700),letterSpacing:"0.18em",marginBottom:4}}>PAPER TRADING</div>
+          <div style={mono(22,C.txt,700)}>Virtual Portfolio</div>
+          <div style={{...mono(10,C.mut),marginTop:2}}>Simulate trades with real market data · no real money at risk</div>
+        </div>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+          {[
+            ["Cash",`$${fmt2(cash)}`,C.grn],
+            ["Portfolio",`$${fmt2(portValue)}`,C.sky],
+            ["Total P&L",`${totalPnL>=0?"+":""}$${fmt2(totalPnL)}`,totalPnL>=0?C.grn:C.red],
+          ].map(([l,v,col])=>(
+            <Card key={l}><Lbl>{l}</Lbl><div style={mono(16,col,700)}>{v}</div></Card>
+          ))}
+        </div>
+      </div>
+
+      {/* Flash message */}
+      {msg&&<div style={{...mono(11,msg.ok?C.grn:C.red),background:msg.ok?C.grnBg:`${C.red}12`,border:`1px solid ${msg.ok?C.grn:C.red}30`,borderRadius:8,padding:"10px 14px",marginBottom:14}}>{msg.t}</div>}
+
+      {/* Sub-tabs */}
+      <div style={{display:"flex",gap:8,marginBottom:16}}>
+        {[["positions","Positions"],["newtrade","New Trade"],["journal","Journal"]].map(([id,l])=>(
+          <Pill key={id} label={l} active={sub===id} onClick={()=>setSub(id)}/>
+        ))}
+      </div>
+
+      {/* ── POSITIONS ── */}
+      {sub==="positions"&&(
+        <div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+            <div style={mono(11,C.mut)}>{pos.length} open position{pos.length!==1?"s":""}</div>
+            <button onClick={refreshPrices} disabled={busy} style={{...mono(10,C.sky,600),border:`1px solid ${C.sky}30`,background:`${C.sky}10`,borderRadius:8,padding:"7px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>
+              <RefreshCw size={11}/>{busy?"Refreshing…":"Refresh Prices"}
+            </button>
+          </div>
+          {pos.length===0
+            ? <Card><div style={{...mono(11,C.mut),textAlign:"center",padding:"32px 0"}}>No open positions — open one in New Trade.</div></Card>
+            : <Card>
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse"}}>
+                    <thead><tr>
+                      {["Symbol","Type","Side","Qty","Entry","Current","Unr. P&L","P&L %","Opened",""].map(h=>(
+                        <th key={h} style={{...mono(8,C.mut,700),textAlign:"left",padding:"6px 10px",borderBottom:`1px solid ${C.bdr}`,letterSpacing:"0.09em",whiteSpace:"nowrap"}}>{h}</th>
+                      ))}
+                    </tr></thead>
+                    <tbody>
+                      {pos.map(p=>{
+                        const pnl=unrealPnL(p);
+                        const cost=p.type==="equity"?p.entryPrice*p.qty:p.entryPremium*p.contracts*100;
+                        const pct=pnl!=null?(pnl/Math.abs(cost))*100:null;
+                        const col=pnl==null?C.mut:pnl>=0?C.grn:C.red;
+                        const cp=prices[p.symbol];
+                        return(
+                          <tr key={p.id} style={{borderBottom:`1px solid ${C.bdr}22`}}>
+                            <td style={{...mono(12,C.txt,700),padding:"9px 10px"}}>{p.symbol}</td>
+                            <td style={{...mono(10,C.sky),padding:"9px 10px",textTransform:"uppercase"}}>{p.type==="equity"?"EQ":p.type}</td>
+                            <td style={{padding:"9px 10px"}}>
+                              <span style={{...mono(9,p.side==="long"||p.side==="buy"?C.grn:C.amb,700),background:(p.side==="long"||p.side==="buy"?C.grn:C.amb)+"15",borderRadius:4,padding:"2px 6px",textTransform:"uppercase"}}>{p.side}</span>
+                            </td>
+                            <td style={{...mono(11,C.txt),padding:"9px 10px"}}>{p.type==="equity"?p.qty:p.contracts}</td>
+                            <td style={{...mono(11,C.txt),padding:"9px 10px"}}>{p.type==="equity"?`$${p.entryPrice.toFixed(2)}`:`$${p.entryPremium.toFixed(3)}`}</td>
+                            <td style={{...mono(11,cp?C.txt:C.mut),padding:"9px 10px"}}>{cp?`$${cp.toFixed(2)}`:"—"}</td>
+                            <td style={{...mono(12,col,700),padding:"9px 10px"}}>{pnl==null?"—":`${pnl>=0?"+":""}$${pnl.toFixed(2)}`}</td>
+                            <td style={{...mono(11,col),padding:"9px 10px"}}>{pct==null?"—":`${pct>=0?"+":""}${pct.toFixed(2)}%`}</td>
+                            <td style={{...mono(9,C.mut),padding:"9px 10px",whiteSpace:"nowrap"}}>{new Date(p.entryDate).toLocaleDateString()}</td>
+                            <td style={{padding:"9px 10px"}}>
+                              <button onClick={()=>setCloseT(p)} style={{...mono(9,C.red),background:`${C.red}12`,border:`1px solid ${C.red}30`,borderRadius:6,padding:"3px 9px",cursor:"pointer"}}>Close</button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+          }
+          {closeT&&<CloseDialog pos={closeT} prices={prices} onClose={()=>setCloseT(null)} onConfirm={(cp)=>closePos(closeT,cp)}/>}
+        </div>
+      )}
+
+      {/* ── NEW TRADE ── */}
+      {sub==="newtrade"&&(
+        <div>
+          <div style={{display:"flex",gap:8,marginBottom:14}}>
+            {[["equity","Equity"],["options","Options"]].map(([k,l])=>(
+              <button key={k} onClick={()=>setKind(k)} style={sbtn(C.sky,kind===k)}>{l}</button>
+            ))}
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(320px,1fr))",gap:16}}>
+            {kind==="equity"&&<>
+              <Card>
+                <Lbl>Equity Trade</Lbl>
+                <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:6}}>Symbol</div>
+                <div style={{display:"flex",gap:8,marginBottom:12}}>
+                  <input value={eqF.sym} onChange={e=>setEqF(f=>({...f,sym:e.target.value.toUpperCase()}))}
+                    placeholder="e.g. AAPL, SPY, TSLA" style={{...inp,flex:1}}
+                    onKeyDown={e=>e.key==="Enter"&&doGetEqQ()}/>
+                  <button onClick={doGetEqQ} disabled={busy||!eqF.sym} style={{...mono(10,C.sky,600),border:`1px solid ${C.sky}30`,background:`${C.sky}10`,borderRadius:8,padding:"7px 14px",cursor:"pointer",opacity:!eqF.sym?0.5:1}}>{busy?"…":"Get Quote"}</button>
+                </div>
+                {eqQ!=null&&<div style={{...mono(14,C.grn,700),marginBottom:12}}>Last: ${eqQ.toFixed(2)}</div>}
+                <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:6}}>Direction</div>
+                <div style={{display:"flex",gap:8,marginBottom:12}}>
+                  {[["long","Long (Buy)"],["short","Short"]].map(([v,l])=>(
+                    <button key={v} onClick={()=>setEqF(f=>({...f,side:v}))} style={sbtn(v==="long"?C.grn:C.amb,eqF.side===v)}>{l}</button>
+                  ))}
+                </div>
+                <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:6}}>Shares</div>
+                <input type="number" value={eqF.qty} onChange={e=>setEqF(f=>({...f,qty:e.target.value}))}
+                  placeholder="Number of shares" style={{...inp,marginBottom:12}}/>
+                {eqQ&&eqF.qty&&parseInt(eqF.qty)>0&&(
+                  <div style={{...mono(10,C.mut),marginBottom:12}}>
+                    Est. {eqF.side==="long"?"cost":"proceeds"}: ${fmt2(eqQ*parseInt(eqF.qty))}
+                  </div>
+                )}
+                <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:6}}>Notes</div>
+                <textarea value={eqF.notes} onChange={e=>setEqF(f=>({...f,notes:e.target.value}))}
+                  placeholder="Thesis, entry reasoning…" rows={2} style={{...inp,resize:"vertical",marginBottom:14}}/>
+                <button onClick={openEquity} disabled={!eqQ||busy||!eqF.qty} style={{...mono(10,C.grn,600),width:"100%",border:`1px solid ${C.grn}30`,background:`${C.grn}12`,borderRadius:8,padding:"10px",cursor:"pointer",opacity:(!eqQ||!eqF.qty)?0.5:1}}>
+                  Open Equity Trade
+                </button>
+              </Card>
+              <Card>
+                <Lbl>Account</Lbl>
+                <KV k="Cash Available" v={`$${fmt2(cash)}`} vc={C.grn}/>
+                <KV k="Open Positions" v={pos.length}/>
+                <KV k="Starting Capital" v="$100,000"/>
+                <KV k="Total P&L" v={`${totalPnL>=0?"+":""}$${fmt2(totalPnL)}`} vc={totalPnL>=0?C.grn:C.red}/>
+                <div style={{...mono(9,C.mut),marginTop:16,lineHeight:1.85,padding:12,background:C.dim,borderRadius:8}}>
+                  <span style={{color:C.sky,fontWeight:700}}>Tip:</span> Get a quote first, then set direction and share count. Short positions receive the sale proceeds immediately and are closed by buying back.
+                </div>
+              </Card>
+            </>}
+            {kind==="options"&&(
+              <div style={{gridColumn:"1/-1"}}>
+                {/* ── Step 1: Fetch chain ── */}
+                <Card>
+                  <Lbl>Options Chain</Lbl>
+                  <div style={{display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap",marginBottom:12}}>
+                    <div style={{flex:"0 0 200px"}}>
+                      <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:6}}>Underlying Symbol</div>
+                      <input value={optSym} onChange={e=>{setOptSym(e.target.value.toUpperCase());setOptExpiries([]);setOptChain([]);setOptSelC(null);setOptSelExp(null);setOptU(null);}}
+                        placeholder="e.g. SPY, AAPL, QQQ" style={inp} onKeyDown={e=>e.key==="Enter"&&fetchOptChain()}/>
+                    </div>
+                    <button onClick={fetchOptChain} disabled={chainBusy||!optSym} style={{...mono(10,C.sky,600),border:`1px solid ${C.sky}30`,background:`${C.sky}10`,borderRadius:8,padding:"9px 16px",cursor:"pointer",opacity:!optSym?0.5:1}}>
+                      {chainBusy&&!optSelExp?"Loading…":"Fetch Chain"}
+                    </button>
+                    {optU!=null&&<div style={mono(16,C.grn,700)}>Underlying: ${optU.toFixed(2)}</div>}
+                  </div>
+
+                  {/* ── Step 2: Expiry pills ── */}
+                  {optExpiries.length>0&&(
+                    <div style={{marginBottom:12}}>
+                      <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:8}}>Select Expiry</div>
+                      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                        {optExpiries.map(exp=>(
+                          <button key={exp} onClick={()=>fetchExpiry(exp)}
+                            style={{...mono(10,optSelExp===exp?C.sky:C.mut,600),border:`1px solid ${optSelExp===exp?C.sky+"50":C.bdr}`,background:optSelExp===exp?`${C.sky}14`:"transparent",borderRadius:6,padding:"4px 11px",cursor:"pointer",transition:"all .12s"}}>
+                            {exp}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ── Step 3: Call/Put filter + contract table ── */}
+                  {optChain.length>0&&(
+                    <>
+                      <div style={{display:"flex",gap:8,marginBottom:10,alignItems:"center"}}>
+                        {[["call","Calls",C.grn],["put","Puts",C.red]].map(([v,l,col])=>(
+                          <button key={v} onClick={()=>setOptTypeFilter(v)}
+                            style={{...mono(10,optTypeFilter===v?col:C.mut,600),border:`1px solid ${optTypeFilter===v?col+"40":C.bdr}`,background:optTypeFilter===v?col+"10":"transparent",borderRadius:8,padding:"5px 14px",cursor:"pointer"}}>
+                            {l}
+                          </button>
+                        ))}
+                        {chainBusy&&<div style={mono(10,C.mut)}>Loading…</div>}
+                        <div style={{...mono(9,C.mut),marginLeft:"auto"}}>{optChain.filter(c=>c.option_type===optTypeFilter).length} contracts · click row to select</div>
+                      </div>
+                      {(()=>{
+                        const filtered=optChain.filter(c=>c.option_type===optTypeFilter).sort((a,b)=>a.strike-b.strike);
+                        if(!filtered.length)return <div style={{...mono(10,C.mut),padding:"12px 0"}}>No {optTypeFilter}s for this expiry.</div>;
+                        const col=optTypeFilter==="call"?C.grn:C.red;
+                        return(
+                          <div style={{overflowX:"auto",maxHeight:300,overflowY:"auto",borderRadius:8,border:`1px solid ${C.bdr}`}}>
+                            <table style={{width:"100%",borderCollapse:"collapse"}}>
+                              <thead style={{position:"sticky",top:0,background:C.surf,zIndex:1}}>
+                                <tr>{["Strike","Bid","Ask","Last","IV %","Δ","OI","Vol",""].map(h=>(
+                                  <th key={h} style={{...mono(8,C.mut,700),textAlign:"left",padding:"6px 10px",borderBottom:`1px solid ${C.bdr}`,letterSpacing:"0.08em",whiteSpace:"nowrap"}}>{h}</th>
+                                ))}</tr>
+                              </thead>
+                              <tbody>
+                                {filtered.map((c,i)=>{
+                                  const isSelected=optSelC&&optSelC.strike===c.strike&&optSelC.option_type===c.option_type&&optSelC.expiration===c.expiration;
+                                  const isAtm=optU&&Math.abs(c.strike-optU)<optU*0.015;
+                                  return(
+                                    <tr key={i} onClick={()=>setOptSelC(c)}
+                                      style={{borderBottom:`1px solid ${C.bdr}22`,cursor:"pointer",background:isSelected?col+"20":isAtm?C.dim:"transparent",transition:"background .1s"}}>
+                                      <td style={{...mono(12,isAtm?col:C.txt,isAtm?700:500),padding:"7px 10px",whiteSpace:"nowrap"}}>
+                                        ${c.strike.toFixed(c.strike>=100?1:2)}
+                                        {isAtm&&<span style={{...mono(7,col,700),marginLeft:5,background:col+"18",borderRadius:3,padding:"1px 4px"}}>ATM</span>}
+                                        {c.in_the_money&&!isAtm&&<span style={{...mono(7,col,600),marginLeft:5}}>ITM</span>}
+                                      </td>
+                                      <td style={{...mono(10,C.txt),padding:"7px 10px"}}>{c.bid>0?`$${c.bid.toFixed(2)}`:"—"}</td>
+                                      <td style={{...mono(10,C.txt),padding:"7px 10px"}}>{c.ask>0?`$${c.ask.toFixed(2)}`:"—"}</td>
+                                      <td style={{...mono(10,c.last_price>0?C.txt:C.mut),padding:"7px 10px"}}>{c.last_price>0?`$${c.last_price.toFixed(2)}`:"—"}</td>
+                                      <td style={{...mono(10,C.sky),padding:"7px 10px"}}>{c.implied_vol?(c.implied_vol*100).toFixed(1)+"%":"—"}</td>
+                                      <td style={{...mono(10,c.delta!=null?(c.delta>=0?C.grn:C.red):C.mut),padding:"7px 10px"}}>{c.delta!=null?c.delta.toFixed(3):"—"}</td>
+                                      <td style={{...mono(9,C.mut),padding:"7px 10px"}}>{c.open_interest?.toLocaleString()||"—"}</td>
+                                      <td style={{...mono(9,C.mut),padding:"7px 10px"}}>{c.volume?.toLocaleString()||"—"}</td>
+                                      <td style={{padding:"7px 10px"}}>
+                                        <button onClick={e=>{e.stopPropagation();setOptSelC(c);}} style={{...mono(9,col),border:`1px solid ${col}30`,background:`${col}10`,borderRadius:5,padding:"2px 8px",cursor:"pointer"}}>
+                                          {isSelected?"✓ Selected":"Select"}
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        );
+                      })()}
+                    </>
+                  )}
+                  {optExpiries.length===0&&!chainBusy&&optU!=null&&(
+                    <div style={{...mono(10,C.amb),marginTop:8}}>No options data cached for {optSym}. Run a chain refresh in the Options tab first.</div>
+                  )}
+                </Card>
+
+                {/* ── Step 4: Selected contract + trade params ── */}
+                {optSelC&&(
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(300px,1fr))",gap:16,marginTop:16}}>
+                    <Card accent={optTypeFilter==="call"?C.grn:C.red}>
+                      <Lbl>Selected Contract</Lbl>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
+                        {[
+                          ["Symbol",   optSym,                                    C.txt],
+                          ["Strike",   `$${optSelC.strike}`,                      C.sky],
+                          ["Expiry",   optSelC.expiration,                        C.txt],
+                          ["Type",     optSelC.option_type.toUpperCase(),         optTypeFilter==="call"?C.grn:C.red],
+                          ["IV",       optSelC.implied_vol?(optSelC.implied_vol*100).toFixed(1)+"%":"—", C.sky],
+                          ["Delta",    optSelC.delta!=null?optSelC.delta.toFixed(3):"—", C.txt],
+                          ["Bid",      optSelC.bid>0?`$${optSelC.bid.toFixed(2)}`:"—",  C.txt],
+                          ["Ask",      optSelC.ask>0?`$${optSelC.ask.toFixed(2)}`:"—",  C.txt],
+                          ["Last",     optSelC.last_price>0?`$${optSelC.last_price.toFixed(2)}`:"—", C.grn],
+                        ].map(([l,v,col])=>(
+                          <div key={l}><div style={mono(8,C.mut)}>{l}</div><div style={mono(13,col,700)}>{v}</div></div>
+                        ))}
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:6,background:C.dim,borderRadius:8,padding:10}}>
+                        {[
+                          ["Θ Theta",  optSelC.theta],
+                          ["Γ Gamma",  optSelC.gamma],
+                          ["ν Vega",   optSelC.vega],
+                          ["OI",       typeof optSelC.open_interest==="number"?optSelC.open_interest.toLocaleString():null],
+                        ].map(([l,v])=>(
+                          <div key={l}><div style={mono(8,C.mut)}>{l}</div><div style={mono(11,C.txt,700)}>{typeof v==="number"?v.toFixed(4):v||"—"}</div></div>
+                        ))}
+                      </div>
+                    </Card>
+                    <Card>
+                      <Lbl>Trade Parameters</Lbl>
+                      <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:6}}>Side</div>
+                      <div style={{display:"flex",gap:8,marginBottom:12}}>
+                        {[["buy","Buy"],["write","Write"]].map(([v,l])=>(
+                          <button key={v} onClick={()=>setOptSide(v)} style={sbtn(C.sky,optSide===v)}>{l}</button>
+                        ))}
+                      </div>
+                      <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:6}}>Contracts</div>
+                      <input type="number" value={optQty} onChange={e=>setOptQty(e.target.value)} placeholder="1" min="1" style={{...inp,marginBottom:12}}/>
+                      {(()=>{
+                        const contracts=parseInt(optQty)||1;
+                        const premium=optSelC.last_price>0?optSelC.last_price:(optSelC.bid+optSelC.ask)/2||0;
+                        const total=premium*contracts*100;
+                        const cashAfter=optSide==="buy"?cash-total:cash+total;
+                        return <div style={{background:C.dim,borderRadius:8,padding:10,marginBottom:12}}>
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                            <div><div style={mono(8,C.mut)}>Entry Premium</div><div style={mono(13,C.sky,700)}>${premium.toFixed(3)}/share</div></div>
+                            <div><div style={mono(8,C.mut)}>Total {optSide==="buy"?"Cost":"Credit"}</div><div style={mono(13,C.grn,700)}>${total.toFixed(2)}</div></div>
+                            <div><div style={mono(8,C.mut)}>DTE</div><div style={mono(13,C.txt,700)}>{Math.round(dte(optSelC.expiration))}d</div></div>
+                            <div><div style={mono(8,C.mut)}>Cash After</div><div style={mono(13,cashAfter>=0?C.grn:C.red,700)}>${fmt2(cashAfter)}</div></div>
+                          </div>
+                        </div>;
+                      })()}
+                      <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:6}}>Notes</div>
+                      <textarea value={optNotes} onChange={e=>setOptNotes(e.target.value)}
+                        placeholder="Strategy, entry thesis…" rows={2} style={{...inp,resize:"vertical",marginBottom:14}}/>
+                      <button onClick={openOptions} style={{...mono(10,C.grn,600),width:"100%",border:`1px solid ${C.grn}30`,background:`${C.grn}12`,borderRadius:8,padding:"10px",cursor:"pointer"}}>
+                        Open Options Trade
+                      </button>
+                    </Card>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── JOURNAL ── */}
+      {sub==="journal"&&(
+        <div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:12,marginBottom:16}}>
+            {[
+              ["Total Trades",  jnl.length,                                                     C.txt],
+              ["Closed",        closed.length,                                                   C.mut],
+              ["Win Rate",      closed.length?`${Math.round((wins/closed.length)*100)}%`:"—",   C.grn],
+              ["Realised P&L",  closed.length?`${realPnL>=0?"+":""}$${fmt2(realPnL)}`:"—",     realPnL>=0?C.grn:C.red],
+            ].map(([l,v,col])=>(
+              <Card key={l}><Lbl>{l}</Lbl><div style={mono(18,col,700)}>{v}</div></Card>
+            ))}
+          </div>
+          {jnl.length===0
+            ? <Card><div style={{...mono(11,C.mut),textAlign:"center",padding:"32px 0"}}>No journal entries yet — open your first trade.</div></Card>
+            : <Card>
+                <div style={{overflowX:"auto"}}>
+                  <table style={{width:"100%",borderCollapse:"collapse"}}>
+                    <thead><tr>
+                      {["Date","Action","Symbol","Type","Qty","Price","Total","P&L","Notes"].map(h=>(
+                        <th key={h} style={{...mono(8,C.mut,700),textAlign:"left",padding:"6px 10px",borderBottom:`1px solid ${C.bdr}`,letterSpacing:"0.09em",whiteSpace:"nowrap"}}>{h}</th>
+                      ))}
+                    </tr></thead>
+                    <tbody>
+                      {jnl.map(j=>{
+                        const col=j.pnl==null?C.mut:j.pnl>=0?C.grn:C.red;
+                        return(
+                          <tr key={j.id} style={{borderBottom:`1px solid ${C.bdr}22`}}>
+                            <td style={{...mono(9,C.mut),padding:"8px 10px",whiteSpace:"nowrap"}}>{new Date(j.date).toLocaleDateString()}</td>
+                            <td style={{...mono(10,C.sky,700),padding:"8px 10px",whiteSpace:"nowrap"}}>{j.action}</td>
+                            <td style={{...mono(12,C.txt,700),padding:"8px 10px"}}>{j.symbol}</td>
+                            <td style={{...mono(9,C.mut),padding:"8px 10px",textTransform:"uppercase"}}>{j.type}</td>
+                            <td style={{...mono(11,C.txt),padding:"8px 10px"}}>{j.qty||j.contracts}</td>
+                            <td style={{...mono(11,C.txt),padding:"8px 10px"}}>${typeof j.price==="number"?j.price.toFixed(2):"—"}</td>
+                            <td style={{...mono(11,C.txt),padding:"8px 10px"}}>${typeof j.total==="number"?j.total.toFixed(2):"—"}</td>
+                            <td style={{...mono(11,col,700),padding:"8px 10px"}}>{j.pnl==null?"—":`${j.pnl>=0?"+":""}$${j.pnl.toFixed(2)}`}</td>
+                            <td style={{...mono(9,C.mut),padding:"8px 10px",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{j.notes||"—"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+          }
+          <div style={{marginTop:14,display:"flex",justifyContent:"flex-end"}}>
+            <button onClick={()=>{if(window.confirm("Reset all paper trading data? This cannot be undone.")){setCash(100000);setPos([]);setJnl([]);setPrices({});flash("Portfolio reset to $100,000");}}}
+              style={{...mono(10,C.red),background:`${C.red}10`,border:`1px solid ${C.red}30`,borderRadius:8,padding:"8px 16px",cursor:"pointer"}}>
+              Reset Portfolio
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [view,setView]           = useState("markets");
   const [dark,setDark]           = useState(true);
   const [detailSym,setDetailSym] = useState(null);
+  const [loadCount, setLoadCount] = useState(0);
+  const globalLoading = loadCount > 0;
+  const loadCtxVal = useMemo(()=>({
+    active: globalLoading,
+    push: () => setLoadCount(n => n+1),
+    pop:  () => setLoadCount(n => Math.max(0, n-1)),
+  }), [globalLoading]);
   const [navOpen,setNavOpen]     = useState(false);
   const [isMobile,setIsMobile]   = useState(()=>window.innerWidth < 768);
   useEffect(()=>{
@@ -10674,9 +11509,11 @@ export default function App() {
     signals:   <SignalsView/>,
     pairs:     <PairsView/>,
     portfolio: <PortfolioHubView/>,
+    paper:     <PaperTradingView/>,
     lab:       <LabView/>,
   };
   return (
+    <LoadingCtx.Provider value={loadCtxVal}>
     <ThemeCtx.Provider value={{...C, isMobile}}>
       <div style={{display:"flex",minHeight:"100vh",background:C.bg,fontFamily:"monospace",overflow:"hidden"}}>
         {/* Mobile overlay backdrop */}
@@ -10697,8 +11534,10 @@ export default function App() {
           <div style={{padding:"18px 16px 14px",borderBottom:`1px solid ${C.bdr}`,display:"flex",alignItems:"flex-start",justifyContent:"space-between"}}>
             <div>
               <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:4}}>
-                <div style={{width:26,height:26,borderRadius:8,background:C.grnBg,border:`1px solid ${C.grn}30`,display:"flex",alignItems:"center",justifyContent:"center"}}>
-                  <BarChart2 size={14} style={{color:C.grn}}/>
+                <div style={{width:26,height:26,borderRadius:8,background:C.grnBg,border:`1px solid ${C.grn}30`,display:"flex",alignItems:"center",justifyContent:"center",
+                  boxShadow:globalLoading?`0 0 8px ${C.grn}88`:"none",
+                  transition:"box-shadow .3s"}}>
+                  <BarChart2 size={14} style={{color:C.grn, animation:globalLoading?"spin 1.2s linear infinite":"none"}}/>
                 </div>
                 <span style={mono(11,C.headingTxt,700)}>Picador</span>
               </div>
@@ -10753,5 +11592,6 @@ export default function App() {
         </main>
       </div>
     </ThemeCtx.Provider>
+    </LoadingCtx.Provider>
   );
 }
