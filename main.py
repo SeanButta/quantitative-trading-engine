@@ -1057,6 +1057,16 @@ def _run_options_refresh(job_id: str, symbols: list[str], rfr: float, max_worker
         for sym, df in result["data"].items():
             try:
                 store.save(sym, df)
+                # Also persist to DB cache so it survives redeployments
+                try:
+                    _set_cache(
+                        f"options:chain:{sym.upper()}",
+                        df.to_dicts(),
+                        _TTL_OPTIONS,
+                        "options:refresh",
+                    )
+                except Exception as _ce:
+                    logger.warning("Could not cache options:%s to DB: %s", sym, _ce)
             except Exception as e:
                 failed[sym] = str(e)
 
@@ -1080,6 +1090,24 @@ def _run_options_refresh(job_id: str, symbols: list[str], rfr: float, max_worker
             db.commit()
     finally:
         db.close()
+
+
+def _get_options_df(symbol: str):
+    """
+    Load an options chain DataFrame: DB cache first, local Parquet fallback.
+    Returns a Polars DataFrame (empty if no data available anywhere).
+    Always call with the normalised upper-case symbol.
+    """
+    import polars as pl
+    cached = _get_cache(f"options:chain:{symbol.upper()}")
+    if cached:
+        try:
+            return pl.DataFrame(cached)
+        except Exception as _e:
+            logger.debug("options:chain reconstruct error for %s: %s", symbol, _e)
+    # Fallback — file may be empty after a redeploy (warmer will repopulate)
+    from options_feed import OptionsStore
+    return OptionsStore(OPTIONS_DIR).load(symbol.upper())
 
 
 @app.get("/options/refresh/{job_id}")
@@ -1121,23 +1149,47 @@ def options_universe():
 @app.get("/options/{symbol}/expirations")
 def options_expirations(symbol: str):
     """List available expiration dates for a symbol."""
-    from options_feed import OptionsStore
-    store = OptionsStore(OPTIONS_DIR)
-    exps = store.list_expirations(symbol.upper())
-    if not exps:
+    import polars as pl
+    df = _get_options_df(symbol.upper())
+    if df.is_empty():
         raise HTTPException(status_code=404, detail=f"No options data for {symbol}. Run /options/refresh first.")
+    exps = sorted(df["expiration"].unique().to_list())
     return {"symbol": symbol.upper(), "expirations": exps, "count": len(exps)}
 
 
 @app.get("/options/{symbol}/greeks/summary")
 def options_greeks_summary(symbol: str, expiration: Optional[str] = None):
     """Aggregated Greeks summary (put/call ratio, max gamma strike, avg IV, etc.)."""
-    from options_feed import OptionsStore
-    store = OptionsStore(OPTIONS_DIR)
-    summary = store.greeks_summary(symbol.upper(), expiration)
-    if not summary:
+    import polars as pl, math, numpy as np
+    df = _get_options_df(symbol.upper())
+    if df.is_empty():
         raise HTTPException(status_code=404, detail=f"No options data for {symbol}.")
-    return _sanitize(summary)
+    if expiration:
+        df = df.filter(pl.col("expiration") == expiration)
+    calls = df.filter(pl.col("option_type") == "call")
+    puts  = df.filter(pl.col("option_type") == "put")
+    def _safe(series):
+        vals = [v for v in series.drop_nulls().to_list() if not math.isnan(v)]
+        return float(np.nanmean(vals)) if vals else None
+    gamma_col = df.filter(~pl.col("gamma").is_nan())
+    max_gamma_strike = None
+    if not gamma_col.is_empty():
+        idx = gamma_col["gamma"].arg_max()
+        if idx is not None:
+            max_gamma_strike = float(gamma_col["strike"][idx])
+    total_call_oi = int(calls["open_interest"].sum()) if not calls.is_empty() else 0
+    total_put_oi  = int(puts["open_interest"].sum())  if not puts.is_empty()  else 0
+    snapshot_ts   = str(df["snapshot_at"].max()) if not df.is_empty() else None
+    return _sanitize({
+        "symbol": symbol.upper(), "expiration": expiration, "snapshot_at": snapshot_ts,
+        "total_contracts": len(df), "total_call_oi": total_call_oi, "total_put_oi": total_put_oi,
+        "put_call_ratio":   (total_put_oi / total_call_oi) if total_call_oi > 0 else None,
+        "max_gamma_strike": max_gamma_strike,
+        "avg_call_delta":  _safe(calls["delta"])       if not calls.is_empty() else None,
+        "avg_put_delta":   _safe(puts["delta"])        if not puts.is_empty()  else None,
+        "avg_iv_call":     _safe(calls["implied_vol"]) if not calls.is_empty() else None,
+        "avg_iv_put":      _safe(puts["implied_vol"])  if not puts.is_empty()  else None,
+    })
 
 
 @app.get("/options/{symbol}/analytics")
@@ -1148,8 +1200,7 @@ def options_analytics(symbol: str, expiration: Optional[str] = None):
     import polars as pl
     from options_feed import OptionsStore, compute_analytics
 
-    store = OptionsStore(OPTIONS_DIR)
-    df_full = store.load(symbol.upper())
+    df_full = _get_options_df(symbol.upper())
     if df_full.is_empty():
         raise HTTPException(status_code=404, detail=f"No options data for {symbol}. Fetch first.")
 
@@ -1157,6 +1208,8 @@ def options_analytics(symbol: str, expiration: Optional[str] = None):
     active_exp = expiration if expiration and expiration in exps else (exps[0] if exps else None)
     df = df_full.filter(pl.col("expiration") == active_exp) if active_exp else df_full
 
+    from options_feed import OptionsStore
+    store = OptionsStore(OPTIONS_DIR)
     df_prev_full = store.load_prev(symbol.upper())
     df_prev = (
         df_prev_full.filter(pl.col("expiration") == active_exp)
@@ -1186,8 +1239,7 @@ def options_advanced(symbol: str):
     import polars as pl
     from options_feed import OptionsStore, compute_term_structure, compute_hv_trend
 
-    store   = OptionsStore(OPTIONS_DIR)
-    df_full = store.load(symbol.upper())
+    df_full = _get_options_df(symbol.upper())
     if df_full.is_empty():
         raise HTTPException(status_code=404, detail=f"No options data for {symbol}. Fetch first.")
 
@@ -1253,10 +1305,9 @@ def options_advanced(symbol: str):
 @app.get("/options/{symbol}/{expiration}")
 def options_chain_by_expiry(symbol: str, expiration: str, option_type: Optional[str] = None):
     """Options chain for a specific expiration. option_type: 'call' | 'put' | None (both)."""
-    from options_feed import OptionsStore
     import polars as pl
-    store = OptionsStore(OPTIONS_DIR)
-    df = store.load_expiration(symbol.upper(), expiration)
+    df_full = _get_options_df(symbol.upper())
+    df = df_full.filter(pl.col("expiration") == expiration) if not df_full.is_empty() else df_full
     if df.is_empty():
         raise HTTPException(status_code=404, detail=f"No data for {symbol} expiry {expiration}.")
     if option_type:
@@ -1268,18 +1319,15 @@ def options_chain_by_expiry(symbol: str, expiration: str, option_type: Optional[
 @app.get("/options/{symbol}")
 def options_chain(symbol: str, expiration: Optional[str] = None, limit: int = 500):
     """Full latest options chain for a symbol. Optionally filter by expiration."""
-    from options_feed import OptionsStore
     import polars as pl
-    store = OptionsStore(OPTIONS_DIR)
-    if expiration:
-        df = store.load_expiration(symbol.upper(), expiration)
-    else:
-        df = store.load(symbol.upper())
+    df = _get_options_df(symbol.upper())
+    if expiration and not df.is_empty():
+        df = df.filter(pl.col("expiration") == expiration)
     if df.is_empty():
         raise HTTPException(status_code=404, detail=f"No options data for {symbol}. Run /options/refresh first.")
     df = df.sort(["expiration", "option_type", "strike"])
-    snapshot_at = store.snapshot_time(symbol.upper())
-    expirations = store.list_expirations(symbol.upper())
+    snapshot_at = str(df["snapshot_at"].max()) if not df.is_empty() else None
+    expirations = sorted(df["expiration"].unique().to_list()) if not df.is_empty() else []
     return _sanitize({
         "symbol":      symbol.upper(),
         "snapshot_at": snapshot_at,
@@ -3540,6 +3588,17 @@ def _run_sector_refresh(job_id: str, sectors: list[str]) -> None:
                 snap = provider.fetch_sector(sector)
                 store.save(sector, snap)
                 logger.info("Sector refresh complete: %s (%d tickers)", sector, len(snap.tickers))
+                # Persist snapshot to DB cache so it survives redeployments
+                try:
+                    import dataclasses as _dc
+                    _set_cache(
+                        f"sector:snapshot:{sector}",
+                        _sanitize(_dc.asdict(snap)),
+                        _TTL_SECTORS,
+                        "sectors:refresh",
+                    )
+                except Exception as _ce:
+                    logger.warning("Could not cache sector:%s to DB: %s", sector, _ce)
             except Exception as exc:
                 errors[sector] = str(exc)[:200]
                 logger.warning("Sector refresh failed for %s: %s", sector, exc)
@@ -3552,6 +3611,12 @@ def _run_sector_refresh(job_id: str, sectors: list[str]) -> None:
                     db.commit()
             except Exception:
                 pass
+        # After all sectors complete, also refresh the overview summary in DB cache
+        try:
+            _set_cache("sectors:overview", _sanitize(store.all_summaries()), _TTL_SECTORS, "sectors:refresh")
+            logger.info("Sector refresh: sectors:overview cache updated")
+        except Exception as _oe:
+            logger.warning("Could not refresh sectors:overview cache: %s", _oe)
         try:
             job = db.query(SectorRefreshJob).filter(SectorRefreshJob.id == job_id).first()
             if job:
@@ -3568,9 +3633,13 @@ def _run_sector_refresh(job_id: str, sectors: list[str]) -> None:
 @app.get("/sectors")
 def get_sectors_overview():
     """Lightweight summary of all 11 GICS sectors (from cache)."""
+    cached = _get_cache("sectors:overview")
+    if cached is not None:
+        return cached
     from sectors_engine import SectorStore
     store = SectorStore(SECTORS_DIR.parent)
-    return _sanitize(store.all_summaries())
+    result = _sanitize(store.all_summaries())
+    return result
 
 
 @app.get("/sectors/universe")
@@ -3680,11 +3749,14 @@ def get_sector_refresh_status(job_id: str):
 @app.get("/sectors/{sector_name}")
 def get_sector(sector_name: str):
     """Full cached snapshot for a sector (all tickers with all metrics)."""
+    # Allow URL-encoded spaces and underscores
+    sector = sector_name.replace("_", " ")
+    cached = _get_cache(f"sector:snapshot:{sector}")
+    if cached is not None:
+        return cached
     from sectors_engine import SectorStore
     import dataclasses
     store = SectorStore(SECTORS_DIR.parent)
-    # Allow URL-encoded spaces and underscores
-    sector = sector_name.replace("_", " ")
     snap = store.load(sector)
     if not snap:
         raise HTTPException(status_code=404,
@@ -4656,8 +4728,19 @@ def _warmer_loop() -> None:
         "feeds":           1680,   # every 28 min   (TTL 30 min)
         "sentiment":       3300,   # every 55 min   (TTL 60 min)
         "ta":              840,    # every 14 min   (TTL 15 min)
+        "sectors":         1200,   # every 20 min   (TTL 2 hours)
+        "options":         5400,   # every 90 min   (market hours only, TTL 1 hour)
     }
     last: dict[str, float] = {k: 0.0 for k in schedules}
+
+    # Top-50 most-liquid symbols pre-warmed for options chains
+    _WARMER_OPTIONS_SYMBOLS = [
+        "SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "GOOGL", "META", "NFLX",
+        "AMD", "INTC", "BABA", "WMT", "JPM", "BAC", "GS", "XOM", "CVX", "BA",
+        "UBER", "COIN", "PLTR", "SOFI", "RBLX", "SNAP", "RIVN", "F", "GM", "DIS",
+        "PYPL", "SQ", "SHOP", "ZM", "CRWD", "PANW", "SNOW", "MDB", "TTD", "DKNG",
+        "GLD", "TLT", "HYG", "EEM", "IWM", "VXX", "XLF", "XLK", "XLE", "XLV",
+    ]
 
     # Short initial sleep so the process finishes startup before the first hit
     time.sleep(15)
@@ -4732,6 +4815,64 @@ def _warmer_loop() -> None:
                 logger.info("Warmer ✓ sentiment:market")
             except Exception as e:
                 logger.warning("Warmer ✗ sentiment: %s", e)
+
+        if now - last["sectors"] >= schedules["sectors"]:
+            last["sectors"] = now
+            try:
+                from sectors_engine import SectorProvider, SectorStore, SECTOR_UNIVERSE
+                import dataclasses as _dc
+                _provider = SectorProvider()
+                _store    = SectorStore(SECTORS_DIR.parent)
+                for _sector in list(SECTOR_UNIVERSE.keys()):
+                    try:
+                        _snap = _provider.fetch_sector(_sector)
+                        _store.save(_sector, _snap)
+                        _set_cache(
+                            f"sector:snapshot:{_sector}",
+                            _sanitize(_dc.asdict(_snap)),
+                            _TTL_SECTORS,
+                            "warmer:sectors",
+                        )
+                        logger.info("Warmer ✓ sector:%s (%d tickers)", _sector, len(_snap.tickers))
+                    except Exception as _se:
+                        logger.warning("Warmer ✗ sector:%s: %s", _sector, _se)
+                try:
+                    _set_cache("sectors:overview", _sanitize(_store.all_summaries()), _TTL_SECTORS, "warmer:sectors")
+                    logger.info("Warmer ✓ sectors:overview")
+                except Exception as _ove:
+                    logger.warning("Warmer ✗ sectors:overview: %s", _ove)
+            except Exception as e:
+                logger.warning("Warmer ✗ sectors: %s", e)
+
+        if now - last["options"] >= schedules["options"]:
+            # Only refresh during US market hours: 9:30am–4:00pm ET = 13:30–20:00 UTC
+            import datetime as _dt
+            _utc_now  = _dt.datetime.utcnow()
+            _utc_mins = _utc_now.hour * 60 + _utc_now.minute
+            _mkt_open  = 13 * 60 + 30   # 9:30 ET in UTC minutes
+            _mkt_close = 20 * 60        # 4:00 ET in UTC minutes
+            if _mkt_open <= _utc_mins <= _mkt_close:
+                last["options"] = now
+                try:
+                    from options_feed import OptionsProvider, OptionsStore as _OS
+                    _oprov  = OptionsProvider()
+                    _ostore = _OS(OPTIONS_DIR)
+                    for _sym in _WARMER_OPTIONS_SYMBOLS:
+                        try:
+                            _df = _oprov.fetch_chain(_sym)
+                            if not _df.is_empty():
+                                _ostore.save(_sym, _df)
+                                _set_cache(
+                                    f"options:chain:{_sym.upper()}",
+                                    _df.to_dicts(),
+                                    _TTL_OPTIONS,
+                                    "warmer:options",
+                                )
+                                logger.info("Warmer ✓ options:%s (%d rows)", _sym, len(_df))
+                        except Exception as _oe:
+                            logger.warning("Warmer ✗ options:%s: %s", _sym, _oe)
+                except Exception as e:
+                    logger.warning("Warmer ✗ options: %s", e)
 
         # Prune stale cache rows once an hour
         if now % 3600 < 30:

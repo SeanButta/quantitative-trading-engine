@@ -4522,6 +4522,11 @@ function OptionsView() {
       .catch(() => {});
   }, [symbol]);
 
+  // Auto-load default symbol on mount — data is pre-warmed in DB so this is instant.
+  useEffect(() => {
+    loadChain(inputSym, null);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Poll job progress.
   // sym is passed explicitly to avoid the stale-closure problem with the
   // `symbol` state variable (React batches the setSymbol update, so the
