@@ -3680,15 +3680,56 @@ def refresh_sp500_universe(_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.get("/universe/russell1000")
+def get_russell1000():
+    """Russell 1000 (large-cap) constituent ticker list — fetched from Wikipedia / iShares IWB."""
+    from extended_universe import get_russell1000_tickers
+    tickers = get_russell1000_tickers()
+    return {"tickers": tickers, "total": len(tickers)}
+
+
+@app.get("/universe/russell2000")
+def get_russell2000():
+    """Russell 2000 (small-cap) constituent ticker list — fetched from iShares IWM (best-effort)."""
+    from extended_universe import get_russell2000_tickers
+    tickers = get_russell2000_tickers()
+    return {"tickers": tickers, "total": len(tickers)}
+
+
+@app.get("/universe/combined")
+def get_combined_universe_endpoint():
+    """Combined S&P 500 + Russell 1000 deduplicated ticker universe."""
+    from extended_universe import get_combined_universe
+    tickers = get_combined_universe()
+    return {"tickers": tickers, "total": len(tickers)}
+
+
+@app.post("/universe/refresh")
+def refresh_extended_universe(_user: dict = Depends(get_current_user)):
+    """Force-refresh Russell 1000, Russell 2000, and EDGAR CIK maps from source."""
+    from extended_universe import (
+        get_edgar_cik_map, get_russell1000_tickers, get_russell2000_tickers
+    )
+    cik_count = len(get_edgar_cik_map(force_refresh=True))
+    r1k  = get_russell1000_tickers(force_refresh=True)
+    r2k  = get_russell2000_tickers(force_refresh=True)
+    return {
+        "status":          "ok",
+        "edgar_cik_total": cik_count,
+        "russell1000":     len(r1k),
+        "russell2000":     len(r2k),
+    }
+
+
 @app.get("/sectors/ticker/{symbol}/sec")
 def get_ticker_sec_facts(symbol: str):
     """SEC EDGAR XBRL annual financials for a ticker (up to 15 years)."""
-    from sp500_universe import get_cik
+    from extended_universe import get_cik_any
     from sec_feed import SecFeed
-    cik = get_cik(symbol.upper())
+    cik = get_cik_any(symbol.upper())
     if not cik:
         raise HTTPException(status_code=404,
-            detail=f"{symbol} not found in S&P 500 universe / CIK map. Fetch universe first.")
+            detail=f"{symbol} not found in SEC EDGAR — the company may not file with the SEC.")
     feed = SecFeed()
     facts = feed.company_facts(cik)
     if not facts:
@@ -3700,12 +3741,12 @@ def get_ticker_sec_facts(symbol: str):
 @app.get("/sectors/ticker/{symbol}/filings")
 def get_ticker_filings(symbol: str, limit: int = 20):
     """Recent SEC filings (8-K, 10-K, 10-Q) for a ticker."""
-    from sp500_universe import get_cik
+    from extended_universe import get_cik_any
     from sec_feed import SecFeed
-    cik = get_cik(symbol.upper())
+    cik = get_cik_any(symbol.upper())
     if not cik:
         raise HTTPException(status_code=404,
-            detail=f"{symbol} not found in S&P 500 CIK map.")
+            detail=f"{symbol} not found in SEC EDGAR — the company may not file with the SEC.")
     feed = SecFeed()
     return feed.recent_filings(cik, limit=limit)
 
