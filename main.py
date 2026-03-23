@@ -95,8 +95,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Structured logging + request ID + sanitised 500 handler
-attach_middleware(app)
+# Note: structured logging already configured at module top.
+# BaseHTTPMiddleware skipped — causes Railway 502 when combined with
+# FastAPI's global exception handler on some Starlette versions.
 
 # Rate limiting
 if _RATE_LIMIT_AVAILABLE:
