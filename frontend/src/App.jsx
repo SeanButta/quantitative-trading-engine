@@ -9573,7 +9573,11 @@ function SectorsView() {
   const triggerRefresh=(sectors=null)=>{
     const body=sectors?{sectors}:{};
     fetch("/api/sectors/refresh",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
-      .then(r=>r.json())
+      .then(async r=>{
+        const text=await r.text();
+        if(!r.ok) throw new Error(`Server error ${r.status}: ${text.slice(0,120)}`);
+        return JSON.parse(text);
+      })
       .then(d=>{setJobId(d.job_id);setJob({...d,status:"running"});})
       .catch(e=>setErr(String(e)));
   };

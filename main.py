@@ -72,9 +72,46 @@ app.add_middleware(
 _DB_PATH = Path(__file__).parent / "quant_engine.db"
 _RAW_DB_URL = os.getenv("DATABASE_URL", f"sqlite:///{_DB_PATH}")
 
-# Supabase / Heroku export DATABASE_URL with the legacy "postgres://" prefix;
-# SQLAlchemy 2.x requires "postgresql://".
-DB_URL = _RAW_DB_URL.replace("postgres://", "postgresql://", 1)
+
+def _normalise_db_url(raw: str) -> str:
+    """
+    Normalise a DATABASE_URL for SQLAlchemy 2.x:
+
+    1. Rewrite legacy ``postgres://`` prefix → ``postgresql://``
+       (SQLAlchemy 2.x rejects the old prefix).
+
+    2. Percent-encode special characters in the password portion
+       ([ ] * # ? and similar).
+
+       We use a regex rather than urllib.parse because Python 3.14+
+       rejects bare ``[`` in the netloc entirely — it assumes bracket
+       notation means an IPv6 literal host and errors out before we can
+       extract the password component.
+    """
+    import re
+    from urllib.parse import quote
+
+    # Step 1 — fix legacy prefix
+    url = raw.replace("postgres://", "postgresql://", 1)
+
+    if url.startswith("sqlite") or "@" not in url:
+        return url
+
+    # Step 2 — regex extracts: scheme, user, raw_password, host+port+path
+    # Pattern: scheme://user:PASSWORD@rest
+    # The password is everything between the first colon after :// and the
+    # last @ before the host.  The .*? is non-greedy; rstrip handles the @.
+    pattern = r'^(postgresql://[^:]+):(.+)@(.+)$'
+    m = re.match(pattern, url, re.DOTALL)
+    if m:
+        prefix, raw_password, rest = m.group(1), m.group(2), m.group(3)
+        encoded_pw = quote(raw_password, safe="")   # encode all non-URL-safe chars
+        return f"{prefix}:{encoded_pw}@{rest}"
+
+    return url
+
+
+DB_URL = _normalise_db_url(_RAW_DB_URL)
 
 _IS_SQLITE = DB_URL.startswith("sqlite")
 
@@ -124,13 +161,24 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Create all tables that don't exist yet.
-# On Supabase this is a no-op after the first deploy; on a fresh DB it
-# provisions the full schema without needing a migration framework.
-try:
-    Base.metadata.create_all(bind=engine)
-    logger.info("DB schema synced (%s)", "SQLite" if _IS_SQLITE else "PostgreSQL")
-except Exception as _schema_err:
-    logger.error("DB schema creation failed: %s", _schema_err)
+# Retries up to 5 times with exponential back-off so a transient
+# "connection refused" during cold-start never prevents schema provisioning.
+import time as _time
+_schema_ok = False
+for _attempt in range(1, 6):
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("DB schema synced (%s)", "SQLite" if _IS_SQLITE else "PostgreSQL")
+        _schema_ok = True
+        break
+    except Exception as _schema_err:
+        if _attempt < 5:
+            _wait = 2 ** _attempt          # 2 s, 4 s, 8 s, 16 s
+            logger.warning("DB schema attempt %d failed (%s) — retrying in %ds",
+                           _attempt, _schema_err, _wait)
+            _time.sleep(_wait)
+        else:
+            logger.error("DB schema creation failed after 5 attempts: %s", _schema_err)
 
 # SQLite-only: enable WAL mode + performance PRAGMAs
 if _IS_SQLITE:
