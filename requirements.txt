@@ -3,6 +3,8 @@ fastapi>=0.110.0
 python-jose[cryptography]>=3.3.0   # JWT signing/verification (auth.py)
 passlib[bcrypt]>=1.7.4             # password hashing (auth.py)
 uvicorn[standard]>=0.29.0      # ASGI server with websocket support
+gunicorn>=21.2.0               # multi-worker process manager (4 workers in prod)
+slowapi>=0.1.9                 # per-IP rate limiting for FastAPI
 pydantic>=2.0.0
 python-multipart>=0.0.9        # form/file uploads
 

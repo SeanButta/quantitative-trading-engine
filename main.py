@@ -17,9 +17,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
@@ -52,6 +56,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Compress responses ≥ 1 KB — reduces bandwidth 60-80 % for large JSON payloads
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# ---------------------------------------------------------------------------
+# Rate limiting (slowapi) — protects expensive endpoints from abuse
+# ---------------------------------------------------------------------------
+# Uses real client IP, respecting X-Forwarded-For from Railway's proxy layer.
+
+def _get_real_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+limiter = Limiter(key_func=_get_real_ip)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Auth router — registers /auth/register, /auth/login, /auth/me, etc.
 app.include_router(_auth_router)
@@ -146,21 +168,22 @@ elif _IS_SUPABASE_POOLER:
     logger.info("PostgreSQL engine: Supabase transaction-mode pooler (NullPool)")
 else:
     # Direct connection or session-mode pooler — full SQLAlchemy pool.
-    # pool_size=10  → persistent connections kept warm
-    # max_overflow=20 → burst to 30 total for traffic spikes
-    # pool_recycle=1800 → recycle connections every 30 min (avoids Supabase idle timeout)
+    # pool_size=3  → 3 persistent connections per worker process
+    # max_overflow=7 → burst to 10 per worker; 4 workers × 10 = 40 peak connections
+    # pool_recycle=1800 → recycle connections every 30 min (avoids idle timeout)
+    # Railway PostgreSQL default limit is ~100 connections; 40 peak leaves headroom.
     _pg_connect_args: dict = {}
     if "supabase" in DB_URL or "supabase.co" in DB_URL:
         _pg_connect_args["sslmode"] = "require"
     engine = create_engine(
         DB_URL,
-        pool_size=10,
-        max_overflow=20,
+        pool_size=3,
+        max_overflow=7,
         pool_pre_ping=True,
         pool_recycle=1800,
         connect_args=_pg_connect_args,
     )
-    logger.info("PostgreSQL engine: direct / session-mode pool (size=10, overflow=20)")
+    logger.info("PostgreSQL engine: direct / session-mode pool (size=3, overflow=7, 4-worker safe)")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -462,7 +485,20 @@ class PortfolioAnalyzeRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+    """Liveness + readiness probe. Checks DB connectivity for Railway health checks."""
+    db_ok = False
+    try:
+        with engine.connect() as _hc:
+            _hc.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        pass
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "db": "connected" if db_ok else "error",
+        "workers": os.getenv("WEB_CONCURRENCY", "1"),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
 
 
 @app.get("/cache/status")
@@ -1000,7 +1036,8 @@ def price_option(req: OptionPriceRequest):
 # ---------------------------------------------------------------------------
 
 @app.post("/options/refresh")
-def options_refresh(req: OptionsRefreshRequest, background_tasks: BackgroundTasks,
+@limiter.limit("3/minute")
+def options_refresh(request: Request, req: OptionsRefreshRequest, background_tasks: BackgroundTasks,
                     _user: dict = Depends(get_current_user)):
     """Trigger a background fetch of options chains + Greeks for a symbol list."""
     from options_feed import SP500_UNIVERSE
@@ -2362,7 +2399,8 @@ def market_overview():
 # ---------------------------------------------------------------------------
 
 @app.post("/portfolio/analyze")
-def portfolio_analyze(req: PortfolioAnalyzeRequest, background_tasks: BackgroundTasks,
+@limiter.limit("5/minute")
+def portfolio_analyze(request: Request, req: PortfolioAnalyzeRequest, background_tasks: BackgroundTasks,
                       _user: dict = Depends(get_current_user)):
     """Kick off an async portfolio analysis job. Poll GET /portfolio/job/{job_id}."""
     job_id = str(uuid.uuid4())[:12]
@@ -2717,7 +2755,9 @@ def _run_portfolio_analysis(
 # ---------------------------------------------------------------------------
 
 @app.get("/ta/{symbol}")
+@limiter.limit("30/minute")
 def technical_analysis(
+    request: Request,
     symbol: str,
     period:          str   = "1y",
     interval:        str   = "1d",
@@ -3955,7 +3995,8 @@ def pairs_signal(sym_a: str, sym_b: str, z_entry: float = 2.0, z_exit: float = 0
 # ---------------------------------------------------------------------------
 
 @app.post("/advisor")
-def trade_advisor(req: TradeAdvisorRequest, _user: dict = Depends(get_current_user)):
+@limiter.limit("10/minute")
+def trade_advisor(request: Request, req: TradeAdvisorRequest, _user: dict = Depends(get_current_user)):
     """
     Trade Advisor: synthesizes technical signals, ML prediction, sentiment,
     options analytics, and macro context into structured trade recommendations.
@@ -4790,6 +4831,19 @@ def _warmer_loop() -> None:
     while True:
         now = time.time()
 
+        # ------------------------------------------------------------------
+        # Distributed soft-lock: ensures only one worker process runs the
+        # warmer at a time.  The lock TTL (25 s) expires before the next
+        # 30 s sleep, so no worker is permanently excluded.  In the rare
+        # race where two workers both see no lock, they run the same cycle
+        # simultaneously — harmless, they write identical data to the DB.
+        # ------------------------------------------------------------------
+        _warmer_lock_key = "warmer:cycle:lock"
+        if _get_cache(_warmer_lock_key) is not None:
+            time.sleep(30)
+            continue
+        _set_cache(_warmer_lock_key, os.getpid(), 25, "warmer:lock")
+
         if now - last["market_overview"] >= schedules["market_overview"]:
             last["market_overview"] = now
             try:
@@ -4940,6 +4994,21 @@ def _start_cache_warmer() -> None:
 @app.on_event("startup")
 def on_startup() -> None:
     """Run once when the ASGI server starts: prune old cache rows and launch warmer."""
+    # Ensure performance indexes exist on cache_entries — idempotent, safe to re-run.
+    # ix_cache_entry_key speeds up every cache lookup (already PK on SQLite, needed on PG).
+    # ix_cache_entry_expires_at speeds up the prune DELETE and the warmer lock check.
+    if not _IS_SQLITE:
+        try:
+            with engine.connect() as _conn:
+                _conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_cache_entry_expires_at "
+                    "ON cache_entries (expires_at)"
+                ))
+                _conn.commit()
+            logger.info("Startup: cache_entries index verified")
+        except Exception as _ie:
+            logger.warning("Startup: could not create cache index: %s", _ie)
+
     try:
         n = _prune_cache()
         logger.info("Startup: pruned %d expired cache rows", n)
