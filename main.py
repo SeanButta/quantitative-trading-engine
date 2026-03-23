@@ -39,7 +39,21 @@ from models import (
     DailySummary, SectorRefreshJob,
     User, PaperPortfolio, PaperPosition, PaperJournal, Watchlist,
 )
-from auth import router as auth_router, get_current_user, get_optional_user
+# Auth — graceful fallback if jose/passlib not yet installed
+try:
+    from auth import router as auth_router, get_current_user, get_optional_user
+    _AUTH_AVAILABLE = True
+except ImportError as _auth_err:
+    logger = logging.getLogger(__name__)
+    logger.warning("Auth module unavailable (%s) — auth endpoints disabled", _auth_err)
+    auth_router = None
+    _AUTH_AVAILABLE = False
+    # Stub dependencies so endpoints that reference them still load
+    def get_current_user():
+        raise HTTPException(status_code=503, detail="Auth module not installed")
+    def get_optional_user():
+        return None
+
 from cache import cache, PRICE_TTL, SECTOR_TTL
 
 logger = logging.getLogger(__name__)
@@ -89,8 +103,9 @@ if _RATE_LIMIT_AVAILABLE:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Mount auth router
-app.include_router(auth_router)
+# Mount auth router (only if auth module loaded successfully)
+if _AUTH_AVAILABLE and auth_router is not None:
+    app.include_router(auth_router)
 
 # ---------------------------------------------------------------------------
 # Database
