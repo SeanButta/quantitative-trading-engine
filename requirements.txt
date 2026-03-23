@@ -6,7 +6,7 @@ python-multipart>=0.0.9        # form/file uploads
 
 # ── Database ──────────────────────────────────────────────────────────────────
 sqlalchemy>=2.0.0
-# psycopg2-binary>=2.9.9       # Uncomment when migrating to PostgreSQL
+psycopg2-binary>=2.9.9         # PostgreSQL adapter (Supabase / any PG instance)
 
 # ── Data science ──────────────────────────────────────────────────────────────
 polars>=0.20.0                 # fast DataFrames (feature engine, signal engine)

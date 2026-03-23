@@ -52,49 +52,97 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database — use absolute path so it's stable regardless of cwd
+# ---------------------------------------------------------------------------
+# Database engine — SQLite (local dev) or PostgreSQL/Supabase (production)
+# ---------------------------------------------------------------------------
+#
+# Set DATABASE_URL env var to switch between backends:
+#
+#   SQLite  (local):  sqlite:///./quant_engine.db   ← default fallback
+#   Supabase (prod):  postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres
+#
+# Supabase provides two connection endpoints:
+#   • Direct (port 5432) — use with SQLAlchemy's own pool (recommended here)
+#   • Session-mode pooler (port 5432 via pgBouncer) — equivalent to direct for SQLAlchemy
+#   • Transaction-mode pooler (port 6543) — works but disable pool_pre_ping
+#
+# The code below auto-detects which mode is in use and configures accordingly.
+# ---------------------------------------------------------------------------
+
 _DB_PATH = Path(__file__).parent / "quant_engine.db"
-DB_URL = os.getenv("DATABASE_URL", f"sqlite:///{_DB_PATH}")
+_RAW_DB_URL = os.getenv("DATABASE_URL", f"sqlite:///{_DB_PATH}")
+
+# Supabase / Heroku export DATABASE_URL with the legacy "postgres://" prefix;
+# SQLAlchemy 2.x requires "postgresql://".
+DB_URL = _RAW_DB_URL.replace("postgres://", "postgresql://", 1)
 
 _IS_SQLITE = DB_URL.startswith("sqlite")
 
+# Detect Supabase transaction-mode pooler (port 6543) — pgBouncer in this
+# mode does not support persistent connections or pre-ping DISCARD ALL, so
+# we use pool_size=0 (NullPool) and skip pool_pre_ping.
+_IS_SUPABASE_POOLER = (
+    not _IS_SQLITE
+    and ":6543/" in DB_URL
+)
+
 if _IS_SQLITE:
-    # SQLite: disable pool sizing (unsupported), enable thread-safe access
     engine = create_engine(
         DB_URL,
         connect_args={"check_same_thread": False},
-        # StaticPool works well for single-file SQLite under multi-threading
         pool_pre_ping=True,
     )
+elif _IS_SUPABASE_POOLER:
+    # Transaction-mode pgBouncer: no persistent pool, no pre-ping.
+    # SQLAlchemy NullPool opens/closes a fresh connection per request —
+    # safe because pgBouncer itself handles connection reuse server-side.
+    from sqlalchemy.pool import NullPool
+    engine = create_engine(
+        DB_URL,
+        poolclass=NullPool,
+        connect_args={"sslmode": "require"},
+    )
+    logger.info("PostgreSQL engine: Supabase transaction-mode pooler (NullPool)")
 else:
-    # PostgreSQL / MySQL: explicit connection pool for 10-50 concurrent users
-    # pool_size=10  → persistent connections kept open
-    # max_overflow=20 → burst capacity (up to 30 total connections)
-    # pool_recycle=3600 → recycle stale connections every hour
+    # Direct connection or session-mode pooler — full SQLAlchemy pool.
+    # pool_size=10  → persistent connections kept warm
+    # max_overflow=20 → burst to 30 total for traffic spikes
+    # pool_recycle=1800 → recycle connections every 30 min (avoids Supabase idle timeout)
+    _pg_connect_args: dict = {}
+    if "supabase" in DB_URL or "supabase.co" in DB_URL:
+        _pg_connect_args["sslmode"] = "require"
     engine = create_engine(
         DB_URL,
         pool_size=10,
         max_overflow=20,
         pool_pre_ping=True,
-        pool_recycle=3600,
+        pool_recycle=1800,
+        connect_args=_pg_connect_args,
     )
+    logger.info("PostgreSQL engine: direct / session-mode pool (size=10, overflow=20)")
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base.metadata.create_all(bind=engine)
 
-# Enable SQLite WAL mode for better concurrent read throughput.
-# WAL allows readers to proceed while a writer is active — essential when
-# multiple requests read/write the cache table simultaneously.
+# Create all tables that don't exist yet.
+# On Supabase this is a no-op after the first deploy; on a fresh DB it
+# provisions the full schema without needing a migration framework.
+try:
+    Base.metadata.create_all(bind=engine)
+    logger.info("DB schema synced (%s)", "SQLite" if _IS_SQLITE else "PostgreSQL")
+except Exception as _schema_err:
+    logger.error("DB schema creation failed: %s", _schema_err)
+
+# SQLite-only: enable WAL mode + performance PRAGMAs
 if _IS_SQLITE:
     try:
         with engine.connect() as _conn:
             _conn.execute(text("PRAGMA journal_mode=WAL"))
-            _conn.execute(text("PRAGMA synchronous=NORMAL"))   # safe + faster than FULL
-            _conn.execute(text("PRAGMA temp_store=MEMORY"))    # tmp tables in RAM
-            _conn.execute(text("PRAGMA mmap_size=134217728"))  # 128 MB memory-map
+            _conn.execute(text("PRAGMA synchronous=NORMAL"))
+            _conn.execute(text("PRAGMA temp_store=MEMORY"))
+            _conn.execute(text("PRAGMA mmap_size=134217728"))  # 128 MB
             _conn.execute(text("PRAGMA cache_size=-32000"))    # 32 MB page cache
             _conn.commit()
-        logger.info("SQLite WAL mode enabled")
+        logger.info("SQLite WAL mode + performance PRAGMAs enabled")
     except Exception as _e:
         logger.warning("Could not set SQLite PRAGMAs: %s", _e)
 
