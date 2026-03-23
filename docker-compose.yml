@@ -1,0 +1,118 @@
+version: "3.9"
+
+# =============================================================================
+# Local Development Stack
+# =============================================================================
+# Spins up: PostgreSQL + Redis + the FastAPI backend
+# Frontend (Vite) still runs separately: cd frontend && npm run dev
+#
+# Usage:
+#   docker compose up -d         # start in background
+#   docker compose logs -f api   # tail API logs
+#   docker compose down          # stop
+#   docker compose down -v       # stop + delete volumes (wipes data)
+#
+# First-time setup:
+#   cp .env.example .env
+#   # Edit .env (set SECRET_KEY, FRED_API_KEY, etc.)
+#   docker compose up -d
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     quant
+      POSTGRES_PASSWORD: quant_dev_password
+      POSTGRES_DB:       quant_engine
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quant -d quant_engine"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Redis 7
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # FastAPI Backend
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL:      postgresql://quant:quant_dev_password@db:5432/quant_engine
+      REDIS_URL:         redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      SECRET_KEY:        ${SECRET_KEY:-dev_secret_change_in_production}
+      ALLOWED_ORIGINS:   http://localhost:5173
+      FRED_API_KEY:      ${FRED_API_KEY:-}
+      SENTRY_DSN:        ${SENTRY_DSN:-}
+      ACCESS_TOKEN_EXPIRE_MINUTES: 60
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./runs:/app/runs       # persist sector/options/artifact cache across restarts
+    command: uvicorn main:app --host 0.0.0.0 --port 8001 --workers 2
+
+  # ---------------------------------------------------------------------------
+  # Celery Worker (optional — comment out if you don't need async job queue)
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL:      postgresql://quant:quant_dev_password@db:5432/quant_engine
+      REDIS_URL:         redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      SECRET_KEY:        ${SECRET_KEY:-dev_secret_change_in_production}
+      FRED_API_KEY:      ${FRED_API_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./runs:/app/runs
+    command: >
+      celery -A tasks worker
+        --loglevel=info
+        --queues=heavy,default
+        --concurrency=2
+        --max-tasks-per-child=50
+
+volumes:
+  pgdata:
+  redisdata:

@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useMemo, createContext, useContext } from "react";
+import { useState, useEffect, useRef, useMemo, createContext, useContext, useCallback } from "react";
+import { AuthProvider, AuthScreen, UserMenu, useAuth } from "./auth.jsx";
 import {
   LineChart, Line, AreaChart, Area, BarChart, Bar, Cell, ScatterChart, Scatter,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -10925,6 +10926,13 @@ function CloseDialog({pos,prices,onClose,onConfirm}){
 
 function PaperTradingView(){
   const C=useC();
+  const { isAuthenticated, token } = useAuth();
+
+  // ── Persistence helpers ──────────────────────────────────────────────────
+  // When authenticated: backend API.  When demo: localStorage (existing).
+  const [portfolioId, setPortfolioId] = useState(null);  // backend portfolio UUID
+  const [syncing,     setSyncing]     = useState(false);  // backend sync in-flight
+
   const [cash,   setCash0] = useState(()=>ppLoad("pp_cash",100000));
   const [pos,    setPos0]  = useState(()=>ppLoad("pp_pos",[]));
   const [jnl,    setJnl0]  = useState(()=>ppLoad("pp_jnl",[]));
@@ -10947,10 +10955,131 @@ function PaperTradingView(){
   const [optSide,       setOptSide]       = useState("buy");
   const [optNotes,      setOptNotes]      = useState("");
   const [chainBusy,     setChainBusy]     = useState(false);
+  const [importDone,    setImportDone]    = useState(false); // track if we offered to import localStorage
 
-  const setCash = v=>{setCash0(v);ppSave("pp_cash",v);};
-  const setPos  = v=>{setPos0(v); ppSave("pp_pos",v);};
-  const setJnl  = v=>{setJnl0(v); ppSave("pp_jnl",v);};
+  // ── Backend sync helpers ─────────────────────────────────────────────────
+  const authHeaders = useCallback(()=>({ "Content-Type":"application/json", ...(token?{Authorization:`Bearer ${token}`}:{}) }), [token]);
+
+  async function backendPost(url, body){
+    const r = await fetch(url, { method:"POST", headers: authHeaders(), body: JSON.stringify(body) });
+    if(!r.ok){ const d=await r.json().catch(()=>({detail:"error"})); throw new Error(d.detail||`HTTP ${r.status}`); }
+    return r.json();
+  }
+  async function backendPatch(url, body){
+    const r = await fetch(url, { method:"PATCH", headers: authHeaders(), body: JSON.stringify(body) });
+    if(!r.ok){ const d=await r.json().catch(()=>({detail:"error"})); throw new Error(d.detail||`HTTP ${r.status}`); }
+    return r.json();
+  }
+  async function backendDelete(url){
+    const r = await fetch(url, { method:"DELETE", headers: authHeaders() });
+    if(!r.ok){ const d=await r.json().catch(()=>({detail:"error"})); throw new Error(d.detail||`HTTP ${r.status}`); }
+    return r.json();
+  }
+
+  // ── Load from backend on auth ────────────────────────────────────────────
+  useEffect(()=>{
+    if(!isAuthenticated||!token) return;
+    (async()=>{
+      setSyncing(true);
+      try{
+        const r=await fetch("/api/paper/portfolios",{headers:{Authorization:`Bearer ${token}`}});
+        if(!r.ok) throw new Error("failed");
+        const portfolios=await r.json();
+        let pid;
+        if(portfolios.length===0){
+          // Create default portfolio; offer to import localStorage data
+          const created = await backendPost("/api/paper/portfolios",{name:"My Portfolio",starting_cash:100000});
+          pid = created.id;
+          setPortfolioId(pid);
+          // Auto-import localStorage if there's data and we haven't asked yet
+          const localPos = ppLoad("pp_pos",[]);
+          const localJnl = ppLoad("pp_jnl",[]);
+          const localCash = ppLoad("pp_cash",100000);
+          if((localPos.length>0||localJnl.length>0) && !importDone){
+            setImportDone(true);
+            await backendPost(`/api/paper/portfolios/${pid}/import`,{cash:localCash,positions:localPos,journal:localJnl});
+            flash("Imported your local paper trades to your account ✓",true);
+          }
+        } else {
+          pid = portfolios[0].id;
+          setPortfolioId(pid);
+          // Load positions + journal + cash from backend
+          const [posR, jnlR] = await Promise.all([
+            fetch(`/api/paper/portfolios/${pid}/positions`,{headers:{Authorization:`Bearer ${token}`}}),
+            fetch(`/api/paper/portfolios/${pid}/journal`,  {headers:{Authorization:`Bearer ${token}`}}),
+          ]);
+          if(posR.ok){
+            const backendPos = await posR.json();
+            // Map backend snake_case back to camelCase for existing UI logic
+            setCash0(portfolios[0].cash ?? 100000);
+            setPos0(backendPos.map(p=>({
+              id:p.id, type:p.type, symbol:p.symbol, side:p.side,
+              qty:p.qty, entryPrice:p.entry_price,
+              contracts:p.contracts, strike:p.strike, expiry:p.expiry,
+              entryPremium:p.entry_premium, underlyingAtEntry:p.underlying_at_entry,
+              iv:p.iv, delta:p.delta,
+              entryDate:p.entry_date, notes:p.notes,
+            })));
+          }
+          if(jnlR.ok){
+            const backendJnl = await jnlR.json();
+            setJnl0(backendJnl.map(j=>({
+              id:j.id, date:j.date, action:j.action, type:j.type,
+              symbol:j.symbol, strike:j.strike, expiry:j.expiry,
+              qty:j.qty, contracts:j.contracts,
+              price:j.price, total:j.total, pnl:j.pnl, notes:j.notes,
+            })));
+          }
+        }
+      }catch(e){
+        console.error("Paper trading backend sync failed:",e.message);
+        // Silent fail — localStorage already loaded
+      }
+      setSyncing(false);
+    })();
+  },[isAuthenticated,token]); // eslint-disable-line
+
+  // ── Setters: write to backend when authed, localStorage always ───────────
+  const setCash = useCallback(async v=>{
+    setCash0(v); ppSave("pp_cash",v);
+    if(isAuthenticated&&portfolioId){
+      try{ await backendPatch(`/api/paper/portfolios/${portfolioId}/cash`,{cash:v}); }catch{}
+    }
+  },[isAuthenticated,portfolioId,token]);
+
+  const setPos = useCallback(async (newPos, addedPos=null, removedId=null)=>{
+    setPos0(newPos); ppSave("pp_pos",newPos);
+    if(isAuthenticated&&portfolioId){
+      try{
+        if(addedPos){
+          await backendPost(`/api/paper/portfolios/${portfolioId}/positions`,{
+            type:addedPos.type, symbol:addedPos.symbol, side:addedPos.side,
+            qty:addedPos.qty, entry_price:addedPos.entryPrice,
+            contracts:addedPos.contracts, strike:addedPos.strike, expiry:addedPos.expiry,
+            entry_premium:addedPos.entryPremium, underlying_at_entry:addedPos.underlyingAtEntry,
+            iv:addedPos.iv, delta:addedPos.delta, notes:addedPos.notes||"",
+          });
+        } else if(removedId){
+          await backendDelete(`/api/paper/portfolios/${portfolioId}/positions/${removedId}`);
+        }
+      }catch{}
+    }
+  },[isAuthenticated,portfolioId,token]);
+
+  const setJnl = useCallback(async (newJnl, addedEntry=null)=>{
+    setJnl0(newJnl); ppSave("pp_jnl",newJnl);
+    if(isAuthenticated&&portfolioId&&addedEntry){
+      try{
+        await backendPost(`/api/paper/portfolios/${portfolioId}/journal`,{
+          action:addedEntry.action, type:addedEntry.type, symbol:addedEntry.symbol,
+          strike:addedEntry.strike, expiry:addedEntry.expiry,
+          qty:addedEntry.qty, contracts:addedEntry.contracts,
+          price:addedEntry.price, total:addedEntry.total, pnl:addedEntry.pnl,
+          notes:addedEntry.notes||"",
+        });
+      }catch{}
+    }
+  },[isAuthenticated,portfolioId,token]);
   const flash   = (t,ok=true)=>{setMsg({t,ok});setTimeout(()=>setMsg(null),3500);};
 
   async function fetchQ(sym){
@@ -11048,11 +11177,13 @@ function PaperTradingView(){
     if(!sym||!qty||qty<=0||!eqQ)return flash("Enter symbol, qty, and get quote first",false);
     const cost=eqQ*qty;
     if(eqF.side==="long"&&cost>cash)return flash("Insufficient cash",false);
-    const p={id:ppId(),type:"equity",symbol:sym,side:eqF.side,qty,entryPrice:eqQ,entryDate:new Date().toISOString(),notes:eqF.notes};
-    setPos([...pos,p]);
-    setCash(eqF.side==="long"?cash-cost:cash+cost);
+    const newPos={id:ppId(),type:"equity",symbol:sym,side:eqF.side,qty,entryPrice:eqQ,entryDate:new Date().toISOString(),notes:eqF.notes};
+    const newCash=eqF.side==="long"?cash-cost:cash+cost;
     const action=eqF.side==="long"?"BUY":"SELL SHORT";
-    setJnl([{id:ppId(),date:new Date().toISOString(),action,type:"equity",symbol:sym,qty,price:eqQ,total:cost,pnl:null,notes:eqF.notes},...jnl]);
+    const newJnlEntry={id:ppId(),date:new Date().toISOString(),action,type:"equity",symbol:sym,qty,price:eqQ,total:cost,pnl:null,notes:eqF.notes};
+    setPos([...pos,newPos], newPos, null);
+    setCash(newCash);
+    setJnl([newJnlEntry,...jnl], newJnlEntry);
     setEqF({sym:"",qty:"",side:"long",notes:""});setEqQ(null);
     flash(`${action} ${qty}× ${sym} @ $${eqQ.toFixed(2)}`);
     setSub("positions");
@@ -11066,11 +11197,12 @@ function PaperTradingView(){
     const total=entryPremium*contracts*100;
     if(optSide==="buy"&&total>cash)return flash("Insufficient cash",false);
     const sym=optSym.toUpperCase();
-    const p={id:ppId(),type:optSelC.option_type,symbol:sym,strike:optSelC.strike,expiry:optSelC.expiration,side:optSide,contracts,entryPremium,underlyingAtEntry:optU,iv:optSelC.implied_vol*100,delta:optSelC.delta,entryDate:new Date().toISOString(),notes:optNotes};
-    setPos([...pos,p]);
-    setCash(optSide==="buy"?cash-total:cash+total);
+    const newPos={id:ppId(),type:optSelC.option_type,symbol:sym,strike:optSelC.strike,expiry:optSelC.expiration,side:optSide,contracts,entryPremium,underlyingAtEntry:optU,iv:optSelC.implied_vol*100,delta:optSelC.delta,entryDate:new Date().toISOString(),notes:optNotes};
     const action=`${optSide==="buy"?"BUY":"WRITE"} ${optSelC.option_type.toUpperCase()}`;
-    setJnl([{id:ppId(),date:new Date().toISOString(),action,type:optSelC.option_type,symbol:sym,strike:optSelC.strike,expiry:optSelC.expiration,contracts,price:entryPremium,total,pnl:null,notes:optNotes},...jnl]);
+    const newJnlEntry={id:ppId(),date:new Date().toISOString(),action,type:optSelC.option_type,symbol:sym,strike:optSelC.strike,expiry:optSelC.expiration,contracts,price:entryPremium,total,pnl:null,notes:optNotes};
+    setPos([...pos,newPos], newPos, null);
+    setCash(optSide==="buy"?cash-total:cash+total);
+    setJnl([newJnlEntry,...jnl], newJnlEntry);
     setOptSelC(null);setOptQty("1");setOptNotes("");
     flash(`${action} ${contracts}× ${sym} $${optSelC.strike} exp ${optSelC.expiration}`);
     setSub("positions");
@@ -11088,8 +11220,9 @@ function PaperTradingView(){
       cashDelta=p.side==="buy"?prem*p.contracts*100:-(prem*p.contracts*100);
     }
     const action=p.type==="equity"?(p.side==="long"?"SELL (CLOSE)":"BUY (COVER)"):`CLOSE ${p.type.toUpperCase()}`;
-    setJnl([{id:ppId(),date:new Date().toISOString(),action,type:p.type,symbol:p.symbol,strike:p.strike,expiry:p.expiry,qty:p.qty||p.contracts,price:closePrice,total:Math.abs(cashDelta),pnl:Math.round(pnl*100)/100,notes:p.notes},...jnl]);
-    setPos(pos.filter(x=>x.id!==p.id));
+    const jnlEntry={id:ppId(),date:new Date().toISOString(),action,type:p.type,symbol:p.symbol,strike:p.strike,expiry:p.expiry,qty:p.qty||p.contracts,price:closePrice,total:Math.abs(cashDelta),pnl:Math.round(pnl*100)/100,notes:p.notes};
+    setJnl([jnlEntry,...jnl], jnlEntry);
+    setPos(pos.filter(x=>x.id!==p.id), null, p.id);
     setCash(cash+cashDelta);
     setCloseT(null);
     flash(`${p.symbol} closed · P&L: ${pnl>=0?"+":""}$${pnl.toFixed(2)}`,pnl>=0);
@@ -11480,7 +11613,22 @@ function PaperTradingView(){
   );
 }
 
-export default function App() {
+// ── Inner App (inside AuthProvider) ──────────────────────────────────────────
+function AppInner() {
+  const { isAuthenticated, ready, user } = useAuth();
+  const [demoMode, setDemoMode] = useState(false);
+
+  // Show auth screen until ready (rehydrating session) or until user acts
+  if (!ready) return null;  // brief flash while sessionStorage is read
+  if (!isAuthenticated && !demoMode) {
+    return <AuthScreen onDemoMode={() => setDemoMode(true)} />;
+  }
+
+  return <AppShell />;
+}
+
+function AppShell() {
+  const { isAuthenticated, user } = useAuth();
   const [view,setView]           = useState("markets");
   const [dark,setDark]           = useState(true);
   const [detailSym,setDetailSym] = useState(null);
@@ -11541,7 +11689,7 @@ export default function App() {
                 </div>
                 <span style={mono(11,C.headingTxt,700)}>Picador</span>
               </div>
-              <div style={mono(9,C.mut)}>v1.0.0 · Quantitative Research Platform</div>
+              <div style={mono(9,C.mut)}>v2.0.0 · Quantitative Research Platform</div>
             </div>
             {isMobile && (
               <button onClick={()=>setNavOpen(false)} style={{background:"transparent",border:"none",cursor:"pointer",padding:"2px 4px",marginTop:2}}>
@@ -11569,10 +11717,14 @@ export default function App() {
               {dark?<Sun size={13} style={{color:C.amb}}/>:<Moon size={13} style={{color:C.sky}}/>}
               {dark?"Light mode":"Dark mode"}
             </button>
-            <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",borderRadius:8,border:`1px solid ${C.grn}25`,background:C.grnBg}}>
-              <div style={{width:7,height:7,borderRadius:"50%",background:C.grn}}/>
-              <span style={mono(9,C.grn)}>Demo Mode</span>
-            </div>
+            {isAuthenticated ? (
+              <UserMenu />
+            ) : (
+              <div style={{display:"flex",alignItems:"center",gap:6,padding:"5px 10px",borderRadius:8,border:`1px solid ${C.grn}25`,background:C.grnBg}}>
+                <div style={{width:7,height:7,borderRadius:"50%",background:C.grn}}/>
+                <span style={mono(9,C.grn)}>Demo Mode</span>
+              </div>
+            )}
             <div style={{...mono(8,C.mut),marginTop:8,lineHeight:1.6}}>⚠ Not financial advice.<br/>Markets involve risk.</div>
           </div>
         </aside>
@@ -11593,5 +11745,13 @@ export default function App() {
       </div>
     </ThemeCtx.Provider>
     </LoadingCtx.Provider>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppInner />
+    </AuthProvider>
   );
 }
