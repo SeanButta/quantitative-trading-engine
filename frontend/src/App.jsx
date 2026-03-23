@@ -11615,15 +11615,8 @@ function PaperTradingView(){
 
 // ── Inner App (inside AuthProvider) ──────────────────────────────────────────
 function AppInner() {
-  const { isAuthenticated, ready, user } = useAuth();
-  const [demoMode, setDemoMode] = useState(false);
-
-  // Show auth screen until ready (rehydrating session) or until user acts
-  if (!ready) return null;  // brief flash while sessionStorage is read
-  if (!isAuthenticated && !demoMode) {
-    return <AuthScreen onDemoMode={() => setDemoMode(true)} />;
-  }
-
+  // Auth backend is available (login/register work) but the gate is open —
+  // all users land directly in the app. Re-enable the guard below when ready.
   return <AppShell />;
 }
 
