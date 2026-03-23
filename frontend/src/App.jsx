@@ -31,6 +31,21 @@ const LIGHT = {
 const ThemeCtx = createContext(DARK);
 const useC = () => useContext(ThemeCtx);
 
+// Convert raw API error text into a human-readable message.
+// 401 / "Not authenticated" → friendly signup prompt.
+function friendlyError(raw) {
+  const s = String(raw ?? "");
+  if (
+    s.includes("Not authenticated") ||
+    s.includes("not authenticated") ||
+    s.includes('"detail":"Not authenticated"') ||
+    s === "401"
+  ) {
+    return "🔒 Create a free account to use this feature — sign up takes 30 seconds";
+  }
+  return s;
+}
+
 // Global loading indicator — any component can signal "something is in flight"
 const LoadingCtx = createContext({active:false, push:()=>{}, pop:()=>{}});
 const useLoading = () => useContext(LoadingCtx);
@@ -762,7 +777,7 @@ function BacktestView() {
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({name:`Run ${new Date().toISOString().slice(0,16)}`, symbols:symList, start_date:startDate, end_date:endDate}),
       });
-      if (!pRes.ok) throw new Error(`Create project: ${await pRes.text()}`);
+      if (!pRes.ok) throw new Error(friendlyError(await pRes.text()) || "Could not create project");
       const proj = await pRes.json();
 
       // 2. Ingest
@@ -2366,7 +2381,7 @@ function OptimizeView() {
         method:"POST", headers:{"Content-Type":"application/json"},
         body: JSON.stringify({holdings, risk_aversion:parseFloat(riskAv)||2.5, tau:0.05, signal_scores:{}}),
       });
-      if (!r.ok) throw new Error(await r.text());
+      if (!r.ok) throw new Error(friendlyError(await r.text()));
       setResult(await r.json());
     } catch(e) { setError(e.message); }
     setLoading(false);
@@ -4555,7 +4570,7 @@ function OptionsView() {
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({symbols:[sym], risk_free_rate:0.05}),
     });
-    if (!r.ok) { setError(await r.text()); setRefreshing(false); return; }
+    if (!r.ok) { setError(friendlyError(await r.text())); setRefreshing(false); return; }
     const j = await r.json();
     setJobId(j.job_id);
     pollJob(j.job_id, sym);  // pass sym so the closure is always correct
@@ -5473,7 +5488,7 @@ function PortfolioView() {
         body:JSON.stringify({holdings:h,risk_free_rate:rfr/100}),
       });
       const d=await r.json();
-      if(!r.ok) throw new Error(d.detail||"Failed");
+      if(!r.ok) throw new Error(friendlyError(d.detail)||"Failed");
       setJobId(d.job_id);
     } catch(e){ setError(e.message); setLoading(false); }
   }
@@ -8347,7 +8362,7 @@ function TradeAdvisorView() {
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({ symbol: sym, risk_tolerance: risk }),
     })
-      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail || "Advisor error")))
+      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(friendlyError(e.detail) || "Advisor error")))
       .then(d => { setData(d); setLoading(false); })
       .catch(e => { setErr(String(e)); setLoading(false); });
   };
@@ -9044,7 +9059,7 @@ function PairsView() {
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({ symbols: syms, z_entry: zEntry, min_correlation: minCorr }),
     })
-      .then(r=>r.ok?r.json():r.json().then(e=>Promise.reject(e.detail||"Screen failed")))
+      .then(r=>r.ok?r.json():r.json().then(e=>Promise.reject(friendlyError(e.detail)||"Screen failed")))
       .then(d=>{ setPairs(d); setLoading(false); })
       .catch(e=>{ setErr(String(e)); setLoading(false); })
       .finally(()=>{ screeningRef.current = false; });
@@ -9580,7 +9595,7 @@ function SectorsView() {
     fetch("/api/sectors/refresh",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
       .then(async r=>{
         const text=await r.text();
-        if(!r.ok) throw new Error(`Server error ${r.status}: ${text.slice(0,120)}`);
+        if(!r.ok) throw new Error(friendlyError(text) || `Server error ${r.status}: ${text.slice(0,120)}`);
         return JSON.parse(text);
       })
       .then(d=>{setJobId(d.job_id);setJob({...d,status:"running"});})
