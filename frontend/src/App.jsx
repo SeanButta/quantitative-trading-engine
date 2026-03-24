@@ -6892,12 +6892,12 @@ function TechnicalView() {
               <Settings size={11}/> Indicators
             </button>
             <button onClick={()=>setShowGodMode(s=>!s)} style={{fontFamily:"monospace",fontSize:10,
-              color:showGodMode?"#f6c90e":"#c9a400",
-              background:showGodMode?"#f6c90e22":"#f6c90e08",
-              border:`${showGodMode?"2px":"1px"} solid ${showGodMode?"#f6c90ecc":"#f6c90e66"}`,
+              color:"#f6c90e",
+              background:showGodMode?"#f6c90e28":"#f6c90e0f",
+              border:`${showGodMode?"2px":"1.5px"} solid ${showGodMode?"#f6c90eee":"#f6c90eaa"}`,
               borderRadius:6,
               padding:"4px 10px",cursor:"pointer",display:"flex",alignItems:"center",gap:5,fontWeight:700,
-              boxShadow:showGodMode?"0 0 10px #f6c90e44":"none",
+              boxShadow:showGodMode?"0 0 12px #f6c90e55":"0 0 6px #f6c90e22",
               transition:"all .15s"}}>
               ⚡ God Mode
             </button>
