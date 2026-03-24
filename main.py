@@ -21,10 +21,16 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 from pydantic import BaseModel, Field
+
+# slowapi is optional — if not yet installed (e.g. first deploy before pip refresh)
+# the app still starts and all endpoints work; rate limiting is just disabled.
+try:
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+    _SLOWAPI_OK = True
+except ImportError:
+    _SLOWAPI_OK = False
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -64,6 +70,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Rate limiting (slowapi) — protects expensive endpoints from abuse
 # ---------------------------------------------------------------------------
 # Uses real client IP, respecting X-Forwarded-For from Railway's proxy layer.
+# Falls back to a no-op if slowapi isn't installed yet (safe during deploys).
 
 def _get_real_ip(request: Request) -> str:
     xff = request.headers.get("x-forwarded-for")
@@ -71,9 +78,19 @@ def _get_real_ip(request: Request) -> str:
         return xff.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
-limiter = Limiter(key_func=_get_real_ip)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+if _SLOWAPI_OK:
+    limiter = Limiter(key_func=_get_real_ip)
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    logger.info("Rate limiting enabled (slowapi)")
+else:
+    # No-op limiter: .limit() returns a pass-through decorator
+    class _NoOpLimiter:
+        def limit(self, *_a, **_kw):
+            def _deco(fn): return fn
+            return _deco
+    limiter = _NoOpLimiter()
+    logger.warning("slowapi not available — rate limiting disabled")
 
 # Auth router — registers /auth/register, /auth/login, /auth/me, etc.
 app.include_router(_auth_router)
