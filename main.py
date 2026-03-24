@@ -1055,7 +1055,7 @@ def price_option(req: OptionPriceRequest):
 @app.post("/options/refresh")
 @limiter.limit("3/minute")
 def options_refresh(request: Request, req: OptionsRefreshRequest, background_tasks: BackgroundTasks,
-                    _user: dict = Depends(get_current_user)):
+                    _user=Depends(get_optional_user)):
     """Trigger a background fetch of options chains + Greeks for a symbol list."""
     from options_feed import SP500_UNIVERSE
     symbols = req.symbols or SP500_UNIVERSE
@@ -2418,7 +2418,7 @@ def market_overview():
 @app.post("/portfolio/analyze")
 @limiter.limit("5/minute")
 def portfolio_analyze(request: Request, req: PortfolioAnalyzeRequest, background_tasks: BackgroundTasks,
-                      _user: dict = Depends(get_current_user)):
+                      _user=Depends(get_optional_user)):
     """Kick off an async portfolio analysis job. Poll GET /portfolio/job/{job_id}."""
     job_id = str(uuid.uuid4())[:12]
     holdings_data = [h.model_dump() for h in req.holdings]
@@ -3716,7 +3716,7 @@ def get_sectors_universe():
 
 
 @app.post("/sectors/universe/refresh")
-def refresh_sp500_universe(_user: dict = Depends(get_current_user)):
+def refresh_sp500_universe(_user=Depends(get_optional_user)):
     """Force-refresh the S&P 500 universe list from Wikipedia."""
     try:
         from sp500_universe import get_sp500_universe
@@ -3762,7 +3762,7 @@ def get_combined_universe_endpoint():
 
 
 @app.post("/universe/refresh")
-def refresh_extended_universe(_user: dict = Depends(get_current_user)):
+def refresh_extended_universe(_user=Depends(get_optional_user)):
     """Force-refresh Russell 1000, Russell 2000, and EDGAR CIK maps from source."""
     from extended_universe import (
         get_edgar_cik_map, get_russell1000_tickers, get_russell2000_tickers
@@ -3810,7 +3810,7 @@ def get_ticker_filings(symbol: str, limit: int = 20):
 
 @app.post("/sectors/refresh")
 def refresh_sectors(background_tasks: BackgroundTasks, body: Optional[dict] = None,
-                    _user: dict = Depends(get_current_user)):
+                    _user=Depends(get_optional_user)):
     """Trigger background refresh of one or all sectors. Body: {sectors?: [str]}"""
     from sectors_engine import SECTOR_UNIVERSE
     target = (body or {}).get("sectors") or list(SECTOR_UNIVERSE.keys())
@@ -4013,7 +4013,7 @@ def pairs_signal(sym_a: str, sym_b: str, z_entry: float = 2.0, z_exit: float = 0
 
 @app.post("/advisor")
 @limiter.limit("10/minute")
-def trade_advisor(request: Request, req: TradeAdvisorRequest, _user: dict = Depends(get_current_user)):
+def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_optional_user)):
     """
     Trade Advisor: synthesizes technical signals, ML prediction, sentiment,
     options analytics, and macro context into structured trade recommendations.
