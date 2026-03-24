@@ -234,8 +234,8 @@ def register(req: RegisterRequest):
         raise
     except Exception as e:
         db.rollback()
-        logger.exception("Registration failed")
-        raise HTTPException(status_code=500, detail="Registration failed")
+        logger.exception("Registration failed for %s: %s", req.email, e)
+        raise HTTPException(status_code=500, detail=f"Registration failed: {e}")
     finally:
         db.close()
 
@@ -270,9 +270,9 @@ def login(req: LoginRequest):
         )
     except HTTPException:
         raise
-    except Exception:
-        logger.exception("Login failed")
-        raise HTTPException(status_code=500, detail="Login failed")
+    except Exception as e:
+        logger.exception("Login failed for %s: %s", req.email, e)
+        raise HTTPException(status_code=500, detail=f"Login failed: {e}")
     finally:
         db.close()
 

@@ -5026,6 +5026,24 @@ def on_startup() -> None:
         except Exception as _ie:
             logger.warning("Startup: could not create cache index: %s", _ie)
 
+        # Schema evolution without Alembic: add any columns that may be missing
+        # from tables created by older deployments.  ALTER TABLE ADD COLUMN IF
+        # NOT EXISTS is idempotent in PostgreSQL 9.6+.
+        _schema_migrations = [
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMP",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS tier VARCHAR DEFAULT 'free'",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name VARCHAR DEFAULT ''",
+        ]
+        for _sql in _schema_migrations:
+            try:
+                with engine.connect() as _conn:
+                    _conn.execute(text(_sql))
+                    _conn.commit()
+            except Exception as _me:
+                logger.warning("Startup migration skipped (%s): %s", _sql[:50], _me)
+        logger.info("Startup: users table schema migration complete")
+
     try:
         n = _prune_cache()
         logger.info("Startup: pruned %d expired cache rows", n)
