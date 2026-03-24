@@ -40,7 +40,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from models import Base, Project, Strategy, Run, OptionsRefreshJob, SignalReadingJob, PortfolioAnalysisJob, DailySummary, SectorRefreshJob, CacheEntry
-from auth import router as _auth_router, get_current_user
+from auth import router as _auth_router, get_current_user, get_optional_user
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
