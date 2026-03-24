@@ -4585,7 +4585,13 @@ function OptionsView() {
     try {
       const url = exp ? `/api/options/${sym}/${exp}` : `/api/options/${sym}`;
       const r = await fetch(url);
-      if (!r.ok) { setError(`No data for ${sym}. Click Fetch to download.`); setLoading(false); return; }
+      if (!r.ok) {
+        // No cached data — kick off an automatic fetch so the user sees data
+        // without having to click a button (only on full-chain load, not expiry filter)
+        setLoading(false);
+        if (!exp) { fetchRefresh(); } else { setError(`No data for ${sym}. Click Fetch to download.`); }
+        return;
+      }
       const data = await r.json();
       if (exp) {
         setChain(data);
