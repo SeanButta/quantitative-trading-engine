@@ -26,9 +26,14 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
-from passlib.context import CryptContext
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
+
+# Use bcrypt directly — passlib 1.7.4 + bcrypt 4.x has a compatibility bug
+# where truncation errors are raised even for short passwords.  The bcrypt
+# library itself is always installed (it's passlib's own dependency) and its
+# API is stable across 3.x and 4.x.
+import bcrypt as _bcrypt
 
 logger = logging.getLogger(__name__)
 
@@ -47,24 +52,29 @@ if SECRET_KEY == "CHANGE_ME_IN_PRODUCTION_USE_openssl_rand_hex_32":
     )
 
 # ---------------------------------------------------------------------------
-# Password hashing
+# Password hashing  (bcrypt direct — bypasses passlib compatibility issues)
 # ---------------------------------------------------------------------------
-
-pwd_context = CryptContext(
-    schemes=["bcrypt"],
-    deprecated="auto",
-    bcrypt__truncate_error=False,   # bcrypt silently truncates at 72 bytes rather than raising
-)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login/form", auto_error=False)
 
 
 def hash_password(plain: str) -> str:
-    return pwd_context.hash(plain)
+    """Hash a plaintext password with bcrypt.  Passwords are explicitly
+    capped at 72 bytes (the bcrypt limit) before hashing so that very long
+    passwords produce a stable, deterministic hash rather than raising."""
+    pw_bytes = plain.encode("utf-8")[:72]
+    return _bcrypt.hashpw(pw_bytes, _bcrypt.gensalt()).decode("ascii")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    """Verify a plaintext password against a bcrypt hash.
+    Works with hashes created by this function AND with any previous
+    passlib-generated ``$2b$`` bcrypt hashes (same wire format)."""
+    try:
+        pw_bytes = plain.encode("utf-8")[:72]
+        return _bcrypt.checkpw(pw_bytes, hashed.encode("ascii"))
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
