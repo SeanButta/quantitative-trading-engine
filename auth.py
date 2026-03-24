@@ -50,7 +50,11 @@ if SECRET_KEY == "CHANGE_ME_IN_PRODUCTION_USE_openssl_rand_hex_32":
 # Password hashing
 # ---------------------------------------------------------------------------
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__truncate_error=False,   # bcrypt silently truncates at 72 bytes rather than raising
+)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login/form", auto_error=False)
 
