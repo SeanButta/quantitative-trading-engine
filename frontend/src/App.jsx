@@ -715,6 +715,7 @@ const PIPELINE_STEPS = [
 function BacktestView() {
   const C = useC();
   const TT = makeTT(C);
+  const { token } = useAuth();
   const ALL=["conditional_probability","bayesian_update","regression_alpha","pca_regime","fat_tail_risk"];
 
   // Config inputs
@@ -772,9 +773,10 @@ function BacktestView() {
     try {
       const symList = symbols.split(",").map(s=>s.trim().toUpperCase()).filter(Boolean);
 
+      const authH = token ? {Authorization:`Bearer ${token}`} : {};
       // 1. Create project
       const pRes = await fetch("/api/projects", {
-        method:"POST", headers:{"Content-Type":"application/json"},
+        method:"POST", headers:{"Content-Type":"application/json",...authH},
         body: JSON.stringify({name:`Run ${new Date().toISOString().slice(0,16)}`, symbols:symList, start_date:startDate, end_date:endDate}),
       });
       if (!pRes.ok) throw new Error(friendlyError(await pRes.text()) || "Could not create project");
@@ -782,18 +784,18 @@ function BacktestView() {
 
       // 2. Ingest
       setStep("ingesting");
-      const iRes = await fetch(`/api/projects/${proj.id}/ingest`, {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+      const iRes = await fetch(`/api/projects/${proj.id}/ingest`, {method:"POST", headers:{"Content-Type":"application/json",...authH}, body:"{}"});
       if (!iRes.ok) throw new Error(`Ingest: ${await iRes.text()}`);
 
       // 3. Features
       setStep("features");
-      const fRes = await fetch(`/api/projects/${proj.id}/features/compute`, {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+      const fRes = await fetch(`/api/projects/${proj.id}/features/compute`, {method:"POST", headers:{"Content-Type":"application/json",...authH}, body:"{}"});
       if (!fRes.ok) throw new Error(`Features: ${await fRes.text()}`);
 
       // 4. Backtest
       setStep("backtesting");
       const bRes = await fetch(`/api/projects/${proj.id}/runs/backtest`, {
-        method:"POST", headers:{"Content-Type":"application/json"},
+        method:"POST", headers:{"Content-Type":"application/json",...authH},
         body: JSON.stringify({signals:sigs, fee_bps:parseFloat(fee), slippage_bps:parseFloat(slippage), risk_free_rate:parseFloat(rfr)/100, n_permutations:500}),
       });
       if (!bRes.ok) throw new Error(`Backtest: ${await bRes.text()}`);
@@ -4502,6 +4504,7 @@ function OptionsAdvancedPanel({ symbol, snapshotKey }) {
 
 function OptionsView() {
   const C = useC();
+  const { token } = useAuth();
   const [symbol, setSymbol] = useState("SPY");
   const [inputSym, setInputSym] = useState("SPY");
   const [expirations, setExpirations] = useState([]);
@@ -4567,7 +4570,8 @@ function OptionsView() {
     setSymbol(sym); setSelExp(null); setChain(null); setSummary(null);
     setExpirations([]); setSnapshotAt(null); setPriceHistory([]);
     const r = await fetch("/api/options/refresh", {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST",
+      headers:{"Content-Type":"application/json", ...(token ? {Authorization:`Bearer ${token}`} : {})},
       body: JSON.stringify({symbols:[sym], risk_free_rate:0.05}),
     });
     if (!r.ok) { setError(friendlyError(await r.text())); setRefreshing(false); return; }
@@ -5432,6 +5436,7 @@ function StackedHoldingsChart({ perTickerSeries, tickers }) {
 
 function PortfolioView() {
   const C = useC();
+  const { token } = useAuth();
   const DEFAULT_HOLDINGS = [
     {ticker:"AAPL",weight:20},{ticker:"MSFT",weight:18},{ticker:"NVDA",weight:15},
     {ticker:"GOOGL",weight:12},{ticker:"AMZN",weight:10},{ticker:"JPM",weight:10},
@@ -5484,7 +5489,8 @@ function PortfolioView() {
       ));
       if(!h.length) throw new Error("Add at least one holding");
       const r=await fetch(`${BASE}/portfolio/analyze`,{
-        method:"POST",headers:{"Content-Type":"application/json"},
+        method:"POST",
+        headers:{"Content-Type":"application/json",...(token?{Authorization:`Bearer ${token}`}:{})},
         body:JSON.stringify({holdings:h,risk_free_rate:rfr/100}),
       });
       const d=await r.json();
@@ -8351,6 +8357,7 @@ function MacroView() {
 // ── TradeAdvisorView ──────────────────────────────────────────────────────────
 function TradeAdvisorView() {
   const C = useC();
+  const { token } = useAuth();
   const [input,   setInput]   = useState("SPY");
   const [risk,    setRisk]    = useState("moderate");
   const [loading, setLoading] = useState(false);
@@ -8363,7 +8370,8 @@ function TradeAdvisorView() {
     if (!sym) return;
     setLoading(true); setData(null); setErr(null);
     fetch("/api/advisor", {
-      method:"POST", headers:{"Content-Type":"application/json"},
+      method:"POST",
+      headers:{"Content-Type":"application/json", ...(token ? {Authorization:`Bearer ${token}`} : {})},
       body: JSON.stringify({ symbol: sym, risk_tolerance: risk }),
     })
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(friendlyError(e.detail) || "Advisor error")))
@@ -9547,6 +9555,7 @@ function StockSynthesisTile({ snap }) {
 // ── Sectors View ─────────────────────────────────────────
 function SectorsView() {
   const C = useC();
+  const { token } = useAuth();
   const [summaries,     setSummaries]     = useState(null);
   const [loadingOv,     setLoadingOv]     = useState(false);
   const [err,           setErr]           = useState(null);
@@ -9596,7 +9605,7 @@ function SectorsView() {
 
   const triggerRefresh=(sectors=null)=>{
     const body=sectors?{sectors}:{};
-    fetch("/api/sectors/refresh",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
+    fetch("/api/sectors/refresh",{method:"POST",headers:{"Content-Type":"application/json",...(token?{Authorization:`Bearer ${token}`}:{})},body:JSON.stringify(body)})
       .then(async r=>{
         const text=await r.text();
         if(!r.ok) throw new Error(friendlyError(text) || `Server error ${r.status}: ${text.slice(0,120)}`);
@@ -10257,7 +10266,7 @@ function SectorsView() {
         <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
           {cachedCount>0&&<Tag color={C.mut}>{cachedCount}/11 cached</Tag>}
           <button onClick={()=>{
-            fetch("/api/sectors/universe/refresh",{method:"POST"})
+            fetch("/api/sectors/universe/refresh",{method:"POST",headers:{...(token?{Authorization:`Bearer ${token}`}:{})}})
               .then(r=>r.json()).then(d=>alert(`Universe refreshed: ${d.total} S&P 500 tickers across ${Object.keys(d.sectors||{}).length} sectors`))
               .catch(e=>alert("Universe refresh failed: "+e));
           }} style={{...mono(9,C.mut),background:"transparent",border:`1px solid ${C.bdr}`,borderRadius:7,padding:"5px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:5}}
