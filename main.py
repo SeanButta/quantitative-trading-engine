@@ -4012,7 +4012,7 @@ def pairs_signal(sym_a: str, sym_b: str, z_entry: float = 2.0, z_exit: float = 0
 # ---------------------------------------------------------------------------
 
 @app.post("/advisor")
-@limiter.limit("10/minute")
+@limiter.limit("30/minute")
 def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_optional_user)):
     """
     Trade Advisor: synthesizes technical signals, ML prediction, sentiment,
@@ -4027,7 +4027,11 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
         import numpy as _np
         from technical_analysis import fetch_and_compute
         from signal_strategies import StrategyEngine
-        ta = fetch_and_compute(sym, period="6mo", interval="1d")
+        # Use DB cache first (warmer keeps this fresh); only hit yfinance on miss
+        _ta_cached = _get_cache(f"ta:{sym}:1y:1d")
+        ta = _ta_cached if _ta_cached else fetch_and_compute(sym, period="1y", interval="1d")
+        if not _ta_cached:
+            _set_cache(f"ta:{sym}:1y:1d", ta, _TTL_TECHNICAL, "ta")
         engine = StrategyEngine(ta)
         signals = engine.check_all()
         triggered = [s for s in signals if s.get("triggered")]
@@ -4297,102 +4301,105 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
         errors.append(f"composite: {e}")
         result["composite"] = {"score": 0, "overall": "Hold", "components": {}}
 
-    # ── 7. Fundamentals (for Synthesis tile) ─────────────────────────────────
-    try:
-        import yfinance as _yf2
-        _t = _yf2.Ticker(sym)
-        _info = _t.info or {}
-        _price = (result.get("technical") or {}).get("latest_close")
-        # Analyst price target upside
-        _target_upside = None
+    # ── 7. Fundamentals (for Synthesis tile) — DB cache first ────────────────
+    _fund_cache_key = f"fundamentals:{sym}"
+    _cached_fund = _get_cache(_fund_cache_key)
+    if _cached_fund:
+        # Patch in live technical position from this request's TA result
+        _ta_data_f = result.get("technical") or {}
+        _cached_fund["above_ma50"]  = _ta_data_f.get("above_ma50")
+        _cached_fund["above_ma200"] = _ta_data_f.get("above_ma200")
+        _cached_fund["rsi_14"]      = _ta_data_f.get("rsi")
+        result["fundamentals"] = _cached_fund
+    else:
         try:
-            _apt = _t.analyst_price_targets
-            if _apt is not None:
-                _apt_d = _apt.to_dict() if hasattr(_apt, "to_dict") else _apt
-                _mean_target = _apt_d.get("mean") or _apt_d.get("current")
-                if _price and _mean_target and float(_price) > 0:
-                    _target_upside = round((float(_mean_target) - float(_price)) / float(_price) * 100, 1)
-        except Exception:
-            pass
-        # Earnings streak & last surprise
-        _earnings_streak = 0
-        _last_eps_surprise = None
-        try:
-            _eh = _t.earnings_history
-            if _eh is not None and not _eh.empty and "surprisePercent" in _eh.columns:
-                _recent = _eh["surprisePercent"].dropna().tolist()
-                _streak = 0
-                for _x in reversed(_recent):
-                    if _x > 0:
-                        _streak += 1
-                    else:
-                        break
-                _earnings_streak = _streak
-                if _recent:
-                    _last_eps_surprise = round(float(_recent[-1]) * 100, 1)
-        except Exception:
-            pass
-        _ta_data = result.get("technical") or {}
-        def _pct(v):
-            return round(float(v) * 100, 1) if v is not None else None
-        def _sf(v):
-            try: return round(float(v), 2) if v is not None else None
-            except Exception: return None
-        # Graham Number (intrinsic value estimate): sqrt(22.5 × EPS × BVPS)
-        _trailing_eps = _sf(_info.get("trailingEps"))
-        _book_value   = _sf(_info.get("bookValue"))
-        _graham_number = None
-        if _trailing_eps and _book_value and _trailing_eps > 0 and _book_value > 0:
-            import math as _math
-            _graham_number = round(_math.sqrt(22.5 * _trailing_eps * _book_value), 2)
-        _market_cap = _info.get("marketCap")
-        result["fundamentals"] = {
-            "symbol":          sym,
-            # Valuation
-            "pe_ratio":        _sf(_info.get("trailingPE")),
-            "forward_pe":      _sf(_info.get("forwardPE")),
-            "peg_ratio":       _sf(_info.get("pegRatio")),
-            "pb_ratio":        _sf(_info.get("priceToBook")),
-            "ev_to_ebitda":    _sf(_info.get("enterpriseToEbitda")),
-            "trailing_eps":    _trailing_eps,
-            "book_value":      _book_value,
-            "graham_number":   _graham_number,
-            # Market snapshot
-            "market_cap":      _market_cap,
-            "beta":            _sf(_info.get("beta")),
-            "div_yield":       _pct(_info.get("dividendYield")),
-            "fifty_two_week_high": _sf(_info.get("fiftyTwoWeekHigh")),
-            "fifty_two_week_low":  _sf(_info.get("fiftyTwoWeekLow")),
-            "short_ratio":     _sf(_info.get("shortRatio")),
-            # Analyst view
-            "target_upside":   _target_upside,
-            "analyst_count":   _info.get("numberOfAnalystOpinions"),
-            "recommend_mean":  _sf(_info.get("recommendationMean")),  # 1=strong buy … 5=strong sell
-            "recommend_key":   _info.get("recommendationKey"),
-            "analyst_target_mean": _sf(_info.get("targetMeanPrice")),
-            "analyst_target_high": _sf(_info.get("targetHighPrice")),
-            "analyst_target_low":  _sf(_info.get("targetLowPrice")),
-            # Quality
-            "roe":             _pct(_info.get("returnOnEquity")),
-            "net_margin":      _pct(_info.get("profitMargins")),
-            "gross_margin":    _pct(_info.get("grossMargins")),
-            "operating_margin":_pct(_info.get("operatingMargins")),
-            "debt_to_equity":  _sf(_info.get("debtToEquity")),
-            "current_ratio":   _sf(_info.get("currentRatio")),
-            "free_cash_flow":  _info.get("freeCashflow"),
-            # Growth
-            "revenue_growth":  _pct(_info.get("revenueGrowth")),
-            "eps_growth":      _pct(_info.get("earningsGrowth")),
-            "earnings_streak": _earnings_streak,
-            "last_eps_surprise": _last_eps_surprise,
-            # Technical position
-            "above_ma50":      _ta_data.get("above_ma50"),
-            "above_ma200":     _ta_data.get("above_ma200"),
-            "rsi_14":          _ta_data.get("rsi"),
-        }
-    except Exception as e:
-        errors.append(f"fundamentals: {e}")
-        result["fundamentals"] = None
+            import yfinance as _yf2
+            _t = _yf2.Ticker(sym)
+            _info = _t.info or {}
+            _price = (result.get("technical") or {}).get("latest_close")
+            # Analyst price target upside
+            _target_upside = None
+            try:
+                _apt = _t.analyst_price_targets
+                if _apt is not None:
+                    _apt_d = _apt.to_dict() if hasattr(_apt, "to_dict") else _apt
+                    _mean_target = _apt_d.get("mean") or _apt_d.get("current")
+                    if _price and _mean_target and float(_price) > 0:
+                        _target_upside = round((float(_mean_target) - float(_price)) / float(_price) * 100, 1)
+            except Exception:
+                pass
+            # Earnings streak & last surprise
+            _earnings_streak = 0
+            _last_eps_surprise = None
+            try:
+                _eh = _t.earnings_history
+                if _eh is not None and not _eh.empty and "surprisePercent" in _eh.columns:
+                    _recent = _eh["surprisePercent"].dropna().tolist()
+                    _streak = 0
+                    for _x in reversed(_recent):
+                        if _x > 0: _streak += 1
+                        else:       break
+                    _earnings_streak = _streak
+                    if _recent:
+                        _last_eps_surprise = round(float(_recent[-1]) * 100, 1)
+            except Exception:
+                pass
+            _ta_data = result.get("technical") or {}
+            def _pct(v):
+                return round(float(v) * 100, 1) if v is not None else None
+            def _sf(v):
+                try: return round(float(v), 2) if v is not None else None
+                except Exception: return None
+            # Graham Number: sqrt(22.5 × EPS × BVPS)
+            _trailing_eps  = _sf(_info.get("trailingEps"))
+            _book_value    = _sf(_info.get("bookValue"))
+            _graham_number = None
+            if _trailing_eps and _book_value and _trailing_eps > 0 and _book_value > 0:
+                import math as _math
+                _graham_number = round(_math.sqrt(22.5 * _trailing_eps * _book_value), 2)
+            _fund_obj = {
+                "symbol":          sym,
+                "pe_ratio":        _sf(_info.get("trailingPE")),
+                "forward_pe":      _sf(_info.get("forwardPE")),
+                "peg_ratio":       _sf(_info.get("pegRatio")),
+                "pb_ratio":        _sf(_info.get("priceToBook")),
+                "ev_to_ebitda":    _sf(_info.get("enterpriseToEbitda")),
+                "trailing_eps":    _trailing_eps,
+                "book_value":      _book_value,
+                "graham_number":   _graham_number,
+                "market_cap":      _info.get("marketCap"),
+                "beta":            _sf(_info.get("beta")),
+                "div_yield":       _pct(_info.get("dividendYield")),
+                "fifty_two_week_high": _sf(_info.get("fiftyTwoWeekHigh")),
+                "fifty_two_week_low":  _sf(_info.get("fiftyTwoWeekLow")),
+                "short_ratio":     _sf(_info.get("shortRatio")),
+                "target_upside":   _target_upside,
+                "analyst_count":   _info.get("numberOfAnalystOpinions"),
+                "recommend_mean":  _sf(_info.get("recommendationMean")),
+                "recommend_key":   _info.get("recommendationKey"),
+                "analyst_target_mean": _sf(_info.get("targetMeanPrice")),
+                "analyst_target_high": _sf(_info.get("targetHighPrice")),
+                "analyst_target_low":  _sf(_info.get("targetLowPrice")),
+                "roe":             _pct(_info.get("returnOnEquity")),
+                "net_margin":      _pct(_info.get("profitMargins")),
+                "gross_margin":    _pct(_info.get("grossMargins")),
+                "operating_margin":_pct(_info.get("operatingMargins")),
+                "debt_to_equity":  _sf(_info.get("debtToEquity")),
+                "current_ratio":   _sf(_info.get("currentRatio")),
+                "free_cash_flow":  _info.get("freeCashflow"),
+                "revenue_growth":  _pct(_info.get("revenueGrowth")),
+                "eps_growth":      _pct(_info.get("earningsGrowth")),
+                "earnings_streak": _earnings_streak,
+                "last_eps_surprise": _last_eps_surprise,
+                "above_ma50":      _ta_data.get("above_ma50"),
+                "above_ma200":     _ta_data.get("above_ma200"),
+                "rsi_14":          _ta_data.get("rsi"),
+            }
+            _set_cache(_fund_cache_key, _fund_obj, 3600 * 4, "fundamentals")  # 4-hour TTL
+            result["fundamentals"] = _fund_obj
+        except Exception as e:
+            errors.append(f"fundamentals: {e}")
+            result["fundamentals"] = None
 
     result["warnings"] = errors
     return _sanitize(result)
