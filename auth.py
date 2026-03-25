@@ -23,6 +23,16 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
+# ---------------------------------------------------------------------------
+# Demo Mode — set to False to re-enable auth
+# ---------------------------------------------------------------------------
+# When True: all protected endpoints accept any/no token and return a demo user.
+# To re-enable auth: change this to False and redeploy.
+DEMO_MODE: bool = True
+
+_DEMO_USER = {"sub": "demo@picador.app", "email": "demo@picador.app",
+              "tier": "free", "display_name": "Demo", "user_id": 0}
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
@@ -121,11 +131,10 @@ def get_current_user(
 ):
     """
     Dependency for protected endpoints. Raises 401 if token is missing or invalid.
-    Import this in main.py:
-        from auth import get_current_user
-        @app.get("/protected")
-        def route(user=Depends(get_current_user)): ...
+    When DEMO_MODE=True, returns a demo user for any/no token.
     """
+    if DEMO_MODE:
+        return _DEMO_USER
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -142,7 +151,10 @@ def get_optional_user(
     """
     Dependency for endpoints that work both authenticated and unauthenticated.
     Returns None if no/invalid token (instead of raising 401).
+    When DEMO_MODE=True, always returns the demo user.
     """
+    if DEMO_MODE:
+        return _DEMO_USER
     if not token:
         return None
     try:

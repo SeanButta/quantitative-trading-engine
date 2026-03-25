@@ -18,6 +18,13 @@ import React, {
 } from "react";
 
 // ---------------------------------------------------------------------------
+// Demo Mode — set to false to re-enable auth
+// ---------------------------------------------------------------------------
+// When true: everyone gets full access without logging in.
+// To re-enable auth: change this to false and redeploy.
+const DEMO_MODE = true;
+
+// ---------------------------------------------------------------------------
 // Context
 // ---------------------------------------------------------------------------
 
@@ -57,6 +64,21 @@ async function apiGet(path, token) {
 // ---------------------------------------------------------------------------
 
 export function AuthProvider({ children }) {
+  // ── Demo Mode shortcut ──────────────────────────────────────────────────
+  if (DEMO_MODE) {
+    const demoValue = {
+      user:            { user_id: 0, email: "demo@picador.app", display_name: "Demo", tier: "free" },
+      token:           "demo-mode",
+      ready:           true,
+      isAuthenticated: true,
+      login:           async () => {},
+      logout:          () => {},
+      register:        async () => {},
+      authFetch:       (url, opts = {}) => fetch(url, opts),
+    };
+    return <AuthCtx.Provider value={demoValue}>{children}</AuthCtx.Provider>;
+  }
+
   const [user,  setUser]  = useState(null);   // { user_id, email, display_name, tier }
   const [token, setToken] = useState(null);
   const [ready, setReady] = useState(false);  // false = still rehydrating from sessionStorage
