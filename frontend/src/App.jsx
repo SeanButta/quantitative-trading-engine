@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, createContext, useContext, useCallback } from "react";
-import { AuthProvider, AuthScreen, UserMenu, useAuth } from "./auth.jsx";
+import { AuthProvider, AuthScreen, UserMenu, useAuth, DEMO_MODE } from "./auth.jsx";
 import {
   LineChart, Line, AreaChart, Area, BarChart, Bar, Cell, ScatterChart, Scatter,
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -35,12 +35,13 @@ const useC = () => useContext(ThemeCtx);
 // 401 / "Not authenticated" → friendly signup prompt.
 function friendlyError(raw) {
   const s = String(raw ?? "");
-  if (
+  // In demo mode never show the sign-up prompt — just pass through the real error.
+  if (!DEMO_MODE && (
     s.includes("Not authenticated") ||
     s.includes("not authenticated") ||
     s.includes('"detail":"Not authenticated"') ||
     s === "401"
-  ) {
+  )) {
     return "🔒 Create a free account to use this feature — sign up takes 30 seconds";
   }
   return s;
@@ -11682,9 +11683,9 @@ function AppInner() {
     if (isAuthenticated) setShowGate(false);
   }, [isAuthenticated]);
 
-  // 20-second timer — fires once. If the user has already made ≥1 API call
-  // and is not authenticated, open the gate.
+  // 20-second timer — fires once. Skipped entirely in demo mode.
   useEffect(() => {
+    if (DEMO_MODE) return;
     const t = setTimeout(() => {
       timerFiredRef.current = true;
       if (fetchCountRef.current >= 1 && !isAuthRef.current && !isDemoRef.current)
@@ -11694,7 +11695,9 @@ function AppInner() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Patch window.fetch once on mount to count /api/ calls (excluding /auth/).
+  // Gate logic is fully disabled in demo mode.
   useEffect(() => {
+    if (DEMO_MODE) return;   // no gate in demo mode — skip entirely
     const orig = window.fetch.bind(window);
     window.fetch = (...args) => {
       const url = typeof args[0] === "string" ? args[0] : (args[0]?.url ?? "");
@@ -11730,7 +11733,7 @@ function AppInner() {
   return (
     <>
       <AppShell />
-      {showGate && !isAuthenticated && (
+      {!DEMO_MODE && showGate && !isAuthenticated && (
         <AuthScreen
           onDemoMode={() => {
             isDemoRef.current    = true;

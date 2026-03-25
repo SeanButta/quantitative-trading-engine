@@ -22,7 +22,7 @@ import React, {
 // ---------------------------------------------------------------------------
 // When true: everyone gets full access without logging in.
 // To re-enable auth: change this to false and redeploy.
-const DEMO_MODE = true;
+export const DEMO_MODE = true;
 
 // ---------------------------------------------------------------------------
 // Context
