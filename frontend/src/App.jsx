@@ -11007,7 +11007,7 @@ const COMPANY_NAMES = {
   "RDFN":"Redfin","OPEN":"Opendoor","EXPI":"eXp World Holdings","COMP":"Compass Inc",
   "DOCU":"DocuSign","DBX":"Dropbox","BOX":"Box Inc","BAND":"Bandwidth","TWLO":"Twilio",
   "FSLY":"Fastly","AKAM":"Akamai","EIGI":"Endurance International","GCI":"Gannett",
-  "NWSA":"News Corp","IAC":"IAC Inc","MSTR":"MicroStrategy","RIOT":"Riot Platforms",
+  "MSTR":"MicroStrategy","RIOT":"Riot Platforms",
   "MARA":"Marathon Digital","HUT":"Hut 8 Mining","CIFR":"Cipher Mining","BTBT":"Bit Digital",
 };
 
