@@ -11694,6 +11694,25 @@ function AppInner() {
     return () => clearTimeout(t);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // In DEMO_MODE: intercept any 401/403 at the network layer so no component
+  // ever sees an "unauthenticated" response — works even with cached old code.
+  useEffect(() => {
+    if (!DEMO_MODE) return;
+    const orig = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+      const res = await orig(...args);
+      if (res.status === 401 || res.status === 403) {
+        // Return a neutral 503 so friendlyError never shows the auth prompt.
+        return new Response(JSON.stringify({ detail: "Temporarily unavailable" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return res;
+    };
+    return () => { window.fetch = orig; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Patch window.fetch once on mount to count /api/ calls (excluding /auth/).
   // Gate logic is fully disabled in demo mode.
   useEffect(() => {
