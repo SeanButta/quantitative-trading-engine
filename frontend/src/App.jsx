@@ -11,7 +11,7 @@ import {
   FlaskConical, Sun, Moon, Activity, Briefcase, TrendingUp, Settings,
   Database, Search, ChevronDown, ChevronUp, Plus, X, BookOpen,
   TrendingDown, AlertCircle, Eye, Maximize2, Minimize2,
-  Compass, Shuffle, Network, Layers, Shield, Cpu, Newspaper, Lock, Unlock, Menu
+  Compass, Shuffle, Network, Layers, Shield, Cpu, Newspaper, Lock, Unlock, Menu, DollarSign
 } from "lucide-react";
 
 // ── Theme tokens ─────────────────────────────────────────
@@ -8390,11 +8390,34 @@ function TradeAdvisorView() {
   const dIco = d => d === "bullish" ? "▲" : d === "bearish" ? "▼" : "●";
   const dCol = d => d === "bullish" ? C.grn : d === "bearish" ? C.red : C.amb;
 
+  // helpers used throughout
+  const fmtCap = v => {
+    if (!v) return "—";
+    if (v >= 1e12) return "$" + (v/1e12).toFixed(2) + "T";
+    if (v >= 1e9)  return "$" + (v/1e9).toFixed(1) + "B";
+    if (v >= 1e6)  return "$" + (v/1e6).toFixed(0) + "M";
+    return "$" + v.toLocaleString();
+  };
+  const fmtFCF = v => {
+    if (!v) return "—";
+    if (Math.abs(v) >= 1e9)  return (v >= 0 ? "+" : "") + "$" + (v/1e9).toFixed(1) + "B";
+    if (Math.abs(v) >= 1e6)  return (v >= 0 ? "+" : "") + "$" + (v/1e6).toFixed(0) + "M";
+    return "$" + v.toLocaleString();
+  };
+  const analystLabel = mean => {
+    if (mean == null) return {label:"—", col:C.mut};
+    if (mean <= 1.5)  return {label:"Strong Buy",  col:"#00c853"};
+    if (mean <= 2.5)  return {label:"Buy",          col:C.grn};
+    if (mean <= 3.5)  return {label:"Hold",         col:C.amb};
+    if (mean <= 4.5)  return {label:"Underperform", col:C.red};
+    return              {label:"Sell",         col:"#d50000"};
+  };
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div>
         <Lbl>Research</Lbl>
-        <div style={mono(10,C.mut)}>Synthesizes ML signal · news sentiment · technicals · options analytics → actionable trade recommendation</div>
+        <div style={mono(10,C.mut)}>Fundamentals · analyst consensus · earnings quality · valuation → macro & sentiment context</div>
       </div>
 
       {/* Controls */}
@@ -8452,77 +8475,320 @@ function TradeAdvisorView() {
       {err && <Card><div style={mono(11,C.red)}>⚠ {err}</div></Card>}
 
       {data && (<>
-        {/* ── Full Analysis ────────────────────────────────────────────── */}
+
+        {/* ══════════════════════════════════════════════════════════════════
+            1. FUNDAMENTALS SNAPSHOT — the headline numbers investors care about
+           ══════════════════════════════════════════════════════════════════ */}
+        {data.fundamentals && (()=>{
+          const f = data.fundamentals;
+          const price = data.technical?.latest_close;
+          const al = analystLabel(f.recommend_mean);
+
+          // Valuation verdict
+          const valScore = [
+            f.pe_ratio != null && f.pe_ratio < 20,
+            f.forward_pe != null && f.forward_pe < 18,
+            f.pb_ratio != null && f.pb_ratio < 3,
+            f.peg_ratio != null && f.peg_ratio < 1.5,
+            f.target_upside != null && f.target_upside > 10,
+            f.graham_number != null && price != null && price < f.graham_number * 1.2,
+          ].filter(Boolean).length;
+          const overScore = [
+            f.pe_ratio != null && f.pe_ratio > 35,
+            f.pb_ratio != null && f.pb_ratio > 5,
+            f.peg_ratio != null && f.peg_ratio > 3,
+            f.target_upside != null && f.target_upside < -5,
+            f.graham_number != null && price != null && price > f.graham_number * 1.5,
+          ].filter(Boolean).length;
+          const valVerdict = overScore > valScore + 1
+            ? {label:"Appears Overvalued",  col:C.red}
+            : valScore > overScore + 1
+            ? {label:"Appears Undervalued", col:C.grn}
+            : {label:"Fairly Valued",       col:C.amb};
+
+          // 52-week position
+          const w52pos = (price && f.fifty_two_week_high && f.fifty_two_week_low)
+            ? Math.round((price - f.fifty_two_week_low) / (f.fifty_two_week_high - f.fifty_two_week_low) * 100)
+            : null;
+
+          return (
+            <div style={{borderRadius:12,border:`1.5px solid ${C.sky}30`,background:C.sky+"07",padding:"16px 18px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
+                <DollarSign size={13} style={{color:C.sky}}/>
+                <span style={mono(9,C.sky,700)}>FUNDAMENTALS · {f.symbol}</span>
+                <span style={{...mono(9,valVerdict.col,700),marginLeft:"auto",padding:"2px 10px",
+                  borderRadius:20,border:`1px solid ${valVerdict.col}55`,background:valVerdict.col+"15"}}>
+                  {valVerdict.label}
+                </span>
+              </div>
+
+              <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:10,marginBottom:14}}>
+                {/* Valuation */}
+                <div style={{padding:"10px 12px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                  <div style={{...mono(8,C.mut,700),marginBottom:6,letterSpacing:"0.08em"}}>VALUATION</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                    <KV k="P/E (TTM)"   v={f.pe_ratio   != null ? f.pe_ratio.toFixed(1)+"×"    : "—"}
+                        vc={f.pe_ratio > 35 ? C.red : f.pe_ratio < 15 ? C.grn : C.txt}/>
+                    <KV k="Fwd P/E"    v={f.forward_pe  != null ? f.forward_pe.toFixed(1)+"×"  : "—"}/>
+                    <KV k="P/B"        v={f.pb_ratio    != null ? f.pb_ratio.toFixed(2)+"×"    : "—"}
+                        vc={f.pb_ratio > 5 ? C.red : f.pb_ratio < 1.5 ? C.grn : C.txt}/>
+                    <KV k="EV/EBITDA"  v={f.ev_to_ebitda!= null ? f.ev_to_ebitda.toFixed(1)+"×": "—"}/>
+                    <KV k="PEG"        v={f.peg_ratio   != null ? f.peg_ratio.toFixed(2)        : "—"}
+                        vc={f.peg_ratio > 2 ? C.red : f.peg_ratio < 1 ? C.grn : C.txt}/>
+                  </div>
+                </div>
+
+                {/* Market snapshot */}
+                <div style={{padding:"10px 12px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                  <div style={{...mono(8,C.mut,700),marginBottom:6,letterSpacing:"0.08em"}}>MARKET SNAPSHOT</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                    <KV k="Mkt Cap"    v={fmtCap(f.market_cap)}/>
+                    <KV k="Beta"       v={f.beta     != null ? f.beta.toFixed(2)                : "—"}
+                        vc={f.beta > 1.5 ? C.amb : C.txt}/>
+                    <KV k="Div Yield"  v={f.div_yield!= null ? f.div_yield.toFixed(2)+"%"       : "—"}
+                        vc={f.div_yield > 0 ? C.grn : C.mut}/>
+                    <KV k="Free CF"    v={fmtFCF(f.free_cash_flow)}
+                        vc={f.free_cash_flow > 0 ? C.grn : C.red}/>
+                    <KV k="Short Ratio" v={f.short_ratio != null ? f.short_ratio.toFixed(1)+"d" : "—"}
+                        vc={f.short_ratio > 5 ? C.red : C.txt}/>
+                  </div>
+                </div>
+
+                {/* Quality */}
+                <div style={{padding:"10px 12px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                  <div style={{...mono(8,C.mut,700),marginBottom:6,letterSpacing:"0.08em"}}>QUALITY</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                    <KV k="Gross Margin"  v={f.gross_margin    != null ? f.gross_margin.toFixed(1)+"%"    : "—"}
+                        vc={f.gross_margin > 40 ? C.grn : f.gross_margin < 20 ? C.red : C.txt}/>
+                    <KV k="Net Margin"    v={f.net_margin      != null ? f.net_margin.toFixed(1)+"%"      : "—"}
+                        vc={f.net_margin > 15 ? C.grn : f.net_margin < 0 ? C.red : C.txt}/>
+                    <KV k="ROE"           v={f.roe             != null ? f.roe.toFixed(1)+"%"             : "—"}
+                        vc={f.roe > 15 ? C.grn : f.roe < 0 ? C.red : C.txt}/>
+                    <KV k="D/E Ratio"     v={f.debt_to_equity  != null ? f.debt_to_equity.toFixed(2)      : "—"}
+                        vc={f.debt_to_equity > 2 ? C.red : f.debt_to_equity < 0.5 ? C.grn : C.txt}/>
+                    <KV k="Current Ratio" v={f.current_ratio   != null ? f.current_ratio.toFixed(2)       : "—"}
+                        vc={f.current_ratio < 1 ? C.red : C.txt}/>
+                  </div>
+                </div>
+
+                {/* Growth & Earnings */}
+                <div style={{padding:"10px 12px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                  <div style={{...mono(8,C.mut,700),marginBottom:6,letterSpacing:"0.08em"}}>GROWTH & EARNINGS</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                    <KV k="Rev Growth"  v={f.revenue_growth != null ? (f.revenue_growth>=0?"+":"")+f.revenue_growth.toFixed(1)+"%" : "—"}
+                        vc={f.revenue_growth > 5 ? C.grn : f.revenue_growth < 0 ? C.red : C.txt}/>
+                    <KV k="EPS Growth"  v={f.eps_growth     != null ? (f.eps_growth>=0?"+":"")+f.eps_growth.toFixed(1)+"%"      : "—"}
+                        vc={f.eps_growth > 0 ? C.grn : C.red}/>
+                    <KV k="EPS (TTM)"   v={f.trailing_eps   != null ? "$"+f.trailing_eps.toFixed(2)                              : "—"}/>
+                    <KV k="Earn Beats"  v={f.earnings_streak > 0 ? `${f.earnings_streak}Q streak ✓`
+                                          : f.earnings_streak < 0 ? `${Math.abs(f.earnings_streak)}Q misses` : "—"}
+                        vc={f.earnings_streak > 0 ? C.grn : f.earnings_streak < 0 ? C.red : C.txt}/>
+                    <KV k="Last Surprise" v={f.last_eps_surprise != null ? (f.last_eps_surprise>=0?"+":"")+f.last_eps_surprise.toFixed(1)+"%" : "—"}
+                        vc={f.last_eps_surprise > 0 ? C.grn : C.red}/>
+                  </div>
+                </div>
+              </div>
+
+              {/* Analyst Consensus Row */}
+              <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"stretch"}}>
+                {/* Rating dial */}
+                <div style={{flex:1,minWidth:200,padding:"10px 14px",borderRadius:8,
+                  background:al.col+"12",border:`1px solid ${al.col}40`,
+                  display:"flex",alignItems:"center",gap:14}}>
+                  <div style={{textAlign:"center"}}>
+                    <div style={{...mono(20,al.col,800),lineHeight:1}}>{al.label}</div>
+                    <div style={{...mono(8,C.mut),marginTop:3}}>
+                      {f.analyst_count ? `${f.analyst_count} analysts` : "analyst consensus"}
+                    </div>
+                  </div>
+                  {f.recommend_mean != null && (
+                    <div style={{flex:1}}>
+                      <div style={{...mono(8,C.mut),marginBottom:5}}>
+                        RATING SCALE — {f.recommend_mean.toFixed(1)}/5.0
+                      </div>
+                      <div style={{height:6,borderRadius:3,background:C.dim,overflow:"hidden",position:"relative"}}>
+                        <div style={{
+                          position:"absolute",left:0,top:0,bottom:0,
+                          width:((f.recommend_mean-1)/4*100)+"%",
+                          background:`linear-gradient(to right, #00c853, ${C.amb}, #d50000)`,
+                          borderRadius:3,transition:"width .4s"
+                        }}/>
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
+                        <span style={mono(7,"#00c853")}>Strong Buy</span>
+                        <span style={mono(7,C.mut)}>Hold</span>
+                        <span style={mono(7,C.red)}>Strong Sell</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Price target */}
+                {(f.analyst_target_mean || f.analyst_target_high || f.analyst_target_low) && (
+                  <div style={{flex:1,minWidth:200,padding:"10px 14px",borderRadius:8,
+                    background:C.dim,border:`1px solid ${C.bdr}`}}>
+                    <div style={{...mono(8,C.mut,700),marginBottom:8,letterSpacing:"0.08em"}}>ANALYST PRICE TARGETS</div>
+                    {price && (
+                      <div style={{marginBottom:8}}>
+                        <div style={{...mono(8,C.mut),marginBottom:4}}>
+                          Current: <span style={{color:C.headingTxt,fontWeight:700}}>${Number(price).toFixed(2)}</span>
+                          {f.analyst_target_mean && (
+                            <span style={{color: f.analyst_target_mean > price ? C.grn : C.red,fontWeight:700,marginLeft:8}}>
+                              → ${f.analyst_target_mean.toFixed(2)} mean
+                              {" ("}{f.analyst_target_mean>price?"+":""}{((f.analyst_target_mean-price)/price*100).toFixed(1)}%)
+                            </span>
+                          )}
+                        </div>
+                        {f.analyst_target_low && f.analyst_target_high && (
+                          <div style={{position:"relative",height:14,marginTop:4}}>
+                            <div style={{position:"absolute",top:4,left:0,right:0,height:6,
+                              borderRadius:3,background:C.bdr}}/>
+                            {/* Range bar */}
+                            {(()=>{
+                              const lo=f.analyst_target_low, hi=f.analyst_target_high;
+                              const range=hi-lo||1;
+                              const pctLow=0, pctHigh=100;
+                              const pctMean=f.analyst_target_mean?(f.analyst_target_mean-lo)/range*100:50;
+                              const pctPrice=(price-lo)/range*100;
+                              return (<>
+                                <div style={{position:"absolute",top:4,
+                                  left:pctLow+"%",width:(pctHigh-pctLow)+"%",height:6,
+                                  borderRadius:3,background:`${C.grn}40`}}/>
+                                {f.analyst_target_mean && (
+                                  <div style={{position:"absolute",top:2,
+                                    left:`calc(${Math.max(0,Math.min(100,pctMean))}% - 1px)`,
+                                    width:2,height:10,background:C.grn,borderRadius:1}}/>
+                                )}
+                                <div style={{position:"absolute",top:2,
+                                  left:`calc(${Math.max(0,Math.min(100,pctPrice))}% - 4px)`,
+                                  width:8,height:10,background:C.headingTxt,borderRadius:2}}/>
+                              </>);
+                            })()}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    <div style={{display:"flex",gap:12}}>
+                      {f.analyst_target_low  && <KV k="Low"  v={"$"+f.analyst_target_low.toFixed(2)}  vc={C.red}/>}
+                      {f.analyst_target_mean && <KV k="Mean" v={"$"+f.analyst_target_mean.toFixed(2)} vc={C.sky}/>}
+                      {f.analyst_target_high && <KV k="High" v={"$"+f.analyst_target_high.toFixed(2)} vc={C.grn}/>}
+                    </div>
+                  </div>
+                )}
+
+                {/* Intrinsic value / 52W range */}
+                <div style={{flex:1,minWidth:160,padding:"10px 14px",borderRadius:8,
+                  background:C.dim,border:`1px solid ${C.bdr}`}}>
+                  <div style={{...mono(8,C.mut,700),marginBottom:8,letterSpacing:"0.08em"}}>INTRINSIC VALUE</div>
+                  {f.graham_number && (
+                    <div style={{marginBottom:6}}>
+                      <div style={mono(8,C.mut)}>Graham Number</div>
+                      <div style={{...mono(16, price && price < f.graham_number ? C.grn : price && price > f.graham_number * 1.3 ? C.red : C.amb, 700)}}>
+                        ${f.graham_number.toFixed(2)}
+                      </div>
+                      {price && (
+                        <div style={mono(8,C.mut)}>
+                          {price < f.graham_number
+                            ? `▼ ${((f.graham_number-price)/f.graham_number*100).toFixed(0)}% below intrinsic value`
+                            : `▲ ${((price-f.graham_number)/f.graham_number*100).toFixed(0)}% above intrinsic value`}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {w52pos != null && (
+                    <>
+                      <div style={{...mono(8,C.mut),marginBottom:4}}>52-Week Range</div>
+                      <div style={{height:6,borderRadius:3,background:C.bdr,overflow:"hidden",marginBottom:3}}>
+                        <div style={{height:"100%",width:w52pos+"%",
+                          background:w52pos>70?C.grn:w52pos<30?C.red:C.amb,borderRadius:3}}/>
+                      </div>
+                      <div style={{display:"flex",justifyContent:"space-between"}}>
+                        <span style={mono(7,C.mut)}>${f.fifty_two_week_low?.toFixed(0)}</span>
+                        <span style={mono(7,C.sky)}>{w52pos}th pct</span>
+                        <span style={mono(7,C.mut)}>${f.fifty_two_week_high?.toFixed(0)}</span>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* ══════════════════════════════════════════════════════════════════
+            2. FULL ANALYSIS — fundamentals-first narrative
+           ══════════════════════════════════════════════════════════════════ */}
         {(()=>{
           const parts = [];
-          if (data.ml_signal) {
-            const ml = data.ml_signal;
-            const pUp  = (ml.p_up*100).toFixed(0);
-            const pDn  = (100 - ml.p_up*100).toFixed(0);
-            const conf = (ml.confidence*100).toFixed(0);
-            const acc  = (ml.accuracy*100).toFixed(1);
-            const feat = ml.top_feature ? ml.top_feature.replace(/_/g," ") : "recent momentum patterns";
-            const isBearish = ml.direction === "bearish";
-            parts.push(
-              isBearish
-                ? `Our machine learning model is predicting a decline for ${data.symbol} with ${conf}% confidence — it puts the probability of a price drop over the next 5 trading days at ${pDn}%. The biggest driver of this call is ${feat}. For context, this model has been correct about ${acc}% of the time historically, which is modest but better than a coin flip.`
-                : `Our machine learning model is predicting an increase for ${data.symbol} with ${conf}% confidence — it puts the probability of a price rise over the next 5 trading days at ${pUp}%. The biggest driver behind this call is ${feat}. For context, this model has been correct about ${acc}% of the time historically.`
-            );
+          const f = data.fundamentals;
+
+          // Lead with fundamentals & valuation
+          if (f) {
+            const pe = f.pe_ratio, fpe = f.forward_pe, tgt = f.analyst_target_mean;
+            const price = data.technical?.latest_close;
+            const al = analystLabel(f.recommend_mean);
+            if (pe != null || tgt != null) {
+              let v = "";
+              if (pe != null) {
+                const valDesc = pe<12?"deeply discounted":pe<18?"attractively valued":pe<25?"fairly valued":pe<35?"premium-priced":"richly valued";
+                v += `At a trailing P/E of ${pe.toFixed(1)}×, ${data.symbol} is ${valDesc}`;
+                if (fpe != null) {
+                  v += pe > fpe + 2 ? `, with earnings expected to improve (forward P/E ${fpe.toFixed(1)}×)` : fpe > pe + 2 ? `, though forward earnings estimates imply compression (fwd P/E ${fpe.toFixed(1)}×)` : "";
+                }
+                v += ".";
+              }
+              if (f.graham_number && price) {
+                v += price < f.graham_number
+                  ? ` The Graham Number — a classic intrinsic value benchmark — sits at $${f.graham_number.toFixed(2)}, suggesting the stock may be trading below fair value.`
+                  : ` The Graham Number of $${f.graham_number.toFixed(2)} implies the stock is trading at a premium to its intrinsic value.`;
+              }
+              if (tgt && f.analyst_count > 0) {
+                const updown = tgt > (price||tgt) ? `${((tgt-(price||tgt))/(price||tgt)*100).toFixed(1)}% upside` : `${(((price||tgt)-tgt)/(price||tgt)*100).toFixed(1)}% downside`;
+                v += ` ${f.analyst_count} analysts covering the stock have a consensus target of $${tgt.toFixed(2)} — implying ${updown} — with an overall rating of "${al.label}".`;
+              }
+              if (v) parts.push(v);
+            }
+
+            // Business quality
+            const qParts = [];
+            if (f.gross_margin != null) qParts.push(f.gross_margin > 40 ? `strong gross margins (${f.gross_margin.toFixed(1)}%)` : f.gross_margin > 20 ? `moderate gross margins (${f.gross_margin.toFixed(1)}%)` : `thin gross margins (${f.gross_margin.toFixed(1)}%)`);
+            if (f.net_margin   != null) qParts.push(f.net_margin > 15 ? `healthy net margins of ${f.net_margin.toFixed(1)}%` : f.net_margin > 0 ? `slim but positive net margins of ${f.net_margin.toFixed(1)}%` : "negative net income");
+            if (f.roe          != null) qParts.push(f.roe > 20 ? `a high return on equity of ${f.roe.toFixed(1)}%` : f.roe > 10 ? `a moderate ROE of ${f.roe.toFixed(1)}%` : `a below-average ROE of ${f.roe.toFixed(1)}%`);
+            if (f.debt_to_equity != null) qParts.push(f.debt_to_equity < 0.5 ? "a conservatively leveraged balance sheet" : f.debt_to_equity < 1.5 ? `a manageable debt load (D/E ${f.debt_to_equity.toFixed(2)})` : `elevated leverage at ${f.debt_to_equity.toFixed(2)}× debt/equity`);
+            if (qParts.length > 0) parts.push(`The business demonstrates ${qParts.join(", ")}.`);
+
+            // Earnings & growth
+            const gParts = [];
+            if (f.revenue_growth != null) gParts.push(f.revenue_growth > 15 ? `rapid revenue growth of ${f.revenue_growth.toFixed(1)}%` : f.revenue_growth > 5 ? `steady revenue growth of ${f.revenue_growth.toFixed(1)}%` : f.revenue_growth > 0 ? `modest revenue growth of ${f.revenue_growth.toFixed(1)}%` : `declining revenues (${f.revenue_growth.toFixed(1)}%)`);
+            if (f.eps_growth     != null) gParts.push(f.eps_growth > 0 ? `EPS grew ${f.eps_growth.toFixed(1)}%` : `EPS contracted ${Math.abs(f.eps_growth).toFixed(1)}%`);
+            if (f.earnings_streak >= 2)  gParts.push(`${f.earnings_streak} consecutive earnings beats`);
+            if (f.last_eps_surprise != null) gParts.push(f.last_eps_surprise > 0 ? `the last quarter beat estimates by ${f.last_eps_surprise.toFixed(1)}%` : `the last quarter missed by ${Math.abs(f.last_eps_surprise).toFixed(1)}%`);
+            if (gParts.length > 0) parts.push("Earnings & growth: " + gParts.join("; ") + ".");
           }
-          if (data.technical) {
-            const ta = data.technical;
-            const rsi = ta.rsi;
-            const maStr = ta.above_ma50 && ta.above_ma200
-              ? `${data.symbol} is currently trading above both its 50-day and 200-day moving averages — these are trend lines that traders watch closely, and being above them is generally considered a healthy sign.`
-              : !ta.above_ma50 && !ta.above_ma200
-              ? `${data.symbol} is sitting below both its 50-day and 200-day moving averages. When a stock falls under these levels, they often act as overhead resistance — meaning the price has to work harder to recover.`
-              : ta.above_ma50
-              ? `${data.symbol} is above its short-term (50-day) average but still below its long-term (200-day) one — a mixed chart picture that suggests some recent strength without a full trend reversal.`
-              : `${data.symbol} is above its long-term (200-day) average but struggling below the short-term (50-day) one — a slight near-term soft patch in an otherwise intact longer trend.`;
-            const rsiStr = rsi != null
-              ? rsi > 70
-                ? ` The RSI momentum indicator reads ${rsi.toFixed(0)}, which puts it in "overbought" territory — a warning sign that the recent rally may be getting stretched.`
-                : rsi < 30
-                ? ` The RSI momentum indicator reads ${rsi.toFixed(0)}, putting it in "oversold" territory — which can sometimes signal a bounce is near, though it doesn't mean a recovery is guaranteed.`
-                : ` The RSI momentum indicator reads ${rsi.toFixed(0)}, which is squarely in neutral territory — no strong signal either way from momentum.`
-              : "";
-            parts.push(`${maStr}${rsiStr}`);
-          }
+
+          // Sentiment & macro context
           if (data.sentiment) {
             const s = data.sentiment;
             const scoreDesc = s.score > 0.3 ? "clearly positive" : s.score > 0.05 ? "mildly positive" : s.score < -0.3 ? "clearly negative" : s.score < -0.05 ? "mildly negative" : "roughly neutral";
-            const momStr = s.momentum > 0.1 ? " and the tone has been improving recently" : s.momentum < -0.1 ? " and the tone has been softening recently" : "";
-            const counterStr = s.score > 0.05 && data.composite?.score < -0.1
-              ? " This is a mild counterpoint to the overall bearish signal — worth keeping in mind."
-              : s.score < -0.05 && data.composite?.score > 0.1
-              ? " This negative tone runs somewhat against the bullish technical setup."
-              : "";
-            parts.push(`Scanning ${s.articles} news articles from the last 24 hours, coverage of ${data.symbol} is ${scoreDesc}${momStr}.${counterStr}`);
+            const momStr = s.momentum > 0.1 ? " and improving" : s.momentum < -0.1 ? " and softening" : "";
+            parts.push(`Market sentiment scanning ${s.articles} recent news articles is ${scoreDesc}${momStr} — a useful gauge of short-term narrative risk around ${data.symbol}.`);
           }
-          if (data.options) {
-            const o = data.options;
-            const ivRankPct = o.iv_rank != null ? o.iv_rank * 100 : null;
-            const ivDesc = ivRankPct != null
-              ? ivRankPct > 70
-                ? `options on ${data.symbol} are relatively expensive right now compared to their recent history — meaning the market is pricing in larger-than-normal swings ahead`
-                : ivRankPct < 30
-                ? `options on ${data.symbol} are fairly cheap relative to recent history — the market isn't expecting much movement`
-                : `options are priced in line with recent norms — no unusual volatility expectations`
-              : null;
-            const pcDesc = o.put_call_ratio != null
-              ? o.put_call_ratio > 1.2
-                ? `more traders are buying put options (bets on a decline) than calls right now`
-                : o.put_call_ratio < 0.8
-                ? `more traders are buying call options (bets on a rise) than puts right now`
-                : `put and call activity is roughly balanced`
-              : null;
-            const mpStr = o.max_pain && data.technical?.latest_close
-              ? ` The "max pain" level — the price where the most options expire worthless, which can act like a gravitational pull near expiration — sits at $${Number(o.max_pain).toFixed(0)}.`
-              : "";
-            if (ivDesc || pcDesc) {
-              parts.push(`In the options market, ${[ivDesc, pcDesc].filter(Boolean).join(", and ")}.${mpStr}`);
-            }
+
+          // Technical context (brief — not the lead)
+          if (data.technical) {
+            const ta = data.technical;
+            const maStr = ta.above_ma50 && ta.above_ma200
+              ? `Price is above both the 50- and 200-day moving averages, consistent with a constructive technical backdrop.`
+              : !ta.above_ma50 && !ta.above_ma200
+              ? `Price is below both key moving averages, suggesting near-term technical headwinds that often accompany fundamental re-rating.`
+              : ta.above_ma50
+              ? `Price sits above the short-term 50-day MA but below the long-term 200-day — a mixed chart signal.`
+              : `Price is above the long-term 200-day MA but struggling below the 50-day — a temporary soft patch in an otherwise intact trend.`;
+            const rsi = ta.rsi;
+            const rsiStr = rsi != null ? (rsi > 70 ? ` RSI at ${rsi.toFixed(0)} is stretched (overbought).` : rsi < 30 ? ` RSI at ${rsi.toFixed(0)} is depressed (oversold) — potential mean reversion candidate.` : "") : "";
+            parts.push(maStr + rsiStr);
           }
+
           if (parts.length === 0) return null;
           return (
             <div style={{borderRadius:12,border:`1px solid ${C.pur}30`,background:C.pur+"08",padding:"14px 18px"}}>
@@ -8542,24 +8808,28 @@ function TradeAdvisorView() {
           );
         })()}
 
-        {/* ── Bottom Line Strip ─────────────────────────────────────────── */}
+        {/* ══════════════════════════════════════════════════════════════════
+            3. BOTTOM LINE
+           ══════════════════════════════════════════════════════════════════ */}
         {data.composite && (()=>{
           const score = data.composite.score;
           const overall = data.composite.overall || "Neutral";
           const conviction = (data.composite.conviction||"").toLowerCase();
           const sc = sCol(score);
-          const mlDir = data.ml_signal?.direction;
           const taDir = data.technical?.ta_bias;
           const sentDir = data.sentiment?.direction;
+          const fundBull = data.fundamentals?.target_upside > 10 || data.fundamentals?.earnings_streak >= 2;
+          const fundBear = data.fundamentals?.target_upside < -5 || data.fundamentals?.debt_to_equity > 2;
           const signalParts = [];
-          if (mlDir) signalParts.push(`ML ${mlDir}`);
+          if (fundBull) signalParts.push("fundamentals constructive");
+          else if (fundBear) signalParts.push("fundamentals cautious");
           if (taDir) signalParts.push(`technicals ${taDir==="neutral"?"neutral":"lean "+taDir}`);
           if (sentDir) signalParts.push(`news ${sentDir}`);
           const convLine = conviction==="high"
             ? "Signals are well-aligned — higher-confidence view."
             : conviction==="moderate"
-            ? "Some mixed signals present — use moderate confidence."
-            : "Signals are conflicting — low-conviction environment.";
+            ? "Some mixed signals — moderate confidence."
+            : "Mixed signals — low-conviction environment.";
           return (
             <div style={{borderRadius:12,border:`2px solid ${sc}`,background:sc+"12",padding:"14px 18px"}}>
               <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6,flexWrap:"wrap"}}>
@@ -8574,10 +8844,79 @@ function TradeAdvisorView() {
           );
         })()}
 
-        {/* ── Fundamentals Synthesis ───────────────────────────────────── */}
-        {data.fundamentals && <StockSynthesisTile snap={data.fundamentals}/>}
+        {/* ══════════════════════════════════════════════════════════════════
+            4. STRATEGY RECOMMENDATIONS (moved up — directly below bottom line)
+           ══════════════════════════════════════════════════════════════════ */}
+        <Card>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+            <Shield size={13} style={{color:C.sky}}/><span style={mono(9,C.sky,700)}>STRATEGY RECOMMENDATIONS</span>
+            {data.strategy_recommendations?.length>0 && (
+              <span style={mono(8,C.mut)}>— top {Math.min(data.strategy_recommendations.length,3)} strategies ranked by fit</span>
+            )}
+          </div>
+          {data.strategy_recommendations?.length > 0 ? (
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {data.strategy_recommendations.slice(0,3).map((r,i)=>{
+                const isCredit = r.net_premium!=null && r.net_premium<0;
+                const isDebit  = r.net_premium!=null && r.net_premium>0;
+                return (
+                  <div key={i} style={{borderRadius:10,border:`1px solid ${C.bdr}`,overflow:"hidden"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                      padding:"8px 12px",background:C.dim,borderBottom:`1px solid ${C.bdr}`}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{...mono(12,C.headingTxt,700)}}>#{r.rank}</span>
+                        <span style={mono(11,C.txt,600)}>{r.name}</span>
+                      </div>
+                      <div style={{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                        <Tag color={C.mut}>{r.category}</Tag>
+                        <Tag color={r.risk_level==="low"?C.grn:r.risk_level==="high"?C.red:C.amb}>{r.risk_level} risk</Tag>
+                        <Tag color={C.sky}>{(r.fit_score*100).toFixed(0)}% fit</Tag>
+                      </div>
+                    </div>
+                    <div style={{padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+                      {r.contract_details?.length>0 && (
+                        <div>
+                          <div style={{...mono(8,C.mut,700),marginBottom:4}}>CONTRACT DETAILS</div>
+                          <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                            {r.contract_details.map((cd,j)=>(
+                              <div key={j} style={{display:"flex",alignItems:"center",gap:6,
+                                padding:"5px 8px",borderRadius:6,
+                                background:cd.action==="BUY"?C.grn+"11":C.red+"11",
+                                border:`1px solid ${cd.action==="BUY"?C.grn:C.red}22`}}>
+                                <span style={{...mono(9,cd.action==="BUY"?C.grn:C.red,700),minWidth:32}}>{cd.action}</span>
+                                <span style={mono(9,C.txt,600)}>{cd.option_type.toUpperCase()}</span>
+                                <span style={{...mono(10,C.headingTxt,700),minWidth:50}}>${cd.strike}</span>
+                                <span style={{...mono(8,C.mut),flex:1}}>exp {cd.expiry_label} (~{cd.expiry_days}d)</span>
+                                {cd.est_premium!=null && <span style={mono(9,C.sky,600)}>${cd.est_premium.toFixed(2)}/sh</span>}
+                                {cd.delta!=null && <span style={mono(8,C.mut)}>Δ {cd.delta>0?"+":""}{cd.delta.toFixed(2)}</span>}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"center",
+                        padding:"6px 8px",borderRadius:6,background:C.bg,border:`1px solid ${C.bdr}33`}}>
+                        {r.net_premium!=null && <KV k={isCredit?"Net Credit":"Net Debit"} v={"$"+Math.abs(r.net_premium).toFixed(2)+"/sh"} vc={isCredit?C.grn:C.red}/>}
+                        {r.breakeven_price!=null && <KV k="Breakeven" v={"$"+r.breakeven_price.toFixed(2)}/>}
+                        <KV k="Max Profit" v={r.max_profit}/>
+                        <KV k="Max Loss" v={r.max_loss}/>
+                      </div>
+                      <div style={{...mono(8,C.mut),lineHeight:1.6}}>
+                        {r.rationale?.split(". ").slice(0,2).join(". ")+(r.rationale?.includes(".")?".":" ")}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div style={mono(10,C.mut)}>Fetch options data and re-analyze to generate strategy recommendations.</div>
+          )}
+        </Card>
 
-        {/* ── Composite Score Banner ────────────────────────────────────── */}
+        {/* ══════════════════════════════════════════════════════════════════
+            5. COMPOSITE SCORE + SIGNAL BREAKDOWN (de-emphasized)
+           ══════════════════════════════════════════════════════════════════ */}
         {data.composite && (
           <div style={{borderRadius:14,border:`2px solid ${sCol(data.composite.score)}50`,
             background:sCol(data.composite.score)+"0a",padding:"16px 22px",display:"flex",gap:20,alignItems:"center",flexWrap:"wrap"}}>
@@ -8796,93 +9135,6 @@ function TradeAdvisorView() {
           ))}
         </Card>
 
-        {/* ── Strategy Recommendations (full width) ───────────────────── */}
-        <Card>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-            <Shield size={13} style={{color:C.sky}}/><span style={mono(9,C.sky,700)}>STRATEGY RECOMMENDATIONS</span>
-            {data.strategy_recommendations?.length>0 && (
-              <span style={mono(8,C.mut)}>— top {Math.min(data.strategy_recommendations.length,3)} strategies ranked by fit</span>
-            )}
-          </div>
-          {data.strategy_recommendations?.length > 0 ? (
-            <div style={{display:"flex",flexDirection:"column",gap:10}}>
-              {data.strategy_recommendations.slice(0,3).map((r,i)=>{
-                const isCredit = r.net_premium!=null && r.net_premium<0;
-                const isDebit  = r.net_premium!=null && r.net_premium>0;
-                return (
-                  <div key={i} style={{borderRadius:10,border:`1px solid ${C.bdr}`,overflow:"hidden"}}>
-                    {/* Header bar */}
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-                      padding:"8px 12px",background:C.dim,borderBottom:`1px solid ${C.bdr}`}}>
-                      <div style={{display:"flex",alignItems:"center",gap:8}}>
-                        <span style={{...mono(12,C.headingTxt,700)}}>#{r.rank}</span>
-                        <span style={mono(11,C.txt,600)}>{r.name}</span>
-                      </div>
-                      <div style={{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"flex-end"}}>
-                        <Tag color={C.mut}>{r.category}</Tag>
-                        <Tag color={r.risk_level==="low"?C.grn:r.risk_level==="high"?C.red:C.amb}>{r.risk_level} risk</Tag>
-                        <Tag color={C.sky}>{(r.fit_score*100).toFixed(0)}% fit</Tag>
-                      </div>
-                    </div>
-
-                    <div style={{padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
-                      {/* Contract detail rows */}
-                      {r.contract_details?.length>0 && (
-                        <div>
-                          <div style={{...mono(8,C.mut,700),marginBottom:4}}>CONTRACT DETAILS</div>
-                          <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                            {r.contract_details.map((cd,j)=>(
-                              <div key={j} style={{display:"flex",alignItems:"center",gap:6,
-                                padding:"5px 8px",borderRadius:6,
-                                background:cd.action==="BUY"?C.grn+"11":C.red+"11",
-                                border:`1px solid ${cd.action==="BUY"?C.grn:C.red}22`}}>
-                                <span style={{...mono(9,cd.action==="BUY"?C.grn:C.red,700),minWidth:32}}>{cd.action}</span>
-                                <span style={mono(9,C.txt,600)}>{cd.option_type.toUpperCase()}</span>
-                                <span style={{...mono(10,C.headingTxt,700),minWidth:50}}>${cd.strike}</span>
-                                <span style={{...mono(8,C.mut),flex:1}}>exp {cd.expiry_label} (~{cd.expiry_days}d)</span>
-                                {cd.est_premium!=null && (
-                                  <span style={mono(9,C.sky,600)}>
-                                    ${cd.est_premium.toFixed(2)}/sh · ${cd.est_premium_contract?.toFixed(0)}/contract
-                                  </span>
-                                )}
-                                {cd.delta!=null && (
-                                  <span style={mono(8,C.mut)}>Δ {cd.delta>0?"+":""}{cd.delta.toFixed(2)}</span>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Trade summary row */}
-                      <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"center",
-                        padding:"6px 8px",borderRadius:6,background:C.bg,border:`1px solid ${C.bdr}33`}}>
-                        {r.net_premium!=null && (
-                          <KV k={isCredit?"Net Credit":"Net Debit"}
-                            v={"$"+Math.abs(r.net_premium).toFixed(2)+"/sh ($"+Math.abs(r.net_premium*100).toFixed(0)+"/contract)"}
-                            vc={isCredit?C.grn:isDebit?C.red:C.txt}/>
-                        )}
-                        {r.breakeven_price!=null && (
-                          <KV k="Breakeven" v={"$"+r.breakeven_price.toFixed(2)+" at expiry"}/>
-                        )}
-                        <KV k="Max Profit" v={r.max_profit}/>
-                        <KV k="Max Loss" v={r.max_loss}/>
-                      </div>
-
-                      {/* Condensed rationale */}
-                      <div style={{...mono(8,C.mut),lineHeight:1.6}}>
-                        {r.rationale?.split(". ").slice(0,2).join(". ")+(r.rationale?.includes(".")?".":" ")}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div style={mono(10,C.mut)}>Fetch options data and re-analyze to generate strategy recommendations.</div>
-          )}
-        </Card>
-
         {data.warnings?.filter(w=>w).length > 0 && (
           <Card>
             <div style={{...mono(9,C.amb,700),marginBottom:6}}>⚠ ANALYSIS NOTES</div>
@@ -8897,8 +9149,8 @@ function TradeAdvisorView() {
         <Card>
           <div style={{...mono(11,C.mut),textAlign:"center",padding:"48px 0",lineHeight:2}}>
             Enter any equity, ETF, or crypto ticker above and click <span style={{color:C.sky,fontWeight:700}}>Analyze</span><br/>
-            to get a synthesized trade recommendation combining ML prediction,<br/>
-            news sentiment, technical signals, and options analytics.
+            to get a full fundamental breakdown — valuation, analyst consensus, earnings quality,<br/>
+            intrinsic value, and macro/sentiment context.
           </div>
         </Card>
       )}

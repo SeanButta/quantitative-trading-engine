@@ -4338,20 +4338,54 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
         def _sf(v):
             try: return round(float(v), 2) if v is not None else None
             except Exception: return None
+        # Graham Number (intrinsic value estimate): sqrt(22.5 × EPS × BVPS)
+        _trailing_eps = _sf(_info.get("trailingEps"))
+        _book_value   = _sf(_info.get("bookValue"))
+        _graham_number = None
+        if _trailing_eps and _book_value and _trailing_eps > 0 and _book_value > 0:
+            import math as _math
+            _graham_number = round(_math.sqrt(22.5 * _trailing_eps * _book_value), 2)
+        _market_cap = _info.get("marketCap")
         result["fundamentals"] = {
             "symbol":          sym,
+            # Valuation
             "pe_ratio":        _sf(_info.get("trailingPE")),
             "forward_pe":      _sf(_info.get("forwardPE")),
             "peg_ratio":       _sf(_info.get("pegRatio")),
+            "pb_ratio":        _sf(_info.get("priceToBook")),
+            "ev_to_ebitda":    _sf(_info.get("enterpriseToEbitda")),
+            "trailing_eps":    _trailing_eps,
+            "book_value":      _book_value,
+            "graham_number":   _graham_number,
+            # Market snapshot
+            "market_cap":      _market_cap,
+            "beta":            _sf(_info.get("beta")),
+            "div_yield":       _pct(_info.get("dividendYield")),
+            "fifty_two_week_high": _sf(_info.get("fiftyTwoWeekHigh")),
+            "fifty_two_week_low":  _sf(_info.get("fiftyTwoWeekLow")),
+            "short_ratio":     _sf(_info.get("shortRatio")),
+            # Analyst view
             "target_upside":   _target_upside,
             "analyst_count":   _info.get("numberOfAnalystOpinions"),
+            "recommend_mean":  _sf(_info.get("recommendationMean")),  # 1=strong buy … 5=strong sell
+            "recommend_key":   _info.get("recommendationKey"),
+            "analyst_target_mean": _sf(_info.get("targetMeanPrice")),
+            "analyst_target_high": _sf(_info.get("targetHighPrice")),
+            "analyst_target_low":  _sf(_info.get("targetLowPrice")),
+            # Quality
             "roe":             _pct(_info.get("returnOnEquity")),
             "net_margin":      _pct(_info.get("profitMargins")),
+            "gross_margin":    _pct(_info.get("grossMargins")),
+            "operating_margin":_pct(_info.get("operatingMargins")),
             "debt_to_equity":  _sf(_info.get("debtToEquity")),
+            "current_ratio":   _sf(_info.get("currentRatio")),
+            "free_cash_flow":  _info.get("freeCashflow"),
+            # Growth
             "revenue_growth":  _pct(_info.get("revenueGrowth")),
             "eps_growth":      _pct(_info.get("earningsGrowth")),
             "earnings_streak": _earnings_streak,
             "last_eps_surprise": _last_eps_surprise,
+            # Technical position
             "above_ma50":      _ta_data.get("above_ma50"),
             "above_ma200":     _ta_data.get("above_ma200"),
             "rsi_14":          _ta_data.get("rsi"),
