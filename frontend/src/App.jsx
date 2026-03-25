@@ -12080,7 +12080,7 @@ function AppShell() {
                 </div>
                 <span style={mono(11,C.headingTxt,700)}>Picador</span>
               </div>
-              <div style={mono(9,C.mut)}>v2.0.0 · Quantitative Research Platform</div>
+              <div style={mono(9,C.mut)}>v2.0.0 · The Analyst's Terminal</div>
             </div>
             {isMobile && (
               <button onClick={()=>setNavOpen(false)} style={{background:"transparent",border:"none",cursor:"pointer",padding:"2px 4px",marginTop:2}}>
