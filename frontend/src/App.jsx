@@ -8416,54 +8416,35 @@ function TradeAdvisorView() {
   return (
     <div style={{display:"flex",flexDirection:"column",gap:14}}>
       <div>
-        <Lbl>Research</Lbl>
-        <div style={mono(10,C.mut)}>Fundamentals · analyst consensus · earnings quality · valuation → macro & sentiment context</div>
+        <Lbl>Fundamentals</Lbl>
+        <div style={mono(10,C.mut)}>Valuation · analyst consensus · earnings quality · catalysts & headwinds → macro context</div>
       </div>
 
       {/* Controls */}
       <Card>
-        <div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"flex-end"}}>
-          <div style={{flex:1,minWidth:180}}>
+        <div style={{display:"flex",gap:12,alignItems:"flex-end"}}>
+          <div style={{flex:1}}>
             <div style={{...mono(9,C.mut,600),marginBottom:5,letterSpacing:"0.08em"}}>SYMBOL</div>
             <input
               value={input}
               onChange={e=>setInput(e.target.value.toUpperCase())}
               onKeyDown={e=>e.key==="Enter"&&run()}
-              placeholder="AAPL, SPY, BTC-USD…"
+              placeholder="AAPL, MSFT, TSLA, SPY…"
               style={{
                 width:"100%", padding:"9px 13px", borderRadius:8,
                 border:`1.5px solid ${C.grn}55`,
-                background:C.surf,
-                color:C.headingTxt,
+                background:C.surf, color:C.headingTxt,
                 fontFamily:"monospace", fontSize:14, fontWeight:600,
                 boxSizing:"border-box", outline:"none",
               }}
             />
           </div>
-          <div>
-            <div style={{...mono(9,C.mut,600),marginBottom:5,letterSpacing:"0.08em"}}>RISK TOLERANCE</div>
-            <div style={{display:"flex",gap:6}}>
-              {["conservative","moderate","aggressive"].map(r=>(
-                <button key={r} onClick={()=>setRisk(r)}
-                  style={{padding:"8px 13px",borderRadius:8,cursor:"pointer",
-                    border:`1.5px solid ${risk===r?C.sky:C.bdr}`,
-                    background:risk===r?`${C.sky}22`:"transparent",
-                    color:risk===r?C.sky:C.txt,
-                    fontFamily:"monospace", fontSize:10, fontWeight:risk===r?700:400,
-                    textTransform:"capitalize", transition:"all .15s"}}>
-                  {r}
-                </button>
-              ))}
-            </div>
-          </div>
           <SpinRing active={loading} color={C.sky}>
           <button onClick={run} disabled={loading}
-            style={{padding:"9px 24px",borderRadius:8,border:"none",
-              background:loading?C.dim:C.sky,
-              color:loading?C.mut:"#000",
+            style={{padding:"9px 28px",borderRadius:8,border:"none",
+              background:loading?C.dim:C.sky, color:loading?C.mut:"#000",
               fontFamily:"monospace", fontSize:11, fontWeight:700,
-              cursor:loading?"not-allowed":"pointer",
-              transition:"background .15s",
+              cursor:loading?"not-allowed":"pointer", transition:"background .15s",
               display:"flex",alignItems:"center",gap:6}}>
             {loading && <RefreshCw size={12} style={{animation:"spin 1s linear infinite"}}/>}
             {loading ? "Analyzing…" : "Analyze"}
@@ -8711,6 +8692,160 @@ function TradeAdvisorView() {
                   )}
                 </div>
               </div>
+            </div>
+          );
+        })()}
+
+        {/* ══════════════════════════════════════════════════════════════════
+            1b. COMPANY IDENTITY + ANALYST ACTIVITY + MACRO CONTEXT
+           ══════════════════════════════════════════════════════════════════ */}
+        {(()=>{
+          const f = data.fundamentals;
+          const ch = data.catalysts_headwinds;
+          const mc = data.macro_context;
+          if (!f && !ch && !mc) return null;
+          return (
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+
+              {/* Company description + sector + events row */}
+              {f && (f.sector || f.description || f.next_earnings_date) && (
+                <div style={{display:"grid",gridTemplateColumns:f.description?"2fr 1fr":"1fr",gap:10}}>
+                  {f.description && (
+                    <div style={{padding:"12px 14px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                      <div style={{...mono(8,C.mut,700),marginBottom:6,letterSpacing:"0.08em"}}>ABOUT {f.company_name||data.symbol}</div>
+                      {f.sector && <div style={{...mono(9,C.sky),marginBottom:6}}>{f.sector}{f.industry?` · ${f.industry}`:""}{f.country?` · ${f.country}`:""}</div>}
+                      <div style={{...mono(9,C.txt),lineHeight:1.7,opacity:0.85}}>{f.description}</div>
+                      {f.employees && <div style={{...mono(8,C.mut),marginTop:6}}>{Number(f.employees).toLocaleString()} employees</div>}
+                    </div>
+                  )}
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    {f.next_earnings_date && (
+                      <div style={{padding:"10px 14px",borderRadius:8,background:`${C.amb}12`,border:`1px solid ${C.amb}40`}}>
+                        <div style={{...mono(8,C.amb,700),marginBottom:4,letterSpacing:"0.08em"}}>NEXT EARNINGS</div>
+                        <div style={{...mono(14,C.headingTxt,700)}}>{f.next_earnings_date}</div>
+                        <div style={{...mono(8,C.mut),marginTop:2}}>
+                          {(()=>{
+                            const d = new Date(f.next_earnings_date);
+                            const diff = Math.round((d - new Date()) / 86400000);
+                            return diff > 0 ? `in ${diff} days` : diff === 0 ? "today" : `${Math.abs(diff)} days ago`;
+                          })()}
+                        </div>
+                      </div>
+                    )}
+                    {f.revenue_ttm && (
+                      <div style={{padding:"10px 14px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                        <div style={{...mono(8,C.mut,700),marginBottom:4,letterSpacing:"0.08em"}}>REVENUE (TTM)</div>
+                        <div style={{...mono(14,C.headingTxt,700)}}>
+                          {f.revenue_ttm>=1e12?"$"+(f.revenue_ttm/1e12).toFixed(2)+"T":f.revenue_ttm>=1e9?"$"+(f.revenue_ttm/1e9).toFixed(1)+"B":"$"+(f.revenue_ttm/1e6).toFixed(0)+"M"}
+                        </div>
+                        {f.revenue_growth != null && (
+                          <div style={{...mono(9,f.revenue_growth>=0?C.grn:C.red),marginTop:2}}>
+                            {f.revenue_growth>=0?"+":""}{f.revenue_growth.toFixed(1)}% YoY
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Analyst upgrades/downgrades */}
+              {f?.analyst_activity?.length > 0 && (
+                <div style={{padding:"12px 14px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                  <div style={{...mono(8,C.mut,700),marginBottom:8,letterSpacing:"0.08em"}}>RECENT ANALYST ACTIVITY</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                    {f.analyst_activity.map((a,i)=>{
+                      const isUp = ["upgrade","initiated","reiterated","raised"].some(k=>(a.action||"").toLowerCase().includes(k)||(a.to||"").toLowerCase().includes("buy")||(a.to||"").toLowerCase().includes("outperform"));
+                      const isDn = ["downgrade","cut","lowered"].some(k=>(a.action||"").toLowerCase().includes(k)||(a.to||"").toLowerCase().includes("sell")||(a.to||"").toLowerCase().includes("underperform"));
+                      const col = isUp ? C.grn : isDn ? C.red : C.amb;
+                      return (
+                        <div key={i} style={{display:"flex",gap:10,alignItems:"center",padding:"5px 8px",borderRadius:6,background:`${col}08`}}>
+                          <span style={{...mono(8,col,700),minWidth:70}}>{a.date}</span>
+                          <span style={{...mono(9,C.headingTxt,600),flex:1}}>{a.firm}</span>
+                          <span style={{...mono(8,col,700),padding:"2px 8px",borderRadius:10,background:`${col}18`,border:`1px solid ${col}40`}}>
+                            {a.action || (a.from && a.to ? `${a.from} → ${a.to}` : a.to || "—")}
+                          </span>
+                          {a.from && a.to && a.from !== a.to && (
+                            <span style={mono(8,C.mut)}>{a.from} → {a.to}</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Catalysts & Headwinds */}
+              {ch && (ch.catalysts?.length > 0 || ch.headwinds?.length > 0) && (
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                  {ch.catalysts?.length > 0 && (
+                    <div style={{padding:"12px 14px",borderRadius:8,background:`${C.grn}08`,border:`1px solid ${C.grn}30`}}>
+                      <div style={{...mono(8,C.grn,700),marginBottom:8,letterSpacing:"0.08em"}}>▲ CATALYSTS</div>
+                      {ch.catalysts.map((h,i)=>(
+                        <div key={i} style={{display:"flex",gap:6,alignItems:"flex-start",marginBottom:5}}>
+                          <span style={{...mono(9,C.grn),marginTop:2,flexShrink:0}}>›</span>
+                          <span style={{...mono(9,C.txt),lineHeight:1.6}}>{h}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {ch.headwinds?.length > 0 && (
+                    <div style={{padding:"12px 14px",borderRadius:8,background:`${C.red}08`,border:`1px solid ${C.red}30`}}>
+                      <div style={{...mono(8,C.red,700),marginBottom:8,letterSpacing:"0.08em"}}>▼ HEADWINDS & RISKS</div>
+                      {ch.headwinds.map((h,i)=>(
+                        <div key={i} style={{display:"flex",gap:6,alignItems:"flex-start",marginBottom:5}}>
+                          <span style={{...mono(9,C.red),marginTop:2,flexShrink:0}}>›</span>
+                          <span style={{...mono(9,C.txt),lineHeight:1.6}}>{h}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Macro Context */}
+              {mc && Object.keys(mc).length > 0 && (
+                <div style={{padding:"12px 14px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                  <div style={{...mono(8,C.mut,700),marginBottom:8,letterSpacing:"0.08em"}}>MACRO CONTEXT</div>
+                  <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+                    {mc.us10y && (
+                      <div>
+                        <div style={mono(8,C.mut)}>10Y Yield</div>
+                        <div style={{...mono(13,mc.us10y.change_pct>0?C.red:C.grn,700)}}>{mc.us10y.price?.toFixed(2)}%</div>
+                        {mc.us10y.change_pct!=null && <div style={mono(8,mc.us10y.change_pct>0?C.red:C.grn)}>{mc.us10y.change_pct>0?"+":""}{mc.us10y.change_pct?.toFixed(2)}%</div>}
+                      </div>
+                    )}
+                    {mc.vix && (
+                      <div>
+                        <div style={mono(8,C.mut)}>VIX</div>
+                        <div style={{...mono(13,mc.vix.price>25?C.red:mc.vix.price<15?C.grn:C.amb,700)}}>{mc.vix.price?.toFixed(1)}</div>
+                        <div style={mono(8,C.mut)}>{mc.vix.price>30?"fear":mc.vix.price>20?"elevated":mc.vix.price<15?"complacent":"normal"}</div>
+                      </div>
+                    )}
+                    {mc.dxy && (
+                      <div>
+                        <div style={mono(8,C.mut)}>DXY (Dollar)</div>
+                        <div style={{...mono(13,C.txt,700)}}>{mc.dxy.price?.toFixed(1)}</div>
+                        {mc.dxy.change_pct!=null && <div style={mono(8,mc.dxy.change_pct>0?C.red:C.grn)}>{mc.dxy.change_pct>0?"+":""}{mc.dxy.change_pct?.toFixed(2)}%</div>}
+                      </div>
+                    )}
+                    {mc.gld && (
+                      <div>
+                        <div style={mono(8,C.mut)}>Gold (GLD)</div>
+                        <div style={{...mono(13,C.txt,700)}}>${mc.gld.price?.toFixed(0)}</div>
+                        {mc.gld.change_pct!=null && <div style={mono(8,mc.gld.change_pct>0?C.grn:C.red)}>{mc.gld.change_pct>0?"+":""}{mc.gld.change_pct?.toFixed(2)}%</div>}
+                      </div>
+                    )}
+                    {mc.tlt && (
+                      <div>
+                        <div style={mono(8,C.mut)}>TLT (Long Bond)</div>
+                        <div style={{...mono(13,C.txt,700)}}>${mc.tlt.price?.toFixed(1)}</div>
+                        {mc.tlt.change_pct!=null && <div style={mono(8,mc.tlt.change_pct>0?C.grn:C.red)}>{mc.tlt.change_pct>0?"+":""}{mc.tlt.change_pct?.toFixed(2)}%</div>}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           );
         })()}
@@ -10683,7 +10818,7 @@ function SectorsView() {
 // ── App ─────────────────────────────────────────────────
 const NAV=[
   {id:"markets",   l:"Markets",   I:BarChart2},   // Overview + News
-  {id:"advisor",   l:"Research",  I:Compass},
+  {id:"advisor",   l:"Fundamentals",  I:Compass},
   {id:"macro",     l:"Macro",     I:Database},
   {id:"sectors",   l:"Sectors",   I:Layers},
   {id:"options",   l:"Options",   I:Activity},

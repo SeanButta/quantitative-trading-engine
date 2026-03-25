@@ -4394,12 +4394,102 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
                 "above_ma50":      _ta_data.get("above_ma50"),
                 "above_ma200":     _ta_data.get("above_ma200"),
                 "rsi_14":          _ta_data.get("rsi"),
+                # Company identity
+                "sector":          _info.get("sector"),
+                "industry":        _info.get("industry"),
+                "company_name":    _info.get("longName") or _info.get("shortName"),
+                "description":     (_info.get("longBusinessSummary") or "")[:400] or None,
+                "country":         _info.get("country"),
+                "employees":       _info.get("fullTimeEmployees"),
+                "revenue_ttm":     _info.get("totalRevenue"),
+                "price_to_sales":  _sf(_info.get("priceToSalesTrailing12Months")),
+                "shares_outstanding": _info.get("sharesOutstanding"),
+                "avg_volume":      _info.get("averageVolume"),
+                "target_median":   _sf(_info.get("targetMedianPrice")),
             }
+            # ── Earnings calendar (next earnings date) ────────────────────
+            try:
+                _cal = _t.calendar
+                if _cal is not None:
+                    if isinstance(_cal, dict):
+                        _ed = _cal.get("Earnings Date") or _cal.get("earningsDate")
+                    else:
+                        _ed = getattr(_cal, "get", lambda k,d=None: None)("Earnings Date")
+                    if _ed is not None:
+                        import pandas as _pd
+                        _ed_val = _ed[0] if isinstance(_ed, (list, tuple)) else _ed
+                        if hasattr(_ed_val, "strftime"):
+                            _fund_obj["next_earnings_date"] = _ed_val.strftime("%Y-%m-%d")
+                        else:
+                            _fund_obj["next_earnings_date"] = str(_ed_val)[:10]
+            except Exception:
+                pass
+            # ── Recent analyst upgrades/downgrades (last 5) ───────────────
+            try:
+                _upg = _t.upgrades_downgrades
+                if _upg is not None and not _upg.empty:
+                    _upg = _upg.reset_index()
+                    _upg_cols = [str(c).lower() for c in _upg.columns]
+                    _upg.columns = _upg_cols
+                    _fund_obj["analyst_activity"] = [
+                        {
+                            "date":   str(row.get("gradedate",""))[:10] if "gradedate" in row else str(row.get("date",""))[:10],
+                            "firm":   str(row.get("firm","")).strip(),
+                            "action": str(row.get("action","")).strip(),
+                            "from":   str(row.get("fromgrade","")).strip(),
+                            "to":     str(row.get("tograde","")).strip(),
+                        }
+                        for _, row in _upg.head(5).iterrows()
+                    ]
+            except Exception:
+                pass
             _set_cache(_fund_cache_key, _fund_obj, 3600 * 4, "fundamentals")  # 4-hour TTL
             result["fundamentals"] = _fund_obj
         except Exception as e:
             errors.append(f"fundamentals: {e}")
             result["fundamentals"] = None
+
+    # ── 8. Macro context ─────────────────────────────────────────────────────
+    try:
+        _macro_ctx = {}
+        for _mk, _mlabel in [
+            ("ta:VIX:1y:1d",    "vix"),
+            ("ta:TLT:1y:1d",    "tlt"),
+            ("ta:DXY:1y:1d",    "dxy"),
+            ("ta:GLD:1y:1d",    "gld"),
+        ]:
+            _mc = _get_cache(_mk)
+            if _mc and _mc.get("current_price"):
+                _macro_ctx[_mlabel] = {"price": _mc["current_price"], "change_pct": _mc.get("change_pct")}
+        # 10Y yield proxy from cached warmed data
+        _ty_cache = _get_cache("ta:^TNX:1y:1d") or _get_cache("ta:TNX:1y:1d")
+        if _ty_cache and _ty_cache.get("current_price"):
+            _macro_ctx["us10y"] = {"price": _ty_cache["current_price"], "change_pct": _ty_cache.get("change_pct")}
+        if _macro_ctx:
+            result["macro_context"] = _macro_ctx
+    except Exception:
+        pass
+
+    # ── 9. Catalyst & headwind extraction from news headlines ────────────────
+    try:
+        _headlines = (result.get("sentiment") or {}).get("headlines", [])
+        _cats, _winds = [], []
+        _cat_kw  = ["beat","upgrade","raised","raises","buys","acquires","partnership","launches","expands","record","breakthrough","approval","approved","deal","wins","contract","dividend","buyback","growth","strong","surges","rally"]
+        _wind_kw = ["miss","downgrade","lowered","lowers","cut","cuts","investigation","lawsuit","recall","decline","falls","drops","risk","warning","concern","tariff","sanction","weak","loss","layoff","restructur","probe","fine","penalty","inflation","recession","war","geopolit"]
+        for _h in _headlines:
+            _hl = (_h.get("headline") or _h.get("title") or str(_h)).lower()
+            _score = _h.get("score", 0) if isinstance(_h, dict) else 0
+            if any(k in _hl for k in _cat_kw) or _score > 0.15:
+                _cats.append(_h.get("headline") or _h.get("title") or str(_h))
+            elif any(k in _hl for k in _wind_kw) or _score < -0.15:
+                _winds.append(_h.get("headline") or _h.get("title") or str(_h))
+        if _cats or _winds:
+            result["catalysts_headwinds"] = {
+                "catalysts":  _cats[:4],
+                "headwinds":  _winds[:4],
+            }
+    except Exception:
+        pass
 
     result["warnings"] = errors
     return _sanitize(result)
