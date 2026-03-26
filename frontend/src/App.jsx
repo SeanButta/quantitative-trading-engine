@@ -8696,6 +8696,99 @@ function TradeAdvisorView() {
         })()}
 
         {/* ══════════════════════════════════════════════════════════════════
+            2. FULL ANALYSIS — fundamentals-first narrative
+           ══════════════════════════════════════════════════════════════════ */}
+        {(()=>{
+          const parts = [];
+          const f = data.fundamentals;
+
+          // Lead with fundamentals & valuation
+          if (f) {
+            const pe = f.pe_ratio, fpe = f.forward_pe, tgt = f.analyst_target_mean;
+            const price = data.technical?.latest_close;
+            const al = analystLabel(f.recommend_mean);
+            if (pe != null || tgt != null) {
+              let v = "";
+              if (pe != null) {
+                const valDesc = pe<12?"deeply discounted":pe<18?"attractively valued":pe<25?"fairly valued":pe<35?"premium-priced":"richly valued";
+                v += `At a trailing P/E of ${pe.toFixed(1)}×, ${data.symbol} is ${valDesc}`;
+                if (fpe != null) {
+                  v += pe > fpe + 2 ? `, with earnings expected to improve (forward P/E ${fpe.toFixed(1)}×)` : fpe > pe + 2 ? `, though forward earnings estimates imply compression (fwd P/E ${fpe.toFixed(1)}×)` : "";
+                }
+                v += ".";
+              }
+              if (f.graham_number && price) {
+                v += price < f.graham_number
+                  ? ` The Graham Number — a classic intrinsic value benchmark — sits at $${f.graham_number.toFixed(2)}, suggesting the stock may be trading below fair value.`
+                  : ` The Graham Number of $${f.graham_number.toFixed(2)} implies the stock is trading at a premium to its intrinsic value.`;
+              }
+              if (tgt && f.analyst_count > 0) {
+                const updown = tgt > (price||tgt) ? `${((tgt-(price||tgt))/(price||tgt)*100).toFixed(1)}% upside` : `${(((price||tgt)-tgt)/(price||tgt)*100).toFixed(1)}% downside`;
+                v += ` ${f.analyst_count} analysts covering the stock have a consensus target of $${tgt.toFixed(2)} — implying ${updown} — with an overall rating of "${al.label}".`;
+              }
+              if (v) parts.push(v);
+            }
+
+            // Business quality
+            const qParts = [];
+            if (f.gross_margin != null) qParts.push(f.gross_margin > 40 ? `strong gross margins (${f.gross_margin.toFixed(1)}%)` : f.gross_margin > 20 ? `moderate gross margins (${f.gross_margin.toFixed(1)}%)` : `thin gross margins (${f.gross_margin.toFixed(1)}%)`);
+            if (f.net_margin   != null) qParts.push(f.net_margin > 15 ? `healthy net margins of ${f.net_margin.toFixed(1)}%` : f.net_margin > 0 ? `slim but positive net margins of ${f.net_margin.toFixed(1)}%` : "negative net income");
+            if (f.roe          != null) qParts.push(f.roe > 20 ? `a high return on equity of ${f.roe.toFixed(1)}%` : f.roe > 10 ? `a moderate ROE of ${f.roe.toFixed(1)}%` : `a below-average ROE of ${f.roe.toFixed(1)}%`);
+            if (f.debt_to_equity != null) qParts.push(f.debt_to_equity < 0.5 ? "a conservatively leveraged balance sheet" : f.debt_to_equity < 1.5 ? `a manageable debt load (D/E ${f.debt_to_equity.toFixed(2)})` : `elevated leverage at ${f.debt_to_equity.toFixed(2)}× debt/equity`);
+            if (qParts.length > 0) parts.push(`The business demonstrates ${qParts.join(", ")}.`);
+
+            // Earnings & growth
+            const gParts = [];
+            if (f.revenue_growth != null) gParts.push(f.revenue_growth > 15 ? `rapid revenue growth of ${f.revenue_growth.toFixed(1)}%` : f.revenue_growth > 5 ? `steady revenue growth of ${f.revenue_growth.toFixed(1)}%` : f.revenue_growth > 0 ? `modest revenue growth of ${f.revenue_growth.toFixed(1)}%` : `declining revenues (${f.revenue_growth.toFixed(1)}%)`);
+            if (f.eps_growth     != null) gParts.push(f.eps_growth > 0 ? `EPS grew ${f.eps_growth.toFixed(1)}%` : `EPS contracted ${Math.abs(f.eps_growth).toFixed(1)}%`);
+            if (f.earnings_streak >= 2)  gParts.push(`${f.earnings_streak} consecutive earnings beats`);
+            if (f.last_eps_surprise != null) gParts.push(f.last_eps_surprise > 0 ? `the last quarter beat estimates by ${f.last_eps_surprise.toFixed(1)}%` : `the last quarter missed by ${Math.abs(f.last_eps_surprise).toFixed(1)}%`);
+            if (gParts.length > 0) parts.push("Earnings & growth: " + gParts.join("; ") + ".");
+          }
+
+          // Sentiment & macro context
+          if (data.sentiment) {
+            const s = data.sentiment;
+            const scoreDesc = s.score > 0.3 ? "clearly positive" : s.score > 0.05 ? "mildly positive" : s.score < -0.3 ? "clearly negative" : s.score < -0.05 ? "mildly negative" : "roughly neutral";
+            const momStr = s.momentum > 0.1 ? " and improving" : s.momentum < -0.1 ? " and softening" : "";
+            parts.push(`Market sentiment scanning ${s.articles} recent news articles is ${scoreDesc}${momStr} — a useful gauge of short-term narrative risk around ${data.symbol}.`);
+          }
+
+          // Technical context (brief — not the lead)
+          if (data.technical) {
+            const ta = data.technical;
+            const maStr = ta.above_ma50 && ta.above_ma200
+              ? `Price is above both the 50- and 200-day moving averages, consistent with a constructive technical backdrop.`
+              : !ta.above_ma50 && !ta.above_ma200
+              ? `Price is below both key moving averages, suggesting near-term technical headwinds that often accompany fundamental re-rating.`
+              : ta.above_ma50
+              ? `Price sits above the short-term 50-day MA but below the long-term 200-day — a mixed chart signal.`
+              : `Price is above the long-term 200-day MA but struggling below the 50-day — a temporary soft patch in an otherwise intact trend.`;
+            const rsi = ta.rsi;
+            const rsiStr = rsi != null ? (rsi > 70 ? ` RSI at ${rsi.toFixed(0)} is stretched (overbought).` : rsi < 30 ? ` RSI at ${rsi.toFixed(0)} is depressed (oversold) — potential mean reversion candidate.` : "") : "";
+            parts.push(maStr + rsiStr);
+          }
+
+          if (parts.length === 0) return null;
+          return (
+            <div style={{borderRadius:12,border:`1px solid ${C.pur}30`,background:C.pur+"08",padding:"14px 18px"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                <Cpu size={13} style={{color:C.pur}}/>
+                <span style={mono(9,C.pur,700)}>FULL ANALYSIS · {data.symbol}</span>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {parts.map((p,i)=>(
+                  <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                    <span style={{...mono(9,C.pur),marginTop:3,flexShrink:0}}>›</span>
+                    <span style={{...mono(10,C.txt),lineHeight:1.8}}>{p}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* ══════════════════════════════════════════════════════════════════
             1b. COMPANY IDENTITY + ANALYST ACTIVITY + MACRO CONTEXT
            ══════════════════════════════════════════════════════════════════ */}
         {(()=>{
@@ -8845,99 +8938,6 @@ function TradeAdvisorView() {
                   </div>
                 </div>
               )}
-            </div>
-          );
-        })()}
-
-        {/* ══════════════════════════════════════════════════════════════════
-            2. FULL ANALYSIS — fundamentals-first narrative
-           ══════════════════════════════════════════════════════════════════ */}
-        {(()=>{
-          const parts = [];
-          const f = data.fundamentals;
-
-          // Lead with fundamentals & valuation
-          if (f) {
-            const pe = f.pe_ratio, fpe = f.forward_pe, tgt = f.analyst_target_mean;
-            const price = data.technical?.latest_close;
-            const al = analystLabel(f.recommend_mean);
-            if (pe != null || tgt != null) {
-              let v = "";
-              if (pe != null) {
-                const valDesc = pe<12?"deeply discounted":pe<18?"attractively valued":pe<25?"fairly valued":pe<35?"premium-priced":"richly valued";
-                v += `At a trailing P/E of ${pe.toFixed(1)}×, ${data.symbol} is ${valDesc}`;
-                if (fpe != null) {
-                  v += pe > fpe + 2 ? `, with earnings expected to improve (forward P/E ${fpe.toFixed(1)}×)` : fpe > pe + 2 ? `, though forward earnings estimates imply compression (fwd P/E ${fpe.toFixed(1)}×)` : "";
-                }
-                v += ".";
-              }
-              if (f.graham_number && price) {
-                v += price < f.graham_number
-                  ? ` The Graham Number — a classic intrinsic value benchmark — sits at $${f.graham_number.toFixed(2)}, suggesting the stock may be trading below fair value.`
-                  : ` The Graham Number of $${f.graham_number.toFixed(2)} implies the stock is trading at a premium to its intrinsic value.`;
-              }
-              if (tgt && f.analyst_count > 0) {
-                const updown = tgt > (price||tgt) ? `${((tgt-(price||tgt))/(price||tgt)*100).toFixed(1)}% upside` : `${(((price||tgt)-tgt)/(price||tgt)*100).toFixed(1)}% downside`;
-                v += ` ${f.analyst_count} analysts covering the stock have a consensus target of $${tgt.toFixed(2)} — implying ${updown} — with an overall rating of "${al.label}".`;
-              }
-              if (v) parts.push(v);
-            }
-
-            // Business quality
-            const qParts = [];
-            if (f.gross_margin != null) qParts.push(f.gross_margin > 40 ? `strong gross margins (${f.gross_margin.toFixed(1)}%)` : f.gross_margin > 20 ? `moderate gross margins (${f.gross_margin.toFixed(1)}%)` : `thin gross margins (${f.gross_margin.toFixed(1)}%)`);
-            if (f.net_margin   != null) qParts.push(f.net_margin > 15 ? `healthy net margins of ${f.net_margin.toFixed(1)}%` : f.net_margin > 0 ? `slim but positive net margins of ${f.net_margin.toFixed(1)}%` : "negative net income");
-            if (f.roe          != null) qParts.push(f.roe > 20 ? `a high return on equity of ${f.roe.toFixed(1)}%` : f.roe > 10 ? `a moderate ROE of ${f.roe.toFixed(1)}%` : `a below-average ROE of ${f.roe.toFixed(1)}%`);
-            if (f.debt_to_equity != null) qParts.push(f.debt_to_equity < 0.5 ? "a conservatively leveraged balance sheet" : f.debt_to_equity < 1.5 ? `a manageable debt load (D/E ${f.debt_to_equity.toFixed(2)})` : `elevated leverage at ${f.debt_to_equity.toFixed(2)}× debt/equity`);
-            if (qParts.length > 0) parts.push(`The business demonstrates ${qParts.join(", ")}.`);
-
-            // Earnings & growth
-            const gParts = [];
-            if (f.revenue_growth != null) gParts.push(f.revenue_growth > 15 ? `rapid revenue growth of ${f.revenue_growth.toFixed(1)}%` : f.revenue_growth > 5 ? `steady revenue growth of ${f.revenue_growth.toFixed(1)}%` : f.revenue_growth > 0 ? `modest revenue growth of ${f.revenue_growth.toFixed(1)}%` : `declining revenues (${f.revenue_growth.toFixed(1)}%)`);
-            if (f.eps_growth     != null) gParts.push(f.eps_growth > 0 ? `EPS grew ${f.eps_growth.toFixed(1)}%` : `EPS contracted ${Math.abs(f.eps_growth).toFixed(1)}%`);
-            if (f.earnings_streak >= 2)  gParts.push(`${f.earnings_streak} consecutive earnings beats`);
-            if (f.last_eps_surprise != null) gParts.push(f.last_eps_surprise > 0 ? `the last quarter beat estimates by ${f.last_eps_surprise.toFixed(1)}%` : `the last quarter missed by ${Math.abs(f.last_eps_surprise).toFixed(1)}%`);
-            if (gParts.length > 0) parts.push("Earnings & growth: " + gParts.join("; ") + ".");
-          }
-
-          // Sentiment & macro context
-          if (data.sentiment) {
-            const s = data.sentiment;
-            const scoreDesc = s.score > 0.3 ? "clearly positive" : s.score > 0.05 ? "mildly positive" : s.score < -0.3 ? "clearly negative" : s.score < -0.05 ? "mildly negative" : "roughly neutral";
-            const momStr = s.momentum > 0.1 ? " and improving" : s.momentum < -0.1 ? " and softening" : "";
-            parts.push(`Market sentiment scanning ${s.articles} recent news articles is ${scoreDesc}${momStr} — a useful gauge of short-term narrative risk around ${data.symbol}.`);
-          }
-
-          // Technical context (brief — not the lead)
-          if (data.technical) {
-            const ta = data.technical;
-            const maStr = ta.above_ma50 && ta.above_ma200
-              ? `Price is above both the 50- and 200-day moving averages, consistent with a constructive technical backdrop.`
-              : !ta.above_ma50 && !ta.above_ma200
-              ? `Price is below both key moving averages, suggesting near-term technical headwinds that often accompany fundamental re-rating.`
-              : ta.above_ma50
-              ? `Price sits above the short-term 50-day MA but below the long-term 200-day — a mixed chart signal.`
-              : `Price is above the long-term 200-day MA but struggling below the 50-day — a temporary soft patch in an otherwise intact trend.`;
-            const rsi = ta.rsi;
-            const rsiStr = rsi != null ? (rsi > 70 ? ` RSI at ${rsi.toFixed(0)} is stretched (overbought).` : rsi < 30 ? ` RSI at ${rsi.toFixed(0)} is depressed (oversold) — potential mean reversion candidate.` : "") : "";
-            parts.push(maStr + rsiStr);
-          }
-
-          if (parts.length === 0) return null;
-          return (
-            <div style={{borderRadius:12,border:`1px solid ${C.pur}30`,background:C.pur+"08",padding:"14px 18px"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-                <Cpu size={13} style={{color:C.pur}}/>
-                <span style={mono(9,C.pur,700)}>FULL ANALYSIS · {data.symbol}</span>
-              </div>
-              <div style={{display:"flex",flexDirection:"column",gap:10}}>
-                {parts.map((p,i)=>(
-                  <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
-                    <span style={{...mono(9,C.pur),marginTop:3,flexShrink:0}}>›</span>
-                    <span style={{...mono(10,C.txt),lineHeight:1.8}}>{p}</span>
-                  </div>
-                ))}
-              </div>
             </div>
           );
         })()}
