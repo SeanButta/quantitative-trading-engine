@@ -8366,7 +8366,6 @@ function TradeAdvisorView() {
   const C = useC();
   const { token } = useAuth();
   const [input,   setInput]   = useState("SPY");
-  const [risk,    setRisk]    = useState("moderate");
   const [loading, setLoading] = useState(false);
   const [data,    setData]    = useState(null);
   const [err,     setErr]     = useState(null);
@@ -8379,7 +8378,7 @@ function TradeAdvisorView() {
     fetch("/api/advisor", {
       method:"POST",
       headers:{"Content-Type":"application/json", ...(token ? {Authorization:`Bearer ${token}`} : {})},
-      body: JSON.stringify({ symbol: sym, risk_tolerance: risk }),
+      body: JSON.stringify({ symbol: sym, risk_tolerance: "moderate" }),
     })
       .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(friendlyError(e.detail) || "Advisor error")))
       .then(d => { setData(d); setLoading(false); })
