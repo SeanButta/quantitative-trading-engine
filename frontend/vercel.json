@@ -7,7 +7,7 @@
       "destination": "https://quantitative-trading-engine-production.up.railway.app/:path*"
     },
     {
-      "source": "/(.*)",
+      "source": "/((?!.*\\.[a-zA-Z0-9]+$).*)",
       "destination": "/index.html"
     }
   ]
