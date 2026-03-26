@@ -4315,7 +4315,12 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
         try:
             import yfinance as _yf2
             _t = _yf2.Ticker(sym)
-            _info = _t.info or {}
+            # Isolate .info so a rate-limit or network error doesn't kill the whole block
+            _info = {}
+            try:
+                _info = _t.info or {}
+            except Exception:
+                pass
             _price = (result.get("technical") or {}).get("latest_close")
             # Analyst price target upside
             _target_upside = None
@@ -4346,7 +4351,8 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
                 pass
             _ta_data = result.get("technical") or {}
             def _pct(v):
-                return round(float(v) * 100, 1) if v is not None else None
+                try: return round(float(v) * 100, 1) if v is not None else None
+                except Exception: return None
             def _sf(v):
                 try: return round(float(v), 2) if v is not None else None
                 except Exception: return None
@@ -4443,7 +4449,8 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
                     ]
             except Exception:
                 pass
-            _set_cache(_fund_cache_key, _fund_obj, 3600 * 4, "fundamentals")  # 4-hour TTL
+            if _info:  # only cache when we got real data; skip caching empty-info shells
+                _set_cache(_fund_cache_key, _fund_obj, 3600 * 4, "fundamentals")
             result["fundamentals"] = _fund_obj
         except Exception as e:
             errors.append(f"fundamentals: {e}")
