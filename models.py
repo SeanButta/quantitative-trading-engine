@@ -372,3 +372,151 @@ class SecFiling(Base):
     period_end  = Column(Date, nullable=True)
     raw_json    = Column(JSON, nullable=True)
     fetched_at  = Column(DateTime, default=datetime.utcnow)
+
+
+# ===========================================================================
+# Macro Regime Engine Tables
+# ===========================================================================
+
+class MacroSeriesCatalog(Base):
+    """Master metadata for every supported macro series."""
+    __tablename__ = "macro_series_catalog"
+
+    id                    = Column(String, primary_key=True)     # UUID
+    provider              = Column(String, nullable=False)        # fred, bls, bea, etc.
+    provider_series_id    = Column(String, nullable=False)
+    canonical_key         = Column(String, nullable=False, unique=True, index=True)
+    label                 = Column(String, nullable=False)
+    description           = Column(Text, nullable=True)
+    category              = Column(String, nullable=True)
+    subcategory           = Column(String, nullable=True)
+    geography             = Column(String, default="US")
+    frequency             = Column(String, nullable=True)        # daily, weekly, monthly, quarterly, annual
+    unit                  = Column(String, nullable=True)
+    seasonal_adjustment   = Column(String, nullable=True)
+    source_url            = Column(String, nullable=True)
+    supports_vintages     = Column(Boolean, default=False)
+    supports_realtime     = Column(Boolean, default=False)
+    is_active             = Column(Boolean, default=True)
+    created_at            = Column(DateTime, default=datetime.utcnow)
+    updated_at            = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MacroSeriesObservation(Base):
+    """Normalized macro observations from any provider."""
+    __tablename__ = "macro_series_observations"
+    __table_args__ = (
+        PrimaryKeyConstraint("id"),
+    )
+
+    id                = Column(String, primary_key=True)         # UUID
+    series_id         = Column(String, nullable=False, index=True)  # FK to catalog.id
+    observation_date  = Column(Date, nullable=False, index=True)
+    value             = Column(Float, nullable=True)
+    raw_value_text    = Column(String, nullable=True)
+    realtime_start    = Column(Date, nullable=True)
+    realtime_end      = Column(Date, nullable=True)
+    vintage_date      = Column(Date, nullable=True)
+    created_at        = Column(DateTime, default=datetime.utcnow)
+    updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MacroSeriesDerivative(Base):
+    """Computed transforms (YoY, MoM, z-score, etc.)."""
+    __tablename__ = "macro_series_derivatives"
+    __table_args__ = (
+        PrimaryKeyConstraint("id"),
+    )
+
+    id                = Column(String, primary_key=True)         # UUID
+    series_id         = Column(String, nullable=False, index=True)
+    observation_date  = Column(Date, nullable=False, index=True)
+    transform_type    = Column(String, nullable=False)           # yoy, mom, qoq_ann, zscore, ma
+    value             = Column(Float, nullable=True)
+    window            = Column(String, nullable=True)            # e.g. "3m", "12m"
+    created_at        = Column(DateTime, default=datetime.utcnow)
+    updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MacroPillarSnapshot(Base):
+    """Daily pillar scores for the macro regime engine."""
+    __tablename__ = "macro_pillar_snapshots"
+    __table_args__ = (
+        PrimaryKeyConstraint("id"),
+    )
+
+    id              = Column(String, primary_key=True)           # UUID
+    snapshot_date   = Column(Date, nullable=False, index=True)
+    pillar          = Column(String, nullable=False)              # growth, inflation, labor, etc.
+    score           = Column(Float, nullable=False)
+    trend           = Column(String, nullable=True)              # Improving, Stable, Deteriorating
+    confidence      = Column(String, nullable=True)
+    interpretation  = Column(Text, nullable=True)
+    drivers_json    = Column(JSON, nullable=True)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+    updated_at      = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MacroRegimeSnapshot(Base):
+    """Daily macro regime classification and composite score."""
+    __tablename__ = "macro_regime_snapshots"
+
+    id                = Column(String, primary_key=True)         # UUID
+    snapshot_date     = Column(Date, nullable=False, unique=True, index=True)
+    regime            = Column(String, nullable=False)
+    composite_score   = Column(Float, nullable=False)
+    trend             = Column(String, nullable=True)
+    confidence        = Column(String, nullable=True)
+    summary_bullets   = Column(JSON, nullable=True)
+    risks_json        = Column(JSON, nullable=True)
+    implications_json = Column(JSON, nullable=True)
+    metadata_json     = Column(JSON, nullable=True)
+    created_at        = Column(DateTime, default=datetime.utcnow)
+    updated_at        = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MacroCatalyst(Base):
+    """Upcoming macro events (CPI, NFP, FOMC, etc.)."""
+    __tablename__ = "macro_catalysts"
+
+    id              = Column(String, primary_key=True)           # UUID
+    event_key       = Column(String, nullable=False)
+    event_name      = Column(String, nullable=False)
+    event_date      = Column(DateTime, nullable=False, index=True)
+    region          = Column(String, default="US")
+    expected_value  = Column(String, nullable=True)
+    actual_value    = Column(String, nullable=True)
+    prior_value     = Column(String, nullable=True)
+    surprise_value  = Column(String, nullable=True)
+    importance      = Column(String, default="medium")           # high, medium, low
+    source          = Column(String, nullable=True)
+    created_at      = Column(DateTime, default=datetime.utcnow)
+    updated_at      = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class MacroChartPack(Base):
+    """Curated chart pack definitions."""
+    __tablename__ = "macro_chart_packs"
+
+    id            = Column(String, primary_key=True)             # UUID
+    pack_key      = Column(String, nullable=False, unique=True, index=True)
+    label         = Column(String, nullable=False)
+    description   = Column(Text, nullable=True)
+    config_json   = Column(JSON, nullable=False)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+    updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ProviderSyncRun(Base):
+    """ETL/sync health and observability."""
+    __tablename__ = "provider_sync_runs"
+
+    id                = Column(String, primary_key=True)         # UUID
+    provider          = Column(String, nullable=False, index=True)
+    run_type          = Column(String, nullable=False)           # scheduled, manual, release_triggered
+    status            = Column(String, nullable=False)           # running, complete, failed
+    started_at        = Column(DateTime, default=datetime.utcnow)
+    completed_at      = Column(DateTime, nullable=True)
+    records_processed = Column(Integer, default=0)
+    error_message     = Column(Text, nullable=True)
+    metadata_json     = Column(JSON, nullable=True)

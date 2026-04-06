@@ -7516,847 +7516,488 @@ const REGIME_META = {
 
 function MacroView() {
   const C = useC();
-  // ── State ────────────────────────────────────────────────────────────────
-  const [catalog,      setCatalog]      = useState({});
-  const [openCats,     setOpenCats]     = useState({});         // {catName: bool}
-  const [activeSeries, setActiveSeries] = useState([]);         // [{id,name,unit,color,obs,info}]
-  const [period,       setPeriod]       = useState("5y");
-  const [units,        setUnits]        = useState("lin");
-  const [loading,      setLoading]      = useState(false);
-  const [summary,      setSummary]      = useState(null);       // summary for primary series
-  const [searchQ,      setSearchQ]      = useState("");
-  const [searchResults,setSearchResults]= useState([]);
-  const [searching,    setSearching]    = useState(false);
-  const [hoveredEvent, setHoveredEvent] = useState(null);
-  const [tickerInput,  setTickerInput]  = useState("");      // stock ticker overlay input
-  const [tickerError,  setTickerError]  = useState("");      // brief error message
+  const { token } = useAuth();
+  const [snapshot, setSnapshot] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState(null);
+  // Chart workspace state (preserved from original)
+  const [catalog, setCatalog] = useState({});
+  const [openCats, setOpenCats] = useState({});
+  const [activeSeries, setActiveSeries] = useState([]);
+  const [period, setPeriod] = useState("5y");
+  const [units, setUnits] = useState("lin");
+  const [chartLoading, setChartLoading] = useState(false);
+  const [summary, setSummary] = useState(null);
+  const [searchQ, setSearchQ] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [activeSection, setActiveSection] = useState("snapshot"); // snapshot | charts
 
-  // ── Load catalog once ─────────────────────────────────────────────────────
+  // ── Load macro snapshot ──
   useEffect(() => {
-    fetch("/api/macro/catalog").then(r=>r.json()).then(d=>{
-      setCatalog(d.catalog||{});
-      // Open first category by default
-      const first = Object.keys(d.catalog||{})[0];
-      if (first) setOpenCats({[first]:true});
-    }).catch(()=>{});
+    setLoading(true);
+    fetch("/api/macro/snapshot", {headers: token ? {Authorization:`Bearer ${token}`} : {}})
+      .then(r => r.ok ? r.json() : Promise.reject("Snapshot error"))
+      .then(d => { setSnapshot(d); setLoading(false); })
+      .catch(e => { setErr(String(e)); setLoading(false); });
   }, []);
 
-  // ── Load series data ──────────────────────────────────────────────────────
-  const loadSeries = async (seriesId, seriesName, color, replace=true) => {
-    setLoading(true);
-    try {
-      // Only fetch summary for primary series (replace=true), not for overlays
-      const fetches = [
-        fetch(`/api/macro/series/${seriesId}?period=${period}&units=${units}`).then(r=>r.json()),
-        replace ? fetch(`/api/macro/summary/${seriesId}`).then(r=>r.json()) : Promise.resolve(null),
-      ];
-      const [obsRes, sumRes] = await Promise.all(fetches);
-      const newEntry = {
-        id:    seriesId,
-        name:  obsRes.info?.title || seriesName,
-        unit:  obsRes.info?.units_short || "",
-        freq:  obsRes.info?.frequency_short || "",
-        obs:   obsRes.observations || [],
-        info:  obsRes.info || {},
-        color: color,
-      };
-      if (replace) {
-        setActiveSeries([newEntry]);
-        setSummary(sumRes);   // only update summary for the primary series
-      } else {
-        setActiveSeries(prev => {
-          const exists = prev.find(s=>s.id===seriesId);
-          if (exists) return prev;
-          return [...prev, newEntry];
-        });
-        // overlay: keep existing primary summary unchanged
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // ── Load stock ticker as overlay ─────────────────────────────────────────
-  const loadTicker = async (symbol) => {
-    const sym = symbol.trim().toUpperCase();
-    if (!sym) return;
-    setTickerError("");
-    setLoading(true);
-    try {
-      const r = await fetch(`/api/market/price/${encodeURIComponent(sym)}?period=${period}`);
-      if (!r.ok) throw new Error(`No data for ${sym}`);
-      const d = await r.json();
-      const raw = d.data || d.ohlcv || [];   // backend returns "data" key
-      const obs = raw
-        .filter(p => p.close != null)
-        .map(p => ({ date: (p.date||"").slice(0,10), value: p.close }));
-      if (!obs.length) throw new Error(`No price data for ${sym}`);
-      const color = MACRO_OVERLAY_COLORS[activeSeries.length % MACRO_OVERLAY_COLORS.length];
-      const newEntry = {
-        id:   sym,
-        name: `${sym} (Stock)`,
-        unit: "$",
-        freq: "D",
-        obs,
-        info: { title: `${sym} Stock Price`, units_short: "$", frequency: "Daily" },
-        color,
-        type: "ticker",
-      };
-      setActiveSeries(prev => {
-        if (prev.find(s=>s.id===sym)) return prev;   // already loaded
-        return [...prev, newEntry];
-      });
-    } catch(e) {
-      setTickerError(e.message);
-      setTimeout(() => setTickerError(""), 3000);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // ── Re-fetch when period or units changes ────────────────────────────────
+  // ── Load FRED catalog (for chart workspace) ──
   useEffect(() => {
-    if (!activeSeries.length) return;
-    setLoading(true);
-    Promise.all(activeSeries.map((s) => {
-      if (s.type === "ticker") {
-        // Re-fetch ticker data for the new period
-        return fetch(`/api/market/price/${encodeURIComponent(s.id)}?period=${period}`)
-          .then(r => r.ok ? r.json() : { ohlcv:[] })
-          .then(d => ({
-            ...s,
-            obs: (d.data||d.ohlcv||[]).filter(p=>p.close!=null).map(p=>({date:(p.date||"").slice(0,10),value:p.close}))
-          }));
-      }
-      return fetch(`/api/macro/series/${s.id}?period=${period}&units=${units}`).then(r=>r.json())
-        .then(d => ({ ...s, obs: d.observations||[], info: d.info||{} }));
-    })).then(updated => { setActiveSeries(updated); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [period, units]); // eslint-disable-line
+    fetch("/api/macro/catalog")
+      .then(r => r.json())
+      .then(d => setCatalog(d.catalog || {}))
+      .catch(() => {});
+  }, []);
 
-  // ── Search ────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (searchQ.length < 2) { setSearchResults([]); return; }
-    const t = setTimeout(() => {
-      setSearching(true);
-      fetch(`/api/macro/search?q=${encodeURIComponent(searchQ)}&limit=12`)
-        .then(r=>r.json()).then(d=>{ setSearchResults(d.results||[]); setSearching(false); })
-        .catch(()=>setSearching(false));
-    }, 400);
-    return () => clearTimeout(t);
-  }, [searchQ]);
+  // ── Chart helpers ──
+  const MACRO_PERIODS = [{l:"1Y",v:"1y"},{l:"2Y",v:"2y"},{l:"5Y",v:"5y"},{l:"10Y",v:"10y"},{l:"20Y",v:"20y"},{l:"MAX",v:"max"}];
+  const MACRO_UNITS = [{l:"Level",v:"lin"},{l:"YoY %",v:"pc1"},{l:"MoM %",v:"pch"}];
+  const OVERLAY_COLORS = ["#40c4ff","#ffb300","#b388ff","#ff8a65"];
 
-  // ── Build merged chart data ───────────────────────────────────────────────
-  const chartData = useMemo(() => {
-    if (!activeSeries.length) return [];
-    // Build date-indexed map from all series
-    const map = {};
-    activeSeries.forEach((s,i) => {
-      s.obs.forEach(o => {
-        if (!map[o.date]) map[o.date] = { date: o.date };
-        map[o.date][`v${i}`] = o.value;
-      });
-    });
-    return Object.values(map).sort((a,b)=>a.date.localeCompare(b.date));
-  }, [activeSeries]);
-
-  // ── Summary stats ─────────────────────────────────────────────────────────
-  const primaryObs = activeSeries[0]?.obs || [];
-  const lastVal    = primaryObs.at(-1)?.value ?? null;
-  const prevVal    = primaryObs.at(-2)?.value ?? null;
-  const lastDate   = primaryObs.at(-1)?.date  ?? "—";
-
-  const fmtVal = (v, unitShort) => {
-    if (v == null) return "—";
-    const us = (unitShort||"").toLowerCase();
-    if (us.includes("percent") || us.includes("rate") || us.includes("%")) return `${v.toFixed(2)}%`;
-    if (us.includes("billion") || us.includes("bil")) return `$${v.toLocaleString("en",{minimumFractionDigits:1,maximumFractionDigits:1})}B`;
-    if (us.includes("million") || us.includes("mil")) return `$${v.toLocaleString("en",{minimumFractionDigits:0,maximumFractionDigits:0})}M`;
-    if (us.includes("thousand")) return `${v.toLocaleString("en",{maximumFractionDigits:0})}K`;
-    if (v >= 1e6) return `${(v/1e6).toFixed(2)}M`;
-    if (v >= 1e3) return `${v.toLocaleString("en",{maximumFractionDigits:1})}`;
-    return v.toFixed(4).replace(/\.?0+$/, "");
+  const loadSeries = (seriesId, seriesName, color, replace) => {
+    setChartLoading(true);
+    const col = color || OVERLAY_COLORS[activeSeries.length % OVERLAY_COLORS.length];
+    Promise.all([
+      fetch(`/api/macro/series/${seriesId}?period=${period}&units=${units}`).then(r=>r.json()),
+      fetch(`/api/macro/summary/${seriesId}?period=${period}`).then(r=>r.json()),
+    ]).then(([seriesResp, sumResp]) => {
+      const entry = {id:seriesId, name:seriesName, unit:seriesResp.info?.units_short||"", color:col, obs:seriesResp.observations||[], info:seriesResp.info};
+      if (replace) { setActiveSeries([entry]); setSummary(sumResp); }
+      else { setActiveSeries(prev => [...prev, entry]); if (!activeSeries.length) setSummary(sumResp); }
+      setChartLoading(false);
+    }).catch(() => setChartLoading(false));
   };
 
-  const tvBtn = (active, onClick, label) => (
-    <button onClick={onClick} style={{
-      fontFamily:"monospace",fontSize:10,fontWeight:active?700:400,
-      color:active?C.headingTxt:C.mut,
-      background:active?C.dim:"transparent",
-      border:"none",borderRadius:4,padding:"3px 9px",cursor:"pointer",
-    }}>{label}</button>
+  const removeSeries = (id) => {
+    setActiveSeries(prev => prev.filter(s => s.id !== id));
+    if (activeSeries.length <= 1) setSummary(null);
+  };
+
+  const doSearch = () => {
+    if (searchQ.length < 2) return;
+    setSearching(true);
+    fetch(`/api/macro/search?q=${encodeURIComponent(searchQ)}&limit=12`)
+      .then(r => r.json())
+      .then(d => { setSearchResults(d.results || []); setSearching(false); })
+      .catch(() => setSearching(false));
+  };
+
+  // ── Formatting helpers ──
+  const scoreColor = s => s >= 0.5 ? C.grn : s <= -0.5 ? C.red : C.amb;
+  const trendArrow = t => t === "Improving" ? "↑" : t === "Deteriorating" ? "↓" : "→";
+  const trendColor = t => t === "Improving" ? C.grn : t === "Deteriorating" ? C.red : C.amb;
+  const sevColor = s => s === "High" ? C.red : s === "Medium" ? C.amb : C.grn;
+  const dirColor = d => d === "positive" ? C.grn : d === "negative" ? C.red : C.amb;
+  const regimeColor = r => {
+    const map = {"Goldilocks":C.grn, "Late-Cycle Tightening":C.amb, "Disinflationary Slowdown":C.sky,
+      "Reflation":"#ff8a65", "Stagflation Risk":C.red, "Recession / Stress":C.red, "Mixed / Transitional":C.amb};
+    return map[r] || C.mut;
+  };
+
+  // Section components
+  const Section = ({accent, children}) => (
+    <div style={{borderRadius:14, border:`1.5px solid ${accent}30`, background:accent+"07", padding:"18px 20px"}}>
+      {children}
+    </div>
+  );
+  const SectionTitle = ({children, sub}) => (
+    <div style={{marginBottom:14}}>
+      <div style={mono(13, C.headingTxt, 700)}>{children}</div>
+      {sub && <div style={{...mono(9, C.mut), marginTop:3}}>{sub}</div>}
+    </div>
   );
 
-  const primarySeries = activeSeries[0];
-  const regimeMeta    = summary?.regime ? REGIME_META[summary.regime] : null;
-
-  // Subsample chart to max 400 points for performance
-  const displayData = useMemo(() => {
-    if (!chartData.length) return [];
-    const step = Math.max(1, Math.floor(chartData.length / 400));
-    return chartData.filter((_, i) => i % step === 0);
-  }, [chartData]);
-
-  // Y-axis domains per series
-  const yDomain0 = useMemo(() => {
-    const vals = (activeSeries[0]?.obs || []).map(o=>o.value).filter(v=>v!=null && isFinite(v));
-    if (!vals.length) return ["auto","auto"];
-    const mn=Math.min(...vals), mx=Math.max(...vals), pad=(mx-mn)*0.05||Math.abs(mn)*0.05||1;
-    return [mn-pad, mx+pad];
-  }, [activeSeries]);
-
-  const yDomain1 = useMemo(() => {
-    if (activeSeries.length < 2) return ["auto","auto"];
-    // Use min/max across ALL overlay series so they share a sensible left axis
-    const vals = activeSeries.slice(1).flatMap(s=>(s.obs||[]).map(o=>o.value)).filter(v=>v!=null && isFinite(v));
-    if (!vals.length) return ["auto","auto"];
-    const mn=Math.min(...vals), mx=Math.max(...vals), pad=(mx-mn)*0.05||Math.abs(mn)*0.05||1;
-    return [mn-pad, mx+pad];
-  }, [activeSeries]);
+  const snap = snapshot?.macro_snapshot || {};
+  const pillars = snapshot?.pillars || {};
+  const pillarOrder = ["growth","inflation","labor","policy","liquidity","credit","fiscal","global"];
 
   return (
-    <div style={{display:"flex",flexDirection:"column",gap:0,minHeight:"100vh"}}>
-      {/* ── Top header bar ─────────────────────────────────────────────── */}
-      <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:18,flexWrap:"wrap"}}>
-        <Database size={16} style={{color:C.sky,flexShrink:0}}/>
-        <span style={{...mono(14,C.headingTxt,700)}}>FRED Macro Intelligence</span>
-        <span style={{fontFamily:"monospace",fontSize:9,color:C.mut,
-          background:C.dim,borderRadius:4,padding:"2px 7px"}}>Federal Reserve Economic Data</span>
-        {/* Search */}
-        <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-          <div style={{position:"relative",display:"flex",alignItems:"center"}}>
-            <Search size={11} style={{position:"absolute",left:8,color:C.mut,pointerEvents:"none"}}/>
-            <input value={searchQ} onChange={e=>setSearchQ(e.target.value)}
-              placeholder="Search FRED series…"
-              style={{fontFamily:"monospace",fontSize:11,color:C.txt,background:C.dim,
-                border:`1px solid ${C.bdr}`,borderRadius:7,padding:"5px 10px 5px 26px",
-                width:220,outline:"none"}}/>
-            {searchQ && <button onClick={()=>{setSearchQ(""); setSearchResults([]);}}
-              style={{position:"absolute",right:6,background:"none",border:"none",cursor:"pointer",padding:2,color:C.mut}}>
-              <X size={10}/></button>}
-          </div>
-        </div>
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div>
+        <Lbl>MACRO</Lbl>
+        <div style={mono(10,C.mut)}>Macro regime engine — scoring, classification, risk, and market implications</div>
       </div>
 
-      {/* ── Macro narrative panel ───────────────────────────────────── */}
-      <MacroNarrativePanel/>
+      {/* Tab toggle: Snapshot vs Charts */}
+      <div style={{display:"flex",gap:8}}>
+        {["snapshot","charts"].map(s => (
+          <button key={s} onClick={()=>setActiveSection(s)}
+            style={{...mono(10, activeSection===s ? C.sky : C.mut, 600),
+              padding:"6px 16px", borderRadius:8,
+              border:`1px solid ${activeSection===s ? C.sky+"50" : C.bdr}`,
+              background: activeSection===s ? C.sky+"12" : "transparent",
+              cursor:"pointer", textTransform:"capitalize"}}>
+            {s === "snapshot" ? "Regime Dashboard" : "Chart Workspace"}
+          </button>
+        ))}
+      </div>
 
-      {/* ── Main layout: sidebar + chart ──────────────────────────────── */}
-      <div style={{display:"flex",gap:14,alignItems:"flex-start"}}>
+      {loading && <Card><div style={{...mono(11,C.mut),textAlign:"center",padding:"32px 0"}}>Loading macro snapshot...</div></Card>}
+      {err && <Card><div style={mono(11,C.red)}>Error: {err}</div></Card>}
 
-        {/* ── Left sidebar: catalog ────────────────────────────────────── */}
-        <div style={{width:230,flexShrink:0,background:C.surf,border:`1px solid ${C.bdr}`,
-          borderRadius:12,overflow:"hidden",maxHeight:"calc(100vh - 120px)",overflowY:"auto"}}>
-          <div style={{padding:"10px 12px 6px",fontFamily:"monospace",fontSize:9,color:C.mut,
-            letterSpacing:".08em",borderBottom:`1px solid ${C.bdr}`}}>
-            SERIES CATALOG
-          </div>
-          {Object.entries(catalog).map(([cat, series]) => (
-            <div key={cat}>
-              <div onClick={()=>setOpenCats(p=>({...p,[cat]:!p[cat]}))}
-                style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-                  padding:"7px 12px",cursor:"pointer",userSelect:"none",
-                  background:openCats[cat]?C.dim:"transparent",
-                  transition:"background .1s"}}
-                onMouseEnter={e=>e.currentTarget.style.background=C.dim}
-                onMouseLeave={e=>e.currentTarget.style.background=openCats[cat]?C.dim:"transparent"}>
-                <span style={{fontFamily:"monospace",fontSize:10,color:C.txt,fontWeight:600}}>{cat}</span>
-                {openCats[cat]
-                  ? <ChevronUp size={12} style={{color:C.mut,flexShrink:0}}/>
-                  : <ChevronDown size={12} style={{color:C.mut,flexShrink:0}}/>}
-              </div>
-              {openCats[cat] && (series||[]).map(s => {
-                const isActive = activeSeries.some(a=>a.id===s.id);
-                const isFirst  = activeSeries[0]?.id === s.id;
-                return (
-                  <div key={s.id}
-                    style={{display:"flex",alignItems:"center",gap:6,padding:"5px 12px 5px 20px",
-                      cursor:"pointer",background:isFirst?"#40c4ff14":isActive?"#40c4ff08":"transparent",
-                      transition:"background .1s",borderLeft:isFirst?`2px solid #40c4ff`:isActive?`2px solid #40c4ff44`:"2px solid transparent"}}
-                    onMouseEnter={e=>{ if(!isFirst) e.currentTarget.style.background=C.dim; }}
-                    onMouseLeave={e=>{ e.currentTarget.style.background=isFirst?"#40c4ff14":isActive?"#40c4ff08":"transparent"; }}>
-                    <div style={{flex:1,minWidth:0}} onClick={()=>loadSeries(s.id, s.name, "#40c4ff", true)}>
-                      <div style={{fontFamily:"monospace",fontSize:10,color:isFirst?C.sky:C.txt,
-                        fontWeight:isFirst?700:400,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.name}</div>
-                      <div style={{fontFamily:"monospace",fontSize:8,color:C.mut}}>{s.id} · {s.freq}</div>
-                    </div>
-                    {isFirst
-                      ? <div style={{width:6,height:6,borderRadius:"50%",background:"#40c4ff",flexShrink:0}}/>
-                      : isActive
-                        ? <button onClick={e=>{e.stopPropagation(); setActiveSeries(p=>p.filter(a=>a.id!==s.id));}}
-                            title="Remove overlay"
-                            style={{background:"none",border:"none",cursor:"pointer",padding:1,color:C.red,flexShrink:0}}>
-                            <X size={11}/>
-                          </button>
-                        : <button onClick={e=>{e.stopPropagation(); loadSeries(s.id,s.name,MACRO_OVERLAY_COLORS[activeSeries.length%MACRO_OVERLAY_COLORS.length],false);}}
-                            title="Add as overlay"
-                            style={{background:"none",border:"none",cursor:"pointer",padding:"1px 3px",
-                              color:C.grn,flexShrink:0,fontFamily:"monospace",fontSize:12,fontWeight:700,lineHeight:1}}>
-                            +
-                          </button>
-                    }
-                  </div>
-                );
-              })}
+      {/* ═══════════════════════════════════════════════════════
+          REGIME DASHBOARD
+         ═══════════════════════════════════════════════════════ */}
+      {activeSection === "snapshot" && snapshot && (<>
+
+        {/* ── 1. MACRO SNAPSHOT ── */}
+        <Section accent={regimeColor(snap.regime)}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12,marginBottom:16}}>
+            <div>
+              <div style={{...mono(9, C.mut, 700), letterSpacing:"0.1em", marginBottom:6}}>MACRO REGIME</div>
+              <div style={{...mono(22, regimeColor(snap.regime), 800)}}>{snap.regime || "—"}</div>
             </div>
-          ))}
-        </div>
+            <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>COMPOSITE</div>
+                <div style={mono(20, scoreColor(snap.composite_score/25), 800)}>{snap.composite_score != null ? (snap.composite_score > 0 ? "+" : "") + snap.composite_score : "—"}</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>TREND</div>
+                <div style={mono(16, trendColor(snap.trend), 700)}>{trendArrow(snap.trend)} {snap.trend || "—"}</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>CONFIDENCE</div>
+                <div style={mono(14, snap.confidence === "High" ? C.grn : snap.confidence === "Moderate" ? C.amb : C.mut, 700)}>{snap.confidence || "—"}</div>
+              </div>
+            </div>
+          </div>
 
-        {/* ── Right: chart + summary ───────────────────────────────────── */}
-        <div style={{flex:1,minWidth:0,display:"flex",flexDirection:"column",gap:12}}>
-
-          {/* Active series chips + ticker input */}
-          <div style={{display:"flex",flexWrap:"wrap",gap:6,alignItems:"center"}}>
-            {activeSeries.map((s,i) => (
-              <div key={s.id} style={{display:"flex",alignItems:"center",gap:5,
-                background:s.color+"20",border:`1px solid ${s.color}44`,
-                borderRadius:20,padding:"3px 10px"}}>
-                <div style={{width:7,height:7,borderRadius:"50%",background:s.color,flexShrink:0}}/>
-                <span style={{fontFamily:"monospace",fontSize:10,color:s.color,fontWeight:700}}>{s.id}</span>
-                <span style={{fontFamily:"monospace",fontSize:9,color:C.mut,maxWidth:180,
-                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{s.name}</span>
-                {i > 0 && (
-                  <button onClick={()=>setActiveSeries(p=>p.filter((_,j)=>j!==i))}
-                    style={{background:"none",border:"none",cursor:"pointer",padding:1,color:C.mut,display:"flex"}}>
-                    <X size={10}/>
-                  </button>
-                )}
+          {/* Summary bullets */}
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {(snap.summary_bullets || []).map((b,i) => (
+              <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                <span style={mono(10, C.mut)}>•</span>
+                <span style={mono(10, C.txt)}>{b}</span>
               </div>
             ))}
-            {/* Stock ticker overlay input */}
-            <div style={{display:"flex",gap:3,alignItems:"center"}}>
-              <input value={tickerInput} onChange={e=>setTickerInput(e.target.value.toUpperCase())}
-                onKeyDown={e=>{ if(e.key==="Enter"){ const v=tickerInput.trim().toUpperCase(); if(v){loadTicker(v);setTickerInput("");} } }}
-                placeholder="+ Stock ticker"
-                style={{fontFamily:"monospace",fontSize:10,color:C.txt,background:C.dim,
-                  border:`1px solid ${C.bdr}`,borderRadius:14,padding:"3px 10px",width:110,outline:"none"}}/>
-              <button onClick={()=>{ const v=tickerInput.trim().toUpperCase(); if(v){loadTicker(v);setTickerInput("");} }}
-                disabled={loading}
-                style={{fontFamily:"monospace",fontSize:11,fontWeight:700,
-                  color:loading?C.mut:C.grn,background:"none",
-                  border:`1px solid ${loading?C.bdr:C.grn+"44"}`,borderRadius:10,
-                  padding:"2px 8px",cursor:loading?"not-allowed":"pointer",
-                  lineHeight:1,opacity:loading?0.6:1,transition:"all .15s"}}>
-                {loading ? "…" : "↵"}
-              </button>
-            </div>
-            {tickerError && <span style={{fontFamily:"monospace",fontSize:9,color:C.red}}>{tickerError}</span>}
           </div>
-
-          {/* Toolbar: period + units */}
-          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",
-            background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:10,padding:"6px 10px"}}>
-            <div style={{display:"flex",gap:1}}>
-              {MACRO_PERIODS.map(({l,v})=><span key={v}>{tvBtn(period===v,()=>setPeriod(v),l)}</span>)}
+          {snap.recent_change_summary && (
+            <div style={{marginTop:10, padding:"8px 12px", borderRadius:8, background:C.dim}}>
+              <span style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>RECENT: </span>
+              <span style={mono(9, C.txt)}>{snap.recent_change_summary}</span>
             </div>
-            <div style={{width:1,height:16,background:C.bdr}}/>
-            <div style={{display:"flex",gap:1}}>
-              {MACRO_UNITS.map(({l,v})=><span key={v}>{tvBtn(units===v,()=>setUnits(v),l)}</span>)}
-            </div>
-            {primarySeries && (
-              <>
-                <div style={{width:1,height:16,background:C.bdr}}/>
-                <span style={{fontFamily:"monospace",fontSize:9,color:C.mut}}>
-                  {primarySeries.info?.frequency} · {primarySeries.info?.seasonal_adjustment_short}
-                  {primarySeries.info?.last_updated && ` · Updated ${primarySeries.info.last_updated.slice(0,10)}`}
-                </span>
-              </>
-            )}
-          </div>
+          )}
+        </Section>
 
-          {/* Chart */}
-          <div style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:12,padding:"14px 4px 8px 4px"}}>
-            {!activeSeries.length ? (
-              <div style={{height:320,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:10}}>
-                <BookOpen size={28} style={{color:C.mut}}/>
-                <span style={{fontFamily:"monospace",fontSize:12,color:C.mut}}>Select a series from the catalog</span>
-                <span style={{fontFamily:"monospace",fontSize:10,color:C.mut,opacity:.6}}>or search for any FRED series above</span>
-              </div>
-            ) : (
-              <>
-                {/* Chart header */}
-                <div style={{padding:"0 12px 10px",display:"flex",alignItems:"flex-start",justifyContent:"space-between",flexWrap:"wrap",gap:8}}>
-                  <div>
-                    <div style={{fontFamily:"monospace",fontSize:13,color:C.headingTxt,fontWeight:700}}>
-                      {primarySeries?.name || ""}
-                    </div>
-                    <div style={{fontFamily:"monospace",fontSize:9,color:C.mut,marginTop:2}}>
-                      {primarySeries?.id} · FRED · {units==="lin"?"Level":units==="pc1"?"YoY %":"MoM %"}
-                    </div>
+        {/* ── 2. PILLAR SCORECARDS ── */}
+        <div>
+          <div style={{...mono(11, C.headingTxt, 700), marginBottom:10}}>PILLAR SCORES</div>
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10}}>
+            {pillarOrder.map(p => {
+              const d = pillars[p] || {};
+              const sc = scoreColor(d.score);
+              return (
+                <div key={p} style={{padding:"14px 16px", borderRadius:12, background:C.surf, border:`1px solid ${sc}30`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <div style={{...mono(9, C.mut, 700), letterSpacing:"0.1em", textTransform:"uppercase"}}>{p}</div>
+                    <span style={mono(12, trendColor(d.trend), 700)}>{trendArrow(d.trend)}</span>
                   </div>
-                  <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:2}}>
-                    <div style={{fontFamily:"monospace",fontSize:20,fontWeight:800,
-                      color:regimeMeta?.color || C.headingTxt}}>
-                      {fmtVal(lastVal, primarySeries?.unit)}
+                  <div style={mono(22, sc, 800)}>{d.score != null ? (d.score > 0 ? "+" : "") + d.score.toFixed(1) : "—"}</div>
+                  <div style={{...mono(8, C.mut), marginTop:4, lineHeight:1.5}}>{d.interpretation || ""}</div>
+                  {/* Drivers */}
+                  {d.drivers && d.drivers.length > 0 && d.drivers[0].value != null && (
+                    <div style={{marginTop:8, borderTop:`1px solid ${C.bdr}`, paddingTop:6}}>
+                      {d.drivers.slice(0,3).map((dr,i) => (
+                        <div key={i} style={{display:"flex",justifyContent:"space-between",padding:"2px 0"}}>
+                          <span style={mono(8, C.mut)}>{dr.label}</span>
+                          <span style={mono(9, dirColor(dr.direction), 600)}>{dr.value}{dr.unit ? ` ${dr.unit}` : ""}</span>
+                        </div>
+                      ))}
                     </div>
-                    {prevVal != null && lastVal != null && (
-                      <div style={{fontFamily:"monospace",fontSize:10,
-                        color:(lastVal-prevVal)>=0 ? C.grn : C.red}}>
-                        {(lastVal-prevVal)>=0?"+":""}{(lastVal-prevVal).toFixed(3)} · {lastDate}
-                      </div>
-                    )}
-                    {regimeMeta && (
-                      <div style={{fontFamily:"monospace",fontSize:9,fontWeight:700,
-                        color:regimeMeta.color,background:regimeMeta.color+"18",
-                        borderRadius:4,padding:"2px 7px"}}>
-                        {regimeMeta.label}
-                      </div>
-                    )}
-                  </div>
+                  )}
                 </div>
-
-                {/* Recharts */}
-                <ChartPanel title={primarySeries?.name || "Macro Chart"} defaultHeight={300}>
-                {(chartH) => (
-                <ResponsiveContainer width="100%" height={chartH}>
-                  <ComposedChart data={displayData}
-                    margin={{top:10,right:74,bottom:20,left:activeSeries.length>1?74:0}}>
-                    <CartesianGrid strokeDasharray="2 4" stroke={C.bdr} vertical={false}/>
-                    <XAxis dataKey="date" type="category"
-                      tick={{fill:C.mut,fontSize:9,fontFamily:"monospace"}}
-                      tickLine={false} axisLine={{stroke:C.bdr}}
-                      interval="preserveStartEnd" height={22}/>
-                    <YAxis yAxisId="y0" orientation="right" width={60}
-                      domain={yDomain0} tickFormatter={v=>fmtVal(v,activeSeries[0]?.unit)}
-                      tick={{fill:C.sky,fontSize:8,fontFamily:"monospace"}} tickLine={false} axisLine={false}
-                      label={{value:`${activeSeries[0]?.id||""} (${activeSeries[0]?.unit||""})`,
-                        angle:90,position:"insideRight",offset:14,
-                        style:{fontFamily:"monospace",fontSize:8,fill:C.sky,textAnchor:"middle"}}}/>
-                    {activeSeries.length > 1 && (
-                      <YAxis yAxisId="y1" orientation="left" width={60}
-                        domain={yDomain1} tickFormatter={v=>fmtVal(v,activeSeries[1]?.unit)}
-                        tick={{fill:MACRO_OVERLAY_COLORS[1%MACRO_OVERLAY_COLORS.length],fontSize:8,fontFamily:"monospace"}}
-                        tickLine={false} axisLine={false}
-                        label={{value:`${activeSeries[1]?.id||""} (${activeSeries[1]?.unit||""})`,
-                          angle:-90,position:"insideLeft",offset:14,
-                          style:{fontFamily:"monospace",fontSize:8,
-                            fill:MACRO_OVERLAY_COLORS[1%MACRO_OVERLAY_COLORS.length],textAnchor:"middle"}}}/>
-                    )}
-                    <Tooltip
-                      contentStyle={{background:C.surf,border:`1px solid ${C.bdr}`,
-                        borderRadius:8,fontFamily:"monospace",fontSize:10,padding:"8px 12px"}}
-                      labelStyle={{color:C.mut,marginBottom:4}}
-                      formatter={(val,name)=>{
-                        const idx = parseInt(name.replace("v",""));
-                        return [fmtVal(val,activeSeries[idx]?.unit), activeSeries[idx]?.id||name];
-                      }}/>
-                    {/* Primary area */}
-                    <Area yAxisId="y0" type="monotone" dataKey="v0"
-                      stroke="#40c4ff" strokeWidth={1.5}
-                      fill="#40c4ff" fillOpacity={0.07} dot={false} connectNulls/>
-                    {/* Overlay lines — all on left axis (y1) for clear dual-scale comparison */}
-                    {activeSeries.slice(1).map((s,i) => (
-                      <Line key={s.id} yAxisId="y1" type="monotone"
-                        dataKey={`v${i+1}`} stroke={s.color||MACRO_OVERLAY_COLORS[(i+1)%MACRO_OVERLAY_COLORS.length]}
-                        strokeWidth={1.5} dot={false} connectNulls
-                        strokeDasharray={s.type==="ticker"?"":""}/>
-                    ))}
-                    {/* Zero reference for YoY/MoM */}
-                    {units !== "lin" && <ReferenceLine yAxisId="y0" y={0} stroke={C.bdr} strokeDasharray="3 3"/>}
-                  </ComposedChart>
-                </ResponsiveContainer>
-                )}
-                </ChartPanel>
-              </>
-            )}
+              );
+            })}
           </div>
+        </div>
 
-          {/* ── Smart Summary ─────────────────────────────────────────────── */}
-          {summary && primarySeries && (
-            <div style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:12,overflow:"hidden"}}>
-              {/* Summary header */}
-              <div style={{padding:"11px 16px",borderBottom:`1px solid ${C.bdr}`,
-                display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-                <BookOpen size={13} style={{color:C.sky}}/>
-                <span style={{fontFamily:"monospace",fontSize:11,color:C.headingTxt,fontWeight:700}}>
-                  Economic Analysis · {primarySeries.id}
-                </span>
-                {summary.percentile_5y != null && (
-                  <span style={{fontFamily:"monospace",fontSize:9,color:C.mut,marginLeft:"auto"}}>
-                    5Y Percentile: <span style={{
-                      color:summary.percentile_5y>75?C.red:summary.percentile_5y<25?C.grn:C.amb,
-                      fontWeight:700}}>{ordinal(summary.percentile_5y)}</span>
-                  </span>
-                )}
+        {/* ── 3. REGIME ENGINE ── */}
+        <Section accent={regimeColor(snap.regime)}>
+          <SectionTitle sub="Why this regime was selected">REGIME CLASSIFICATION</SectionTitle>
+          <div style={{display:"flex",gap:20,flexWrap:"wrap",marginBottom:14}}>
+            <div>
+              <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>CURRENT REGIME</div>
+              <div style={{...mono(18, regimeColor(snap.regime), 800), marginTop:4}}>{snap.regime}</div>
+            </div>
+            <div style={{flex:1, minWidth:200}}>
+              <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em", marginBottom:6}}>DRIVING PILLARS</div>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                {pillarOrder.filter(p => Math.abs(pillars[p]?.score || 0) >= 0.5).map(p => (
+                  <Tag key={p} color={scoreColor(pillars[p]?.score)}>{p.toUpperCase()} {pillars[p]?.score > 0 ? "+" : ""}{pillars[p]?.score?.toFixed(1)}</Tag>
+                ))}
               </div>
+            </div>
+          </div>
+        </Section>
 
-              <div style={{padding:"14px 16px",display:"flex",flexDirection:"column",gap:14}}>
-                {/* Stat row */}
-                <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
-                  {[
-                    ["Current", fmtVal(summary.current_value, primarySeries.unit)],
-                    ["1-Month Δ",  summary.change_1m  != null ? `${summary.change_1m>0?"+":""}${summary.change_1m.toFixed(2)}%`  : "—"],
-                    ["3-Month Δ",  summary.change_3m  != null ? `${summary.change_3m>0?"+":""}${summary.change_3m.toFixed(2)}%`  : "—"],
-                    ["12-Month Δ", summary.change_1y  != null ? `${summary.change_1y>0?"+":""}${summary.change_1y.toFixed(2)}%`  : "—"],
-                    ["Trend",      summary.trend_label || "—"],
-                  ].map(([k,v]) => (
-                    <div key={k} style={{display:"flex",flexDirection:"column",gap:2}}>
-                      <div style={{fontFamily:"monospace",fontSize:9,color:C.mut,letterSpacing:".06em"}}>{k.toUpperCase()}</div>
-                      <div style={{fontFamily:"monospace",fontSize:12,fontWeight:700,
-                        color:k==="Trend"?C.txt:k==="Current"?regimeMeta?.color||C.headingTxt:
-                          (v.startsWith("+")?C.grn:v.startsWith("-")?C.red:C.txt)}}>{v}</div>
+        {/* ── 5. NARRATIVE ENGINE ── */}
+        {snapshot.narrative && (
+          <Section accent={C.pur}>
+            <SectionTitle sub="Deterministic macro interpretation">NARRATIVE</SectionTitle>
+            <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : "1fr 1fr", gap:14, marginBottom:16}}>
+              <div style={{padding:"12px 14px", borderRadius:10, background:C.grn+"08", border:`1px solid ${C.grn}25`}}>
+                <div style={{...mono(9, C.grn, 700), letterSpacing:"0.1em", marginBottom:8}}>WHAT IS IMPROVING</div>
+                {(snapshot.narrative.improving || []).map((item,i) => (
+                  <div key={i} style={{...mono(9, C.txt), padding:"3px 0"}}>+ {item}</div>
+                ))}
+              </div>
+              <div style={{padding:"12px 14px", borderRadius:10, background:C.red+"08", border:`1px solid ${C.red}25`}}>
+                <div style={{...mono(9, C.red, 700), letterSpacing:"0.1em", marginBottom:8}}>WHAT IS DETERIORATING</div>
+                {(snapshot.narrative.deteriorating || []).map((item,i) => (
+                  <div key={i} style={{...mono(9, C.txt), padding:"3px 0"}}>- {item}</div>
+                ))}
+              </div>
+            </div>
+
+            {/* Market Implications */}
+            {snapshot.market_implications && (
+              <div>
+                <div style={{...mono(9, C.mut, 700), letterSpacing:"0.1em", marginBottom:8}}>MARKET IMPLICATIONS</div>
+                <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : "repeat(5,1fr)", gap:8}}>
+                  {Object.entries(snapshot.market_implications).map(([asset, text]) => (
+                    <div key={asset} style={{padding:"10px 12px", borderRadius:8, background:C.dim}}>
+                      <div style={{...mono(8, C.sky, 700), letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:4}}>{asset}</div>
+                      <div style={mono(9, C.txt)}>{text}</div>
                     </div>
                   ))}
                 </div>
-
-                {/* Headline */}
-                <div style={{fontFamily:"monospace",fontSize:11,color:C.headingTxt,
-                  lineHeight:1.65,padding:"10px 12px",background:C.dim,borderRadius:8,
-                  borderLeft:`3px solid ${regimeMeta?.color||C.sky}`}}>
-                  {summary.headline}
-                </div>
-
-                {/* Body + Causes side by side */}
-                <div style={{display:"flex",gap:14,flexWrap:"wrap"}}>
-                  {/* Interpretation */}
-                  {summary.body?.length > 0 && (
-                    <div style={{flex:1,minWidth:240}}>
-                      <div style={{fontFamily:"monospace",fontSize:9,color:C.mut,
-                        letterSpacing:".06em",marginBottom:6}}>INTERPRETATION</div>
-                      {summary.body.map((b,i) => (
-                        <div key={i} style={{display:"flex",gap:8,marginBottom:7,alignItems:"flex-start"}}>
-                          <div style={{width:5,height:5,borderRadius:"50%",background:C.sky,
-                            flexShrink:0,marginTop:4}}/>
-                          <div style={{fontFamily:"monospace",fontSize:10,color:C.txt,lineHeight:1.6}}>{b}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {/* Causes */}
-                  {summary.causes?.length > 0 && (
-                    <div style={{flex:1,minWidth:240}}>
-                      <div style={{fontFamily:"monospace",fontSize:9,color:C.mut,
-                        letterSpacing:".06em",marginBottom:6}}>POTENTIAL CAUSES</div>
-                      {summary.causes.map((c,i) => (
-                        <div key={i} style={{display:"flex",gap:8,marginBottom:7,alignItems:"flex-start"}}>
-                          <div style={{width:5,height:5,borderRadius:"50%",background:C.amb,
-                            flexShrink:0,marginTop:4}}/>
-                          <div style={{fontFamily:"monospace",fontSize:10,color:C.txt,lineHeight:1.6}}>{c}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Watch */}
-                {summary.watch && (
-                  <div style={{display:"flex",gap:10,alignItems:"flex-start",
-                    padding:"9px 12px",background:C.dim,borderRadius:8,
-                    border:`1px solid ${C.bdr}`}}>
-                    <Eye size={12} style={{color:C.pur,flexShrink:0,marginTop:1}}/>
-                    <div>
-                      <div style={{fontFamily:"monospace",fontSize:9,color:C.pur,
-                        fontWeight:700,marginBottom:3,letterSpacing:".06em"}}>WATCH NEXT</div>
-                      <div style={{fontFamily:"monospace",fontSize:10,color:C.txt,lineHeight:1.6}}>
-                        {summary.watch}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Series notes */}
-                {primarySeries.info?.notes && (
-                  <div style={{fontFamily:"monospace",fontSize:9,color:C.mut,
-                    lineHeight:1.7,borderTop:`1px solid ${C.bdr}`,paddingTop:10}}>
-                    <span style={{color:C.mut,fontWeight:700}}>FRED NOTE: </span>
-                    {primarySeries.info.notes.slice(0,300)}{primarySeries.info.notes.length>300?"…":""}
-                  </div>
-                )}
               </div>
-            </div>
-          )}
+            )}
+          </Section>
+        )}
 
-          {/* ── Macro Regime Synthesis ── */}
-          {summary && primarySeries && (() => {
-            const sid    = (primarySeries.id   || "").toUpperCase();
-            const sname  = (primarySeries.name || "").toLowerCase();
-            const curVal = summary.current_value ?? lastVal ?? 0;
-            const pct5y  = summary.percentile_5y ?? 50;
-            const ch1m   = summary.change_1m  ?? 0;
-            const ch3m   = summary.change_3m  ?? 0;
-            const ch1y   = summary.change_1y  ?? 0;
-            const regime = summary.regime     || "normal";
-
-            // ── Series classification ──────────────────────────────────────
-            const isYieldCurve = /T10Y2Y|T10Y3M|T5Y5Y/.test(sid);
-            const isInflation  = /CPI|PCE|PPI|T5YIFR|T\dYIFR|MICH/.test(sid) || sname.includes("infla") || sname.includes("price index");
-            const isFedRates   = /FEDFUNDS|DFF|DFED/.test(sid);
-            const isTreasury   = /^GS\d|^TB\d/.test(sid);
-            const isLabor      = /UNRATE|U6RATE|PAYEMS|ICSA|CIVPART|JTSJOL/.test(sid);
-            const isGDP        = /^GDP|GDPC1|GNP|NROU|A191RL/.test(sid);
-            const isCredit     = /BAML|BAMLEM|AAAFRBSF/.test(sid);
-            const isMoney      = /^M[12]SL|WALCL|WRESBAL|AMBSL/.test(sid);
-            const isHousing    = /HOUST|CSUSHI|MORTGAGE/.test(sid);
-
-            // ── Momentum signals ──────────────────────────────────────────
-            const shortUp  = ch1m > 0;
-            const longUp   = ch1y > 0;
-            const pivoting = shortUp !== longUp && Math.abs(ch1m) > 0.01;
-            const accel    = shortUp  && ch3m > 0  && longUp;
-            const decel    = !shortUp && ch3m <= 0 && !longUp;
-            const momLabel = accel                       ? "ACCELERATING"
-                           : decel                       ? "DECELERATING"
-                           : pivoting && !shortUp        ? "ROLLING OVER"
-                           : pivoting &&  shortUp        ? "BOTTOMING"
-                           : "STABLE";
-
-            // ── Per-series verdict + implication ─────────────────────────
-            let regimePhase, bc, verdict, synthesis, implication;
-
-            if (isYieldCurve) {
-              const inv = curVal < 0;
-              bc = inv ? C.red : pct5y < 30 ? C.amb : C.grn;
-              verdict = inv ? (ch3m > 0 ? "INVERSION EASING" : "INVERTED — RECESSION RISK")
-                           : (pct5y < 30 ? "FLAT — LATE CYCLE" : "STEEPENING");
-              regimePhase = inv ? "Late Cycle" : ch3m > 0 ? "Transition / Early Recovery" : "Mid Cycle";
-              synthesis = `10Y–2Y spread ${curVal >= 0 ? "+" : ""}${curVal?.toFixed(0) ?? "?"}bp · ${Math.round(pct5y)}th percentile vs 5Y. 3M change: ${ch3m > 0 ? "widening +" : "narrowing "}${Math.abs(ch3m).toFixed(0)}bp. 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(0)}bp.`;
-              implication = inv
-                ? `Yield curve inversion has historically preceded recessions by 6–18 months. Banking net-interest margins compress and credit conditions tighten. ${ch3m > 0 ? "Current re-steepening may signal an approaching Fed pivot — historically, curve normalisation often coincides with or precedes the recession onset rather than averting it." : "Sustained inversion elevates risk of a credit shock or liquidity event."} Defensives, short-duration fixed income, and cash are favoured until the curve normalises.`
-                : `Positive and ${ch3m > 0 ? "widening" : "stable"} spread reflects improving growth expectations. ${pct5y > 60 ? "Elevated spread suggests markets are pricing reflation — equities, cyclicals, and commodities tend to benefit in this phase." : "Moderate spread level indicates cautious optimism; balanced positioning across growth and defensive sectors is appropriate."}`;
-            } else if (isInflation) {
-              const high = curVal > 3.0 || regime === "elevated";
-              const low  = curVal < 2.0 || regime === "low";
-              bc = high ? C.red : low ? C.sky : C.grn;
-              verdict = high ? (decel ? "ELEVATED — DECELERATING" : "ELEVATED — PERSISTENT")
-                       : low  ? (accel ? "LOW — RE-ACCELERATING"  : "BELOW TARGET")
-                       : "NEAR TARGET";
-              regimePhase = high ? "Inflationary Cycle" : low ? "Disinflationary" : "Stable Inflation";
-              synthesis = `${primarySeries.name}: ${curVal?.toFixed(2)}${primarySeries.unit?.includes("%") ? "%" : ""} — ${Math.round(pct5y)}th percentile vs 5Y. 1M: ${ch1m >= 0 ? "+" : ""}${ch1m?.toFixed(2)}% · 3M: ${ch3m >= 0 ? "+" : ""}${ch3m?.toFixed(2)}% · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. Momentum: ${momLabel}.`;
-              implication = high && !decel
-                ? `Persistently elevated inflation constrains Fed easing. Real rates likely remain positive — headwind for long-duration growth equities and rate-sensitive sectors (REITs, utilities). Energy, materials, and TIPS hedges remain relevant. Watch core vs headline divergence for stickiness signals.`
-                : high && decel
-                ? `Inflation decelerating from elevated levels — disinflation in progress. If the trend holds, a Fed pivot becomes increasingly probable. Early-disinflation phases have historically been broadly positive for equities before the curve normalises. Reduce inflation hedges; rotate toward growth on confirmation.`
-                : low
-                ? `Below-target inflation gives the Fed room to ease or hold accommodation. Reflationary policy is supportive of equities and growth assets. Key risk: premature tightening into a low-inflation environment could trigger demand shock.`
-                : `Inflation near target — neutral backdrop. Policy flexibility is maintained. Focus on earnings growth and sector rotation rather than inflation-regime positioning.`;
-            } else if (isLabor) {
-              const isUnemp    = /UNRATE|U6RATE/.test(sid);
-              const weakLabor  = isUnemp ? curVal > 5.0 : decel;
-              const strongLabor= isUnemp ? curVal < 4.0 : accel;
-              bc = weakLabor ? C.red : strongLabor ? C.grn : C.amb;
-              verdict = isUnemp
-                ? (weakLabor ? "LABOR SOFTENING" : strongLabor ? "TIGHT LABOR MARKET" : "LABOR NORMALISING")
-                : (decel ? "LABOR WEAKENING" : accel ? "LABOR STRENGTHENING" : "LABOR STABLE");
-              regimePhase = weakLabor ? "Contraction / Late Cycle" : strongLabor ? "Expansion / Full Employment" : "Mid Cycle";
-              synthesis = `${primarySeries.name}: ${curVal?.toFixed(1)}${primarySeries.unit?.includes("%") ? "%" : ""}. 5Y pct: ${Math.round(pct5y)}th. 1M: ${ch1m >= 0 ? "+" : ""}${ch1m?.toFixed(2)} · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}. Trend: ${momLabel}.`;
-              implication = weakLabor && isUnemp
-                ? `Rising unemployment signals demand destruction and late-cycle deterioration. Historically associated with Fed easing cycles and defensive equity leadership. Reduce cyclical exposure; add consumer staples, utilities, and high-quality fixed income.`
-                : strongLabor && isUnemp
-                ? `Tight labor market supports consumer spending but may keep wage inflation elevated — a primary driver of services CPI. The Fed is likely to maintain a restrictive stance. Cyclicals and financials outperform in this phase; watch for wage-driven margin compression in labour-intensive sectors.`
-                : `Labor market in transition. Monitor JOLTS (JTSJOL) and initial claims (ICSA) as higher-frequency leading indicators for trend confirmation before repositioning.`;
-            } else if (isFedRates || isTreasury) {
-              const high = curVal > 4.0 || regime === "elevated";
-              const low  = curVal < 1.5 || regime === "low";
-              bc = high ? C.red : low ? C.grn : C.amb;
-              verdict = high ? (decel ? "RATES PEAKING" : "RESTRICTIVE REGIME")
-                       : low  ? (accel ? "RATES LIFTING OFF" : "ACCOMMODATIVE REGIME")
-                       : "NEUTRAL RATES";
-              regimePhase = high ? "Tightening Cycle" : low ? "Easing / ZIRP" : "Rate Normalisation";
-              synthesis = `${primarySeries.id} at ${curVal?.toFixed(2)}% — ${Math.round(pct5y)}th percentile vs 5Y. 1M: ${ch1m >= 0 ? "+" : ""}${ch1m?.toFixed(2)}% · 3M: ${ch3m >= 0 ? "+" : ""}${ch3m?.toFixed(2)}% · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. ${momLabel}.`;
-              implication = high && !decel
-                ? `Restrictive rate environment compresses equity multiples and raises corporate refinancing risk. Short-duration bonds, value equities, and financials (NIM expansion) tend to outperform. Watch credit spreads and regional bank stress as leading indicators of policy overshoot.`
-                : high && decel
-                ? `Rates appear to be approaching a peak — historically a positive inflection for risk assets. First cut cycles have typically triggered broad equity rallies led by growth/tech. Consider locking in higher bond yields before they decline.`
-                : low
-                ? `Accommodative rate environment supports risk assets and long-duration growth equities. Low hurdle rates drive multiple expansion. Monitor for normalisation signals which could trigger repricing across duration-sensitive assets.`
-                : `Rates at neutral — balanced environment. Fundamentals and earnings growth drive returns more than rate-regime directional bets in this phase.`;
-            } else if (isGDP) {
-              const contracting = curVal < 0;
-              bc = contracting ? C.red : curVal < 1.5 ? C.amb : C.grn;
-              verdict = contracting ? "CONTRACTION" : curVal < 1.5 ? "BELOW TREND" : curVal > 3 ? "ABOVE TREND" : "EXPANSION";
-              regimePhase = contracting ? "Recession" : curVal < 1.5 ? "Late Cycle Slowdown" : "Expansion";
-              synthesis = `${primarySeries.name}: ${curVal?.toFixed(2)}${primarySeries.unit?.includes("%") ? "%" : ""}. 5Y pct: ${Math.round(pct5y)}th. 12M Δ: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. ${momLabel}.`;
-              implication = contracting
-                ? `Negative growth print signals recessionary conditions. Historically associated with significant equity bear markets. Prioritise capital preservation and defensive assets. Watch for two consecutive quarters to confirm a technical recession.`
-                : curVal > 3
-                ? `Above-trend growth supports earnings expansion and cyclical outperformance. Risk appetite is elevated — equities, credit, and commodities can all benefit. Monitor for overheating signals (inflation, tight labour) that could force Fed action.`
-                : `Moderate growth environment. Quality and earnings consistency favoured over speculative names. Sector rotation toward late-cycle beneficiaries (energy, industrials, materials) as growth peak approaches.`;
-            } else if (isCredit) {
-              const wide  = regime === "elevated";
-              const tight = regime === "low";
-              bc = wide ? C.red : tight ? C.grn : C.amb;
-              verdict = wide ? "STRESS — SPREADS WIDE" : tight ? "COMPLACENCY RISK" : "SPREADS NORMAL";
-              regimePhase = wide ? "Credit Contraction / Risk-Off" : tight ? "Credit Expansion / Risk-On" : "Mid Credit Cycle";
-              synthesis = `${primarySeries.name}: ${fmtVal(curVal, primarySeries.unit)} — ${Math.round(pct5y)}th percentile. 3M: ${ch3m >= 0 ? "+" : ""}${ch3m?.toFixed(2)}% · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. ${momLabel}.`;
-              implication = wide
-                ? `Elevated credit spreads signal risk aversion and potential liquidity stress. Leveraged buybacks and M&A slow materially. Avoid HY; reduce equity beta. Investment-grade and sovereigns preferred. Watch for defaults or downgrades in leveraged sectors as the cycle progresses.`
-                : tight
-                ? `Tight spreads reflect strong risk appetite but leave limited margin of safety. Complacency risk is elevated — small shocks can cause outsized moves. Consider reducing HY allocations and adding credit protection as an asymmetric hedge.`
-                : `Spreads within historical norms — balanced risk appetite. Credit conditions broadly supportive of equity valuations. Monitor IG vs HY divergence as an early warning of credit cycle turning.`;
-            } else if (isMoney) {
-              bc = accel ? C.grn : decel ? C.red : C.amb;
-              verdict = accel ? "EXPANDING" : decel ? "CONTRACTING" : "STABLE";
-              regimePhase = accel ? "Liquidity Expansion" : decel ? "Liquidity Withdrawal (QT)" : "Neutral Liquidity";
-              synthesis = `${primarySeries.name}: ${fmtVal(curVal, primarySeries.unit)} — ${Math.round(pct5y)}th percentile. 1M: ${ch1m >= 0 ? "+" : ""}${ch1m?.toFixed(2)}% · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. ${momLabel}.`;
-              implication = accel
-                ? `Expanding money supply is historically supportive of asset prices. Excess liquidity tends to flow into equities, credit, and real assets. Watch for transmission into inflation if monetary velocity picks up.`
-                : decel
-                ? `Contracting money supply (QT or reduced bank lending) is a headwind for asset prices and economic activity. Higher risk of liquidity crunch in credit markets. Prefer quality, short-duration, and cash equivalents in this environment.`
-                : `Stable monetary conditions provide a neutral liquidity backdrop. Focus on micro fundamentals (earnings, margins) rather than macro liquidity tailwinds.`;
-            } else if (isHousing) {
-              const hot  = regime === "elevated";
-              const cold = regime === "low";
-              bc = hot ? C.amb : cold ? C.red : C.grn;
-              verdict = hot ? "ELEVATED HOUSING" : cold ? "HOUSING CONTRACTION" : "HOUSING STABLE";
-              regimePhase = hot ? "Housing Boom / Rate Sensitivity" : cold ? "Housing Downturn" : "Balanced Housing";
-              synthesis = `${primarySeries.name}: ${fmtVal(curVal, primarySeries.unit)} — ${Math.round(pct5y)}th percentile. 3M: ${ch3m >= 0 ? "+" : ""}${ch3m?.toFixed(2)}% · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. ${momLabel}.`;
-              implication = hot
-                ? `Elevated housing activity is sensitive to mortgage rate moves. Any Fed rate increases disproportionately cool this sector. Homebuilders and related materials can outperform in the early phase, but affordability constraints eventually cap upside.`
-                : cold
-                ? `Housing contraction weighs on construction, consumer wealth effects, and related retail spending. Fed typically watches shelter CPI (which lags spot housing by ~12 months) — a contracting market is a leading indicator of future shelter disinflation.`
-                : `Balanced housing conditions reflect a stable consumer backdrop. Rate normalisation and affordability trends are the key variables to monitor for the next regime shift.`;
-            } else {
-              // Generic fallback
-              bc = regime === "elevated" || regime === "inverted" ? C.red : regime === "low" ? C.sky : C.grn;
-              verdict = regime === "elevated" ? "ELEVATED" : regime === "inverted" ? "INVERTED" : regime === "low" ? "BELOW NORMAL" : "NORMAL";
-              regimePhase = `${momLabel} · ${regime.charAt(0).toUpperCase() + regime.slice(1)} Regime`;
-              synthesis = `${primarySeries.name}: ${fmtVal(curVal, primarySeries.unit)} — ${Math.round(pct5y)}th percentile vs 5Y. 1M: ${ch1m >= 0 ? "+" : ""}${ch1m?.toFixed(2)}% · 3M: ${ch3m >= 0 ? "+" : ""}${ch3m?.toFixed(2)}% · 12M: ${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%. ${momLabel}.`;
-              implication = pivoting
-                ? `Trend is pivoting — ${shortUp ? "short-term acceleration" : "short-term deceleration"} diverges from the ${longUp ? "positive" : "negative"} 12-month trajectory. Regime-change signals warrant close monitoring. Await subsequent prints for confirmation before establishing directional positions.`
-                : `Momentum is ${momLabel.toLowerCase()} at the ${Math.round(pct5y)}th percentile of the 5-year range. ${regime === "elevated" ? "Above-normal reading — watch for mean reversion." : regime === "low" ? "Below-normal reading — potential for reversal if underlying drivers normalise." : "Reading within normal range — macro backdrop broadly stable."}`;
-            }
-
-            // ── Regime-shift alert ────────────────────────────────────────
-            const shiftNote = pivoting
-              ? `⚡ REGIME SHIFT SIGNAL: 1M momentum (${ch1m >= 0 ? "+" : ""}${ch1m?.toFixed(2)}%) is diverging from the 12-month trend (${ch1y >= 0 ? "+" : ""}${ch1y?.toFixed(2)}%) — ${momLabel.toLowerCase()} in progress. The next 1–2 data prints will confirm or invalidate.`
-              : accel ? `↑ Momentum accelerating across 1M/3M/12M — trend has cross-timeframe consistency.`
-              : decel ? `↓ Momentum decelerating across timeframes — watch for trend exhaustion and a potential regime turn.`
-              : null;
-
-            return (
-              <div style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:12,overflow:"hidden"}}>
-                {/* Header */}
-                <div style={{padding:"11px 16px",borderBottom:`1px solid ${C.bdr}`,
-                  display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-                  <TrendingUp size={13} style={{color:bc,flexShrink:0}}/>
-                  <span style={{fontFamily:"monospace",fontSize:11,color:C.headingTxt,fontWeight:700}}>
-                    Macro Regime Synthesis
-                  </span>
-                  <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                    <span style={{fontFamily:"monospace",fontSize:8,color:C.mut,letterSpacing:".06em"}}>
-                      CYCLE:
-                    </span>
-                    <span style={{fontFamily:"monospace",fontSize:8,fontWeight:700,color:bc,
-                      background:bc+"15",borderRadius:4,padding:"2px 7px"}}>
-                      {regimePhase.toUpperCase()}
-                    </span>
-                    <span style={{fontFamily:"monospace",fontSize:9,fontWeight:700,color:bc,
-                      background:bc+"18",border:`1px solid ${bc}40`,borderRadius:99,padding:"2px 10px"}}>
-                      {verdict}
-                    </span>
+        {/* ── 6. RISK DASHBOARD ── */}
+        {snapshot.risk_dashboard && (
+          <Section accent={C.red}>
+            <SectionTitle sub="Key macro risks by severity">RISK DASHBOARD</SectionTitle>
+            <div style={{display:"flex",flexDirection:"column",gap:8}}>
+              {snapshot.risk_dashboard.map((r,i) => (
+                <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom: i < snapshot.risk_dashboard.length-1 ? `1px solid ${C.bdr}` : "none"}}>
+                  <Tag color={sevColor(r.severity)}>{r.severity}</Tag>
+                  <div style={{flex:1}}>
+                    <div style={mono(10, C.headingTxt, 600)}>{r.risk}</div>
+                    <div style={mono(9, C.mut)}>{r.explanation}</div>
                   </div>
-                </div>
-                {/* Body */}
-                <div style={{padding:"14px 16px",display:"flex",flexDirection:"column",gap:12}}>
-                  {/* Data summary line */}
-                  <div style={{padding:"10px 12px",background:bc+"08",borderRadius:8,
-                    borderLeft:`3px solid ${bc}`,fontFamily:"monospace",fontSize:11,
-                    color:C.txt,lineHeight:1.75}}>
-                    {synthesis}
-                  </div>
-                  {/* Market implication */}
-                  <div>
-                    <div style={{fontFamily:"monospace",fontSize:9,color:C.mut,
-                      letterSpacing:".06em",marginBottom:6}}>MARKET IMPLICATION</div>
-                    <div style={{fontFamily:"monospace",fontSize:10,color:C.txt,lineHeight:1.75}}>
-                      {implication}
-                    </div>
-                  </div>
-                  {/* Regime-shift alert */}
-                  {shiftNote && (
-                    <div style={{display:"flex",gap:8,alignItems:"flex-start",padding:"8px 12px",
-                      background:C.amb+"0A",borderRadius:8,border:`1px solid ${C.amb}30`}}>
-                      <div style={{fontFamily:"monospace",fontSize:10,color:C.amb,lineHeight:1.65}}>
-                        {shiftNote}
-                      </div>
-                    </div>
-                  )}
-                  {/* Overlay series note */}
-                  {activeSeries.length > 1 && (
-                    <div style={{fontFamily:"monospace",fontSize:9,color:C.mut,
-                      borderTop:`1px solid ${C.bdr}`,paddingTop:8,lineHeight:1.6}}>
-                      {activeSeries.length - 1} overlay series active:{" "}
-                      {activeSeries.slice(1).map(s => (
-                        <span key={s.id} style={{color:s.color,fontWeight:700,marginRight:8}}>
-                          {s.id}
+                  {r.linked_series && r.linked_series.length > 0 && (
+                    <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                      {r.linked_series.slice(0,3).map(s => (
+                        <span key={s} style={{...mono(7, C.sky), cursor:"pointer", textDecoration:"underline"}}
+                          onClick={() => { setActiveSection("charts"); loadSeries(s, s, null, true); }}>
+                          {s}
                         </span>
                       ))}
-                      — cross-series divergence or confirmation strengthens the regime read above.
                     </div>
                   )}
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* Empty state */}
-          {!activeSeries.length && !loading && (
-            <div style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:12,
-              padding:"28px 20px",textAlign:"center"}}>
-              <Database size={24} style={{color:C.mut,marginBottom:10}}/>
-              <div style={{fontFamily:"monospace",fontSize:11,color:C.mut,lineHeight:1.7}}>
-                Select any series from the catalog on the left, or search above.<br/>
-                <span style={{color:C.sky,cursor:"pointer",fontWeight:700}}
-                  onClick={()=>loadSeries("CPIAUCSL","CPI All Items","#40c4ff",true)}>
-                  → Start with CPI (CPIAUCSL)
-                </span>
-                {" · "}
-                <span style={{color:C.sky,cursor:"pointer",fontWeight:700}}
-                  onClick={()=>loadSeries("FEDFUNDS","Federal Funds Rate","#40c4ff",true)}>
-                  Fed Funds Rate
-                </span>
-                {" · "}
-                <span style={{color:C.sky,cursor:"pointer",fontWeight:700}}
-                  onClick={()=>loadSeries("T10Y2Y","10Y-2Y Spread","#40c4ff",true)}>
-                  Yield Curve
-                </span>
-              </div>
-            </div>
-          )}
-
-          {/* ── Search results (shown at bottom) ─────────────────────────── */}
-          {(searchResults.length > 0 || searching) && (
-            <div style={{background:C.surf,border:`1px solid ${C.bdr}`,borderRadius:12,overflow:"hidden"}}>
-              <div style={{padding:"9px 14px 7px",borderBottom:`1px solid ${C.bdr}`,
-                display:"flex",alignItems:"center",gap:8}}>
-                <Search size={11} style={{color:C.sky}}/>
-                <span style={{fontFamily:"monospace",fontSize:9,color:C.mut,letterSpacing:".07em",flex:1}}>
-                  SEARCH RESULTS — click name to load as primary · click <span style={{color:C.grn,fontWeight:700}}>+</span> to overlay
-                </span>
-                <button onClick={()=>{setSearchQ(""); setSearchResults([]);}}
-                  style={{background:"none",border:"none",cursor:"pointer",padding:2,color:C.mut,display:"flex"}}>
-                  <X size={10}/>
-                </button>
-              </div>
-              {searching && (
-                <div style={{padding:"10px 14px",fontFamily:"monospace",fontSize:9,color:C.mut}}>Searching…</div>
-              )}
-              {searchResults.map(r => (
-                <div key={r.id} style={{display:"flex",alignItems:"center",gap:10,padding:"7px 14px",
-                  borderBottom:`1px solid ${C.bdr}`,transition:"background .1s"}}
-                  onMouseEnter={e=>e.currentTarget.style.background=C.dim}
-                  onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                  <span style={{fontFamily:"monospace",fontSize:10,color:C.sky,fontWeight:700,width:100,flexShrink:0}}>{r.id}</span>
-                  <span onClick={()=>{ loadSeries(r.id, r.title, "#40c4ff", true); setSearchQ(""); setSearchResults([]); }}
-                    style={{fontFamily:"monospace",fontSize:10,color:C.txt,flex:1,minWidth:0,
-                      overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",cursor:"pointer"}}>
-                    {r.title}
-                  </span>
-                  <span style={{fontFamily:"monospace",fontSize:9,color:C.mut,flexShrink:0,width:60,textAlign:"right"}}>
-                    {r.frequency_short} · {r.units_short}
-                  </span>
-                  <button onClick={()=>{ loadSeries(r.id, r.title, MACRO_OVERLAY_COLORS[activeSeries.length%MACRO_OVERLAY_COLORS.length], false); }}
-                    title="Add as overlay"
-                    style={{background:"none",border:"none",cursor:"pointer",padding:"1px 4px",
-                      color:C.grn,fontFamily:"monospace",fontSize:13,fontWeight:700,flexShrink:0,lineHeight:1}}>
-                    +
-                  </button>
                 </div>
               ))}
             </div>
-          )}
+          </Section>
+        )}
+
+        {/* ── 7. CATALYSTS ── */}
+        {snapshot.catalysts && (
+          <Section accent={C.sky}>
+            <SectionTitle sub="Upcoming macro events to monitor">CATALYSTS</SectionTitle>
+            <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(5,1fr)", gap:8}}>
+              {snapshot.catalysts.map((cat,i) => (
+                <div key={i} style={{padding:"10px 12px", borderRadius:8, background:C.dim, border:`1px solid ${cat.importance === "high" ? C.sky+"30" : C.bdr}`, textAlign:"center"}}>
+                  <div style={mono(10, cat.importance === "high" ? C.sky : C.headingTxt, 700)}>{cat.event}</div>
+                  <div style={{...mono(8, C.mut), marginTop:2}}>{cat.region}</div>
+                  <Tag color={cat.importance === "high" ? C.sky : C.mut}>{cat.importance}</Tag>
+                </div>
+              ))}
+            </div>
+          </Section>
+        )}
+
+        {/* ── 8. GLOBAL CONTEXT ── */}
+        {snapshot.global_context && (
+          <Section accent={C.amb}>
+            <SectionTitle sub="Cross-country and global macro signals">GLOBAL CONTEXT</SectionTitle>
+            <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap",marginBottom:12}}>
+              <div>
+                <span style={mono(9, C.mut)}>World Growth: </span>
+                <span style={mono(11, trendColor(snapshot.global_context.world_growth_trend === "Improving" ? "Improving" : snapshot.global_context.world_growth_trend === "Slowing" ? "Deteriorating" : "Stable"), 700)}>
+                  {snapshot.global_context.world_growth_trend}
+                </span>
+              </div>
+              <div>
+                <span style={mono(9, C.mut)}>Forecast Revisions: </span>
+                <span style={mono(10, C.amb, 600)}>{snapshot.global_context.forecast_revision_direction}</span>
+              </div>
+            </div>
+            <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : "repeat(3,1fr)", gap:10}}>
+              {(snapshot.global_context.regions || []).map((reg,i) => (
+                <div key={i} style={{padding:"10px 14px", borderRadius:10, background:C.dim}}>
+                  <div style={mono(10, C.headingTxt, 700)}>{reg.region}</div>
+                  <div style={{...mono(9, C.mut), marginTop:4}}>{reg.signal}</div>
+                </div>
+              ))}
+            </div>
+          </Section>
+        )}
+
+      </>)}
+
+      {/* ═══════════════════════════════════════════════════════
+          CHART WORKSPACE
+         ═══════════════════════════════════════════════════════ */}
+      {activeSection === "charts" && (
+        <div style={{display:"flex",gap:14,flexDirection: C.isMobile ? "column" : "row"}}>
+          {/* Sidebar: Catalog */}
+          <div style={{width: C.isMobile ? "100%" : 230, flexShrink:0}}>
+            <Card>
+              <Lbl>FRED Series</Lbl>
+              <div style={{marginBottom:10}}>
+                <input value={searchQ} onChange={e=>setSearchQ(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doSearch()}
+                  placeholder="Search FRED…"
+                  style={{width:"100%",padding:"6px 10px",borderRadius:6,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:10,boxSizing:"border-box",outline:"none"}}/>
+              </div>
+              {searchResults.length > 0 && (
+                <div style={{marginBottom:12,maxHeight:200,overflowY:"auto"}}>
+                  {searchResults.map(s => (
+                    <div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"4px 0",borderBottom:`1px solid ${C.bdr}`,cursor:"pointer"}}
+                      onClick={() => { loadSeries(s.id, s.title, null, true); setSearchResults([]); setSearchQ(""); }}>
+                      <div>
+                        <div style={mono(9, C.sky, 600)}>{s.id}</div>
+                        <div style={mono(8, C.mut)}>{s.title?.substring(0,40)}</div>
+                      </div>
+                      <button onClick={(e) => { e.stopPropagation(); loadSeries(s.id, s.title, null, false); }}
+                        style={{...mono(9, C.grn, 700), background:"transparent", border:"none", cursor:"pointer"}}>+</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {/* Category browser */}
+              {Object.entries(catalog).map(([cat, series]) => (
+                <div key={cat} style={{marginBottom:4}}>
+                  <div onClick={()=>setOpenCats(p=>({...p,[cat]:!p[cat]}))}
+                    style={{...mono(9, C.mut, 700), cursor:"pointer", padding:"4px 0", display:"flex", justifyContent:"space-between"}}>
+                    <span>{cat}</span><span>{openCats[cat] ? "−" : "+"}</span>
+                  </div>
+                  {openCats[cat] && series.map(s => {
+                    const isActive = activeSeries.some(a => a.id === s.id);
+                    return (
+                      <div key={s.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"3px 8px",cursor:"pointer",background:isActive?C.sky+"12":"transparent",borderRadius:4}}
+                        onClick={() => loadSeries(s.id, s.name, null, true)}>
+                        <div>
+                          <div style={mono(9, isActive ? C.sky : C.txt)}>{s.name}</div>
+                          <div style={mono(7, C.mut)}>{s.id} · {s.freq}</div>
+                        </div>
+                        {!isActive && <button onClick={(e) => { e.stopPropagation(); loadSeries(s.id, s.name, null, false); }}
+                          style={{...mono(8, C.grn), background:"transparent", border:"none", cursor:"pointer"}}>+</button>}
+                        {isActive && <button onClick={(e) => { e.stopPropagation(); removeSeries(s.id); }}
+                          style={{...mono(8, C.red), background:"transparent", border:"none", cursor:"pointer"}}>×</button>}
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </Card>
+          </div>
+
+          {/* Chart area */}
+          <div style={{flex:1}}>
+            {/* Period & units toolbar */}
+            <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+              {MACRO_PERIODS.map(p => (
+                <Pill key={p.v} label={p.l} active={period===p.v} onClick={()=>{
+                  setPeriod(p.v);
+                  if (activeSeries.length) loadSeries(activeSeries[0].id, activeSeries[0].name, activeSeries[0].color, true);
+                }}/>
+              ))}
+              <div style={{width:1,background:C.bdr,margin:"0 4px"}}/>
+              {MACRO_UNITS.map(u => (
+                <Pill key={u.v} label={u.l} active={units===u.v} onClick={()=>{
+                  setUnits(u.v);
+                  if (activeSeries.length) loadSeries(activeSeries[0].id, activeSeries[0].name, activeSeries[0].color, true);
+                }}/>
+              ))}
+            </div>
+
+            {/* Active overlays */}
+            {activeSeries.length > 0 && (
+              <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+                {activeSeries.map(s => (
+                  <span key={s.id} style={{...mono(9, s.color, 700), padding:"2px 8px", borderRadius:12, background:s.color+"15", border:`1px solid ${s.color}30`, cursor:"pointer"}}
+                    onClick={() => removeSeries(s.id)}>
+                    {s.id} ×
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Chart */}
+            {activeSeries.length > 0 ? (
+              <Card>
+                <div style={{height:380}}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={(() => {
+                      const primary = activeSeries[0];
+                      const subsampled = primary.obs.length > 400 ? primary.obs.filter((_,i) => i % Math.ceil(primary.obs.length/400) === 0) : primary.obs;
+                      return subsampled.map(o => {
+                        const point = {date: o.date, [primary.id]: o.value};
+                        activeSeries.slice(1).forEach(s => {
+                          const match = s.obs.find(so => so.date === o.date);
+                          if (match) point[s.id] = match.value;
+                        });
+                        return point;
+                      });
+                    })()}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
+                      <XAxis dataKey="date" tick={{...mono(8,C.mut)}} tickFormatter={d => d?.substring(0,7)} interval="preserveStartEnd"/>
+                      <YAxis yAxisId="right" orientation="right" tick={{...mono(8,C.mut)}} domain={["auto","auto"]}/>
+                      {activeSeries.length > 1 && <YAxis yAxisId="left" orientation="left" tick={{...mono(8,C.mut)}} domain={["auto","auto"]}/>}
+                      <Tooltip contentStyle={{background:C.surf,border:`1px solid ${C.bdr}`,fontFamily:"monospace",fontSize:11,borderRadius:8}}/>
+                      <Area yAxisId="right" type="monotone" dataKey={activeSeries[0].id} fill={activeSeries[0].color} fillOpacity={0.07} stroke={activeSeries[0].color} strokeWidth={2} dot={false}/>
+                      {activeSeries.slice(1).map(s => (
+                        <Line key={s.id} yAxisId="left" type="monotone" dataKey={s.id} stroke={s.color} strokeWidth={1.5} dot={false}/>
+                      ))}
+                      {units !== "lin" && <ReferenceLine yAxisId="right" y={0} stroke={C.mut} strokeDasharray="4 4"/>}
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+              </Card>
+            ) : (
+              <Card>
+                <div style={{...mono(11,C.mut),textAlign:"center",padding:"48px 0",lineHeight:2}}>
+                  Select a series from the catalog to begin charting.<br/>
+                  Click a series name to load it, or <span style={{color:C.grn}}>+</span> to overlay.
+                </div>
+              </Card>
+            )}
+
+            {/* Summary stats */}
+            {summary && activeSeries.length > 0 && (
+              <Card>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",flexWrap:"wrap",gap:10,marginBottom:10}}>
+                  <div>
+                    <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>{activeSeries[0]?.name}</div>
+                    <div style={mono(22, C.headingTxt, 800)}>{summary.current_formatted || "—"}</div>
+                  </div>
+                  <div style={{display:"flex",gap:14}}>
+                    {[["1M",summary.change_1m],["3M",summary.change_3m],["12M",summary.change_1y]].map(([label,val]) => (
+                      <div key={label} style={{textAlign:"right"}}>
+                        <div style={mono(8,C.mut)}>{label}</div>
+                        <div style={mono(11, val > 0 ? C.grn : val < 0 ? C.red : C.mut, 700)}>{val != null ? (val > 0 ? "+" : "") + val.toFixed(2) + "%" : "—"}</div>
+                      </div>
+                    ))}
+                    {summary.regime && <Tag color={summary.regime === "elevated" ? C.red : summary.regime === "low" ? C.amb : summary.regime === "inverted" ? C.red : C.grn}>{summary.regime}</Tag>}
+                  </div>
+                </div>
+                {summary.headline && <div style={{...mono(10, C.txt), lineHeight:1.7, marginBottom:8}}>{summary.headline}</div>}
+                {summary.body && summary.body.slice(0,3).map((b,i) => (
+                  <div key={i} style={{...mono(9, C.mut), lineHeight:1.6, marginBottom:2}}>• {b}</div>
+                ))}
+              </Card>
+            )}
+          </div>
         </div>
-      </div>
+      )}
+
+      <div style={mono(8,C.mut)}>Data sourced from FRED/ALFRED (Federal Reserve Bank of St. Louis). Not financial advice.</div>
     </div>
   );
 }

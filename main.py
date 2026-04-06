@@ -2860,6 +2860,68 @@ def technical_analysis(
 
 
 # ---------------------------------------------------------------------------
+# Endpoints: Macro Regime Engine
+# ---------------------------------------------------------------------------
+
+@app.get("/macro/snapshot")
+def macro_snapshot():
+    """
+    Full macro regime snapshot: regime, composite score, 8 pillar scores,
+    risks, market implications, narrative, catalysts, global context.
+    """
+    from fred_data import _fred, FRED_CATALOG
+    from macro_engine import PILLAR_SERIES, build_macro_snapshot
+    from cache import cache, MACRO_TTL
+
+    cached = cache.get("macro:snapshot")
+    if cached:
+        return cached
+
+    # Gather FRED data for all pillar series
+    all_series_ids = set()
+    for series_list in PILLAR_SERIES.values():
+        all_series_ids.update(series_list)
+
+    series_data = {}
+    for sid in all_series_ids:
+        try:
+            obs = _fred.get_observations(sid, observation_start=None, units="lin")
+            series_data[sid] = {"obs": obs}
+        except Exception as e:
+            logger.warning("Macro snapshot: failed to fetch %s: %s", sid, e)
+            series_data[sid] = {"obs": []}
+
+    result = build_macro_snapshot(series_data)
+    cache.set("macro:snapshot", result, MACRO_TTL)
+    return result
+
+
+@app.get("/macro/pillars")
+def macro_pillars():
+    """Return just the 8 pillar scorecards."""
+    snap = macro_snapshot()
+    return {"pillars": snap.get("pillars", {}), "as_of": snap.get("as_of")}
+
+
+@app.get("/macro/risks")
+def macro_risks():
+    """Return the macro risk dashboard."""
+    snap = macro_snapshot()
+    return {"risks": snap.get("risk_dashboard", []), "as_of": snap.get("as_of")}
+
+
+@app.get("/macro/implications")
+def macro_implications():
+    """Return market implications by asset class."""
+    snap = macro_snapshot()
+    return {
+        "implications": snap.get("market_implications", {}),
+        "regime": snap.get("macro_snapshot", {}).get("regime"),
+        "as_of": snap.get("as_of"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Endpoints: FRED Macro Intelligence
 # ---------------------------------------------------------------------------
 
