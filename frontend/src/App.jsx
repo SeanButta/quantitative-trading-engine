@@ -6855,9 +6855,11 @@ function TechnicalView() {
     }}>{label}</button>
   );
 
-  const CM = {top:0,right:0,bottom:0,left:0};
-  const xAx = {dataKey:"date",type:"category",height:TV_X_AX_H,tick:{fill:"#787b86",fontSize:9,fontFamily:"monospace"},tickLine:false,axisLine:{stroke:"#2a2e39"},interval:"preserveStartEnd",padding:{left:0,right:0}};
-  const yAx = {type:"number",domain:yDomain,orientation:"right",width:TV_Y_AX_W,tick:{fill:"#787b86",fontSize:9,fontFamily:"monospace"},tickLine:false,axisLine:false,tickFormatter:v=>v.toFixed(0),allowDataOverflow:false,label:{value:`${sym} Price ($)`,angle:90,position:"insideRight",offset:16,style:{fontFamily:"monospace",fontSize:8,fill:"#787b86",textAnchor:"middle"}}};
+  const CM = {top:0,right:8,bottom:0,left:0};
+  const xTickFmt = d => { if (!d) return ""; const p = d.split("-"); if (p.length < 2) return d; const mo = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(p[1],10)-1]||p[1]; return `${mo} '${p[0].slice(2)}`; };
+  const xTickInterval = Math.max(1, Math.ceil(cd.length / 8) - 1);
+  const xAx = {dataKey:"date",type:"category",height:TV_X_AX_H,tick:{fill:"#787b86",fontSize:8,fontFamily:"monospace"},tickLine:false,axisLine:{stroke:"#2a2e39"},interval:xTickInterval,tickFormatter:xTickFmt,padding:{left:4,right:4}};
+  const yAx = {type:"number",domain:yDomain,orientation:"right",width:TV_Y_AX_W,tick:{fill:"#787b86",fontSize:9,fontFamily:"monospace"},tickLine:false,axisLine:false,tickFormatter:v=>v.toFixed(0),allowDataOverflow:false,label:{value:`${sym} ($)`,angle:90,position:"insideRight",offset:16,style:{fontFamily:"monospace",fontSize:8,fill:"#787b86",textAnchor:"middle"}}};
   const subYAx = (dm,tks,fmt) => ({type:"number",domain:dm,orientation:"right",width:TV_Y_AX_W,ticks:tks,tick:{fill:"#787b86",fontSize:8,fontFamily:"monospace"},tickLine:false,axisLine:false,tickFormatter:fmt||(v=>v.toFixed(0))});
 
   return (
@@ -7000,6 +7002,138 @@ function TechnicalView() {
                 ))}
                 <span style={{fontFamily:"monospace",fontSize:8,color:ms.netColor,marginLeft:4,fontWeight:700}}>{ms.weighted}%</span>
               </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ═══════════ TECHNICAL REGIME SNAPSHOT ═══════════ */}
+      {data && godMode && ms && (()=>{
+        // 5-pillar scoring engine (-1 to +1)
+        const trendS = ms.trend.state === "bull" ? (ms.trend.score >= 75 ? 0.8 : 0.4) : ms.trend.state === "bear" ? (ms.trend.score <= 25 ? -0.8 : -0.4) : 0;
+        const momS = ms.momentum.state === "expanding" ? 0.7 : ms.momentum.state === "building" ? 0.3 : ms.momentum.state === "exhausted" ? -0.6 : ms.momentum.state === "resetting" ? -0.2 : 0;
+        const liqS = ms.liquidity.state === "strong" ? 0.6 : ms.liquidity.state === "weak" ? -0.5 : 0;
+
+        // Volatility/Structure from BB width + ATR
+        const lastBar = data.ohlcv?.[data.ohlcv.length - 1];
+        const bbUpper = data.bb?.upper?.[data.bb.upper.length - 1];
+        const bbLower = data.bb?.lower?.[data.bb.lower.length - 1];
+        const bbWidth = (bbUpper && bbLower && lastBar?.close) ? (bbUpper - bbLower) / lastBar.close : 0.05;
+        const volStructS = bbWidth < 0.03 ? 0.3 : (bbWidth > 0.08 ? -0.3 : 0); // compression = setup potential
+
+        // Signal confirmation
+        const bullSigs = godMode.bull_count || 0;
+        const bearSigs = godMode.bear_count || 0;
+        const totalSigs = bullSigs + bearSigs || 1;
+        const confS = (bullSigs - bearSigs) / totalSigs; // -1 to +1
+
+        // Composite
+        const techScore = Math.max(-1, Math.min(1, 0.30 * trendS + 0.25 * momS + 0.15 * liqS + 0.15 * volStructS + 0.15 * confS));
+
+        // Bias
+        const bias = techScore >= 0.4 ? "Bullish" : techScore >= 0.15 ? "Neutral-to-Bullish" : techScore > -0.15 ? "Neutral" : techScore > -0.4 ? "Neutral-to-Bearish" : "Bearish";
+
+        // Confidence
+        const signalAgreement = Math.abs(bullSigs - bearSigs) / totalSigs;
+        const primaryStrength = (godMode.confidence || 50) / 100;
+        const confidence = Math.round((0.5 * signalAgreement + 0.5 * primaryStrength) * 100);
+
+        // Setup classifier
+        let setup;
+        if (trendS >= 0.4 && momS >= 0.3) setup = "Trend Continuation";
+        else if (trendS <= -0.3 && momS >= 0) setup = "Mean Reversion Bounce";
+        else if (trendS <= -0.3 && momS <= -0.3) setup = "Breakdown Risk";
+        else if (bbWidth < 0.03) setup = "Range Compression";
+        else if (trendS >= 0.3 && momS <= -0.3) setup = "Exhaustion / Reversal Watch";
+        else if (trendS <= 0 && momS >= 0.2) setup = "Trend Repair Attempt";
+        else setup = "Rangebound / Mixed";
+
+        // Regime
+        let regime;
+        if (trendS >= 0.4 && momS >= 0.2) regime = "Bullish Trend";
+        else if (trendS <= -0.4 && momS <= -0.2) regime = "Bearish Trend";
+        else if (trendS <= 0 && momS >= 0.2) regime = "Transitional Bounce";
+        else if (trendS <= -0.3 && momS <= 0) regime = "Breakdown Risk";
+        else if (bbWidth < 0.03) regime = "Compression Before Move";
+        else if (trendS >= 0.3 && momS <= -0.3) regime = "Exhaustion / Reversal Watch";
+        else regime = "Rangebound / Mixed";
+
+        // Action posture
+        let posture;
+        if (techScore >= 0.6 && confidence >= 60) posture = "Aggressive Long";
+        else if (techScore >= 0.2 && confidence >= 40) posture = "Tactical Long";
+        else if (techScore <= -0.6 && confidence >= 60) posture = "Aggressive Short";
+        else if (techScore <= -0.2 && confidence >= 40) posture = "Tactical Short";
+        else if (confidence < 25) posture = "No Trade";
+        else posture = "Neutral / Wait";
+
+        const biasCol = techScore >= 0.15 ? C.grn : techScore <= -0.15 ? C.red : C.amb;
+        const confCol = confidence >= 60 ? C.grn : confidence >= 35 ? C.amb : C.red;
+
+        // Risks
+        const risks = [];
+        if (trendS <= 0 && momS <= 0) risks.push("Trend and momentum both weak");
+        if (ms.trend.state === "bear" && ms.liquidity.state !== "strong") risks.push("Bearish trend with no volume support");
+        if (bbWidth < 0.025) risks.push("Compression — breakout direction unclear");
+        if (bullSigs > 0 && bearSigs > 0 && Math.abs(bullSigs - bearSigs) <= 2) risks.push("Conflicting signals — low conviction");
+
+        return (
+          <div style={{marginBottom:14,borderRadius:14,border:`1.5px solid ${biasCol}30`,background:biasCol+"07",padding:"18px 20px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12,marginBottom:14}}>
+              <div>
+                <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",marginBottom:4}}>TECHNICAL REGIME</div>
+                <div style={mono(20, biasCol, 800)}>{regime}</div>
+              </div>
+              <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>SCORE</div>
+                  <div style={mono(18, biasCol, 800)}>{techScore > 0 ? "+" : ""}{(techScore * 100).toFixed(0)}</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>BIAS</div>
+                  <div style={mono(13, biasCol, 700)}>{bias}</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>CONFIDENCE</div>
+                  <div style={mono(13, confCol, 700)}>{confidence}%</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>SETUP</div>
+                  <div style={mono(11, C.headingTxt, 600)}>{setup}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* 5-Pillar breakdown */}
+            <div style={{display:"grid",gridTemplateColumns: C.isMobile ? "repeat(3,1fr)" : "repeat(5,1fr)",gap:8,marginBottom:12}}>
+              {[["Trend",trendS,0.30],["Momentum",momS,0.25],["Liquidity",liqS,0.15],["Volatility",volStructS,0.15],["Signals",confS,0.15]].map(([name,val,wt])=>{
+                const pc = val >= 0.3 ? C.grn : val <= -0.3 ? C.red : C.amb;
+                return (
+                  <div key={name} style={{padding:"8px 10px",borderRadius:8,background:C.dim,textAlign:"center"}}>
+                    <div style={{...mono(7,C.mut,600),letterSpacing:"0.08em"}}>{name.toUpperCase()} <span style={{color:C.mut+"88"}}>({(wt*100).toFixed(0)}%)</span></div>
+                    <div style={mono(14, pc, 800)}>{val > 0 ? "+" : ""}{val.toFixed(2)}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Action posture + risks */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <span style={{...mono(9,C.mut,600)}}>POSTURE:</span>
+                <span style={{...mono(11, posture.includes("Long") ? C.grn : posture.includes("Short") ? C.red : C.amb, 700),
+                  padding:"3px 12px",borderRadius:8,background:(posture.includes("Long")?C.grn:posture.includes("Short")?C.red:C.amb)+"15",
+                  border:`1px solid ${posture.includes("Long")?C.grn:posture.includes("Short")?C.red:C.amb}30`}}>
+                  {posture}
+                </span>
+              </div>
+              {risks.length > 0 && (
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {risks.slice(0,2).map((r,i) => (
+                    <span key={i} style={{...mono(8,C.red,600),padding:"2px 8px",borderRadius:6,background:C.red+"10",border:`1px solid ${C.red}20`}}>{r}</span>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         );
@@ -7617,25 +7751,34 @@ function TechnicalView() {
         <div style={{marginTop:12,display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(170px,1fr))",gap:10}}>
           {[
             {l:"ATR (14)",   v:data.atr?.[data.n_bars-1]!=null?data.atr[data.n_bars-1].toFixed(2):"–", c:C.amb,
-              tip:"Average True Range — avg daily price range (volatility). Higher = bigger swings."},
+              desc:"Average daily price range. Measures volatility — higher = bigger swings, wider stops needed.",
+              interp:data.atr?.[data.n_bars-1]!=null?(data.atr[data.n_bars-1]>lastBar.close*0.03?"High volatility — wide ranges":"Low-moderate volatility"):null},
             {l:"RSI (14)",   v:lastBar.rsi!=null?lastBar.rsi.toFixed(1):"–",
               c:lastBar.rsi>70?TV_R:lastBar.rsi<30?TV_G:"#d1d4dc",
-              tip:"Relative Strength Index. >70 overbought (sell signal), <30 oversold (buy signal)."},
+              desc:"Momentum oscillator (0-100). Above 70 = overbought, below 30 = oversold.",
+              interp:lastBar.rsi!=null?(lastBar.rsi>70?"Overbought — pullback risk":lastBar.rsi<30?"Oversold — bounce potential":lastBar.rsi>50?"Bullish zone":"Bearish zone"):null},
             {l:"MACD Hist",  v:lastBar.macd_h!=null?lastBar.macd_h.toFixed(4):"–",
               c:lastBar.macd_h>=0?TV_G:TV_R,
-              tip:"MACD histogram = MACD minus Signal. Positive = bullish momentum strengthening."},
+              desc:"Difference between MACD and Signal lines. Positive = bullish momentum building.",
+              interp:lastBar.macd_h!=null?(lastBar.macd_h>0?"Bullish momentum expanding":"Bearish momentum — sellers in control"):null},
             {l:"Stoch %K",   v:lastBar.stoch_k!=null?lastBar.stoch_k.toFixed(1)+"%" :"–",
               c:lastBar.stoch_k>80?TV_R:lastBar.stoch_k<20?TV_G:"#d1d4dc",
-              tip:"Stochastic oscillator. >80 overbought, <20 oversold. %K crosses %D = signal."},
+              desc:"Momentum oscillator (0-100). Above 80 = overbought, below 20 = oversold.",
+              interp:lastBar.stoch_k!=null?(lastBar.stoch_k>80?"Overbought — reversal watch":lastBar.stoch_k<20?"Oversold — bounce setup":"Mid-range"):null},
             {l:"BB Width",   v:lastBar.bb_upper&&lastBar.bb_lower?((lastBar.bb_upper-lastBar.bb_lower)/lastBar.close*100).toFixed(2)+"%":"–",
-              c:C.pur, tip:"Bollinger Band Width as % of price. Squeeze (low width) precedes breakout."},
+              c:C.pur,
+              desc:"Bollinger Band width as % of price. Low = compression (breakout imminent), high = expanded volatility.",
+              interp:lastBar.bb_upper&&lastBar.bb_lower?(((lastBar.bb_upper-lastBar.bb_lower)/lastBar.close)<0.03?"Squeeze — breakout setup":"Normal-wide range"):null},
             {l:"Williams %R",v:lastBar.wr!=null?lastBar.wr.toFixed(1):"–",
               c:lastBar.wr>-20?TV_R:lastBar.wr<-80?TV_G:"#d1d4dc",
-              tip:"Williams %R (momentum). >−20 overbought, <−80 oversold. Scale is −100 to 0."},
-          ].map(({l,v,c,tip})=>(
+              desc:"Momentum oscillator (-100 to 0). Above -20 = overbought, below -80 = oversold.",
+              interp:lastBar.wr!=null?(lastBar.wr>-20?"Overbought — caution":lastBar.wr<-80?"Oversold — opportunity":"Neutral range"):null},
+          ].map(({l,v,c,desc,interp})=>(
             <Card key={l}>
-              <InfoTip desc={tip}><Lbl>{l}</Lbl></InfoTip>
+              <Lbl>{l}</Lbl>
               <div style={mono(18,c,700)}>{v}</div>
+              <div style={{...mono(8,C.mut),marginTop:4,lineHeight:1.5}}>{desc}</div>
+              {interp && <div style={{...mono(8,c,600),marginTop:3}}>{interp}</div>}
             </Card>
           ))}
         </div>
