@@ -218,3 +218,53 @@ def submit_portfolio_analysis(
             job_id, holdings_data, risk_free_rate,
             n_mc_paths, mc_horizon_days, n_frontier_portfolios,
         )
+
+
+# ---------------------------------------------------------------------------
+# Batch Ingestion Tasks
+# ---------------------------------------------------------------------------
+
+def submit_eod_ingestion(symbols: Optional[list] = None, bg=None) -> None:
+    """Submit an EOD price ingestion job."""
+    def _run():
+        from main import provider, SessionLocal
+        from ingestion_scheduler import IngestionScheduler
+        scheduler = IngestionScheduler(provider, SessionLocal)
+        syms = symbols or scheduler.get_tracked_symbols()
+        result = scheduler.ingest_eod_prices(syms)
+        logger.info("EOD ingestion task complete: %s", result)
+
+    if bg is not None:
+        bg.add_task(_run)
+    else:
+        _run_in_thread(_run)
+
+
+def submit_fred_ingestion(series_ids: Optional[list] = None, bg=None) -> None:
+    """Submit a FRED macro series ingestion job."""
+    def _run():
+        from main import provider, SessionLocal
+        from ingestion_scheduler import IngestionScheduler
+        scheduler = IngestionScheduler(provider, SessionLocal)
+        result = scheduler.ingest_fred_series(series_ids)
+        logger.info("FRED ingestion task complete: %s", result)
+
+    if bg is not None:
+        bg.add_task(_run)
+    else:
+        _run_in_thread(_run)
+
+
+def submit_sec_ingestion(ciks: Optional[list] = None, bg=None) -> None:
+    """Submit a SEC filing ingestion job."""
+    def _run():
+        from main import provider, SessionLocal
+        from ingestion_scheduler import IngestionScheduler
+        scheduler = IngestionScheduler(provider, SessionLocal)
+        result = scheduler.ingest_sec_filings(ciks)
+        logger.info("SEC ingestion task complete: %s", result)
+
+    if bg is not None:
+        bg.add_task(_run)
+    else:
+        _run_in_thread(_run)

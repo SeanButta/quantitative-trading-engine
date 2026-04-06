@@ -118,16 +118,24 @@ class StatisticalValidator:
         t_stat = float(t_stat)
         p_raw = float(p_raw)
 
-        # --- Permutation test ---
+        # --- Permutation test (vectorized) ---
         observed_mean = np.mean(valid)
-        perm_means = np.array([
-            np.mean(np.random.permutation(valid))
-            for _ in range(self.n_permutations)
-        ])
-        perm_sharpes = np.array([
-            float(np.mean(perm) / np.std(valid, ddof=1) * np.sqrt(252))
-            for perm in (np.random.permutation(valid) for _ in range(min(1000, self.n_permutations)))
-        ])
+        rng = np.random.default_rng()
+
+        # Generate all permutation indices at once as a 2D matrix
+        n_perms = self.n_permutations
+        idx_matrix = np.broadcast_to(np.arange(n), (n_perms, n)).copy()
+        rng.permuted(idx_matrix, axis=1, out=idx_matrix)
+        perm_matrix = valid[idx_matrix]  # shape: (n_perms, n)
+
+        # Vectorized mean computation for all permutations
+        perm_means = perm_matrix.mean(axis=1)
+
+        # Vectorized Sharpe computation for subset
+        n_sharpe = min(1000, n_perms)
+        std_val = np.std(valid, ddof=1)
+        perm_sharpes = (perm_means[:n_sharpe] / std_val * np.sqrt(252)) if std_val > 0 else np.zeros(n_sharpe)
+
         perm_p = float(np.mean(np.abs(perm_means) >= np.abs(observed_mean)))
 
         # --- Corrected p-value ---
@@ -265,17 +273,31 @@ class StatisticalValidator:
         if len(r) < 30:
             return {"p_value": 1.0, "observed_ic": 0.0, "distribution": []}
 
-        # Information coefficient: rank correlation
-        from scipy.stats import spearmanr
+        # Information coefficient: rank correlation (vectorized)
+        from scipy.stats import spearmanr, rankdata
         observed_ic, _ = spearmanr(s, r)
 
-        perm_ics = []
-        for _ in range(n_perms):
-            shuffled_s = np.random.permutation(s)
-            ic, _ = spearmanr(shuffled_s, r)
-            perm_ics.append(float(ic))
+        rng = np.random.default_rng()
+        n_obs = len(s)
 
-        perm_ics = np.array(perm_ics)
+        # Vectorized: generate all permutations, compute rank correlations
+        idx_matrix = np.broadcast_to(np.arange(n_obs), (n_perms, n_obs)).copy()
+        rng.permuted(idx_matrix, axis=1, out=idx_matrix)
+        perm_s_matrix = s[idx_matrix]  # shape: (n_perms, n_obs)
+
+        # Rank-based Spearman via vectorized rank computation
+        rank_r = rankdata(r)
+        rank_r_centered = rank_r - rank_r.mean()
+        rank_r_norm = np.sqrt(np.sum(rank_r_centered ** 2))
+
+        perm_ics = np.empty(n_perms)
+        for i in range(n_perms):
+            rank_s = rankdata(perm_s_matrix[i])
+            rank_s_centered = rank_s - rank_s.mean()
+            rank_s_norm = np.sqrt(np.sum(rank_s_centered ** 2))
+            denom = rank_s_norm * rank_r_norm
+            perm_ics[i] = np.sum(rank_s_centered * rank_r_centered) / denom if denom > 0 else 0.0
+
         p_value = float(np.mean(np.abs(perm_ics) >= abs(observed_ic)))
 
         return {

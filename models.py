@@ -26,8 +26,8 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, Float, ForeignKey,
-    Integer, JSON, String, Text,
+    Boolean, Column, Date, DateTime, Float, ForeignKey,
+    Integer, JSON, PrimaryKeyConstraint, String, Text,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -286,3 +286,89 @@ class CacheEntry(Base):
     hit_count    = Column(Integer, default=0)
     size_bytes   = Column(Integer, default=0)
     source       = Column(String, default="")               # endpoint label for /cache/status
+
+
+# ===========================================================================
+# Time-Series Data Tables (Production DB Cache)
+# ===========================================================================
+
+class OHLCVDaily(Base):
+    """
+    Daily OHLCV price bars cached from upstream data providers.
+    Composite PK on (symbol, date). Upserted by the DB cache provider
+    and batch ingestion jobs.
+    """
+    __tablename__ = "ohlcv_daily"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "date"),
+    )
+
+    symbol     = Column(String, nullable=False, index=True)
+    date       = Column(Date, nullable=False, index=True)
+    open       = Column(Float, nullable=False)
+    high       = Column(Float, nullable=False)
+    low        = Column(Float, nullable=False)
+    close      = Column(Float, nullable=False)
+    volume     = Column(Float, nullable=False)
+    adj_close  = Column(Float, nullable=True)
+    provider   = Column(String, default="yfinance")
+    fetched_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Fundamental(Base):
+    """
+    Quarterly / annual fundamental data snapshots.
+    Composite PK on (symbol, period_end).
+    """
+    __tablename__ = "fundamentals"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "period_end"),
+    )
+
+    symbol      = Column(String, nullable=False, index=True)
+    period_end  = Column(Date, nullable=False, index=True)
+    period_type = Column(String, default="Q")               # Q = quarterly, A = annual
+    revenue     = Column(Float, nullable=True)
+    net_income  = Column(Float, nullable=True)
+    eps         = Column(Float, nullable=True)
+    total_assets = Column(Float, nullable=True)
+    total_debt  = Column(Float, nullable=True)
+    cash        = Column(Float, nullable=True)
+    shares_out  = Column(Float, nullable=True)
+    raw_json    = Column(JSON, nullable=True)                # full snapshot for ad-hoc queries
+    fetched_at  = Column(DateTime, default=datetime.utcnow)
+
+
+class MacroSeries(Base):
+    """
+    FRED / macro economic time-series data.
+    Composite PK on (series_id, date).
+    """
+    __tablename__ = "macro_series"
+    __table_args__ = (
+        PrimaryKeyConstraint("series_id", "date"),
+    )
+
+    series_id  = Column(String, nullable=False, index=True)
+    date       = Column(Date, nullable=False, index=True)
+    value      = Column(Float, nullable=True)
+    fetched_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SecFiling(Base):
+    """
+    SEC EDGAR filing metadata.
+    Composite PK on (cik, accession).
+    """
+    __tablename__ = "sec_filings"
+    __table_args__ = (
+        PrimaryKeyConstraint("cik", "accession"),
+    )
+
+    cik         = Column(String, nullable=False, index=True)
+    accession   = Column(String, nullable=False)
+    form_type   = Column(String, nullable=True)             # 10-K, 10-Q, 8-K, etc.
+    filed_date  = Column(Date, nullable=True, index=True)
+    period_end  = Column(Date, nullable=True)
+    raw_json    = Column(JSON, nullable=True)
+    fetched_at  = Column(DateTime, default=datetime.utcnow)

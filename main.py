@@ -254,6 +254,15 @@ SECTORS_DIR.mkdir(parents=True, exist_ok=True)
 # Default universe
 DEFAULT_SYMBOLS = ["SPY", "QQQ", "IWM", "TLT", "GLD"]
 
+# ---------------------------------------------------------------------------
+# Data Provider (DB-cached, swappable upstream)
+# ---------------------------------------------------------------------------
+from data_providers import YFinanceProvider as _YFProvider
+from db_cache_provider import DBCachedProvider as _DBCachedProvider
+
+_upstream_provider = _YFProvider()
+provider = _DBCachedProvider(_upstream_provider, SessionLocal)
+
 
 # ---------------------------------------------------------------------------
 # DB Helper
@@ -502,7 +511,7 @@ class PortfolioAnalyzeRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    """Liveness + readiness probe. Checks DB connectivity for Railway health checks."""
+    """Liveness + readiness probe with DB connectivity and data layer status."""
     db_ok = False
     try:
         with engine.connect() as _hc:
@@ -510,12 +519,34 @@ def health():
         db_ok = True
     except Exception:
         pass
-    return {
+
+    status = {
         "status": "ok" if db_ok else "degraded",
-        "db": "connected" if db_ok else "error",
+        "database": "connected" if db_ok else "error",
+        "database_type": "sqlite" if _IS_SQLITE else "postgresql",
         "workers": os.getenv("WEB_CONCURRENCY", "1"),
         "timestamp": datetime.utcnow().isoformat(),
     }
+
+    # Ingestion status (data tables)
+    try:
+        from ingestion_scheduler import IngestionScheduler as _IS
+        _ing = _IS(provider, SessionLocal)
+        status["data_tables"] = _ing.get_ingestion_status()
+    except Exception:
+        status["data_tables"] = "unavailable"
+
+    # Cache backend
+    try:
+        from cache import cache as _cache_inst
+        status["cache"] = {
+            "backend": "redis" if _cache_inst.using_redis else "memory",
+            "size": _cache_inst.size(),
+        }
+    except Exception:
+        status["cache"] = "unavailable"
+
+    return status
 
 
 @app.get("/cache/status")
@@ -5172,6 +5203,11 @@ def on_startup() -> None:
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS tier VARCHAR DEFAULT 'free'",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name VARCHAR DEFAULT ''",
+            # New data tables — create indexes for production query patterns
+            "CREATE INDEX IF NOT EXISTS ix_ohlcv_daily_symbol_date ON ohlcv_daily (symbol, date DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_macro_series_sid_date ON macro_series (series_id, date DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_sec_filings_cik_filed ON sec_filings (cik, filed_date DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_fundamentals_symbol ON fundamentals (symbol, period_end DESC)",
         ]
         for _sql in _schema_migrations:
             try:
@@ -5188,6 +5224,68 @@ def on_startup() -> None:
     except Exception as e:
         logger.warning("Startup cache prune failed: %s", e)
     _start_cache_warmer()
+
+
+# ---------------------------------------------------------------------------
+# Admin: Batch Ingestion Endpoints
+# ---------------------------------------------------------------------------
+
+from ingestion_scheduler import IngestionScheduler as _IngestionScheduler
+
+_ingestion = _IngestionScheduler(provider, SessionLocal)
+
+
+@app.post("/admin/ingest/eod")
+def admin_ingest_eod(
+    background_tasks: BackgroundTasks,
+    symbols: Optional[list[str]] = None,
+    user=Depends(get_optional_user),
+):
+    """Trigger EOD price ingestion for tracked symbols."""
+    syms = symbols or _ingestion.get_tracked_symbols()
+
+    def _run():
+        result = _ingestion.ingest_eod_prices(syms)
+        logger.info("EOD ingestion complete: %s", result)
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "symbols": len(syms)}
+
+
+@app.post("/admin/ingest/fred")
+def admin_ingest_fred(
+    background_tasks: BackgroundTasks,
+    series_ids: Optional[list[str]] = None,
+    user=Depends(get_optional_user),
+):
+    """Trigger FRED macro series ingestion."""
+    def _run():
+        result = _ingestion.ingest_fred_series(series_ids)
+        logger.info("FRED ingestion complete: %s", result)
+
+    background_tasks.add_task(_run)
+    return {"status": "started"}
+
+
+@app.post("/admin/ingest/sec")
+def admin_ingest_sec(
+    background_tasks: BackgroundTasks,
+    ciks: Optional[list[str]] = None,
+    user=Depends(get_optional_user),
+):
+    """Trigger SEC filing ingestion."""
+    def _run():
+        result = _ingestion.ingest_sec_filings(ciks)
+        logger.info("SEC ingestion complete: %s", result)
+
+    background_tasks.add_task(_run)
+    return {"status": "started"}
+
+
+@app.get("/admin/ingest/status")
+def admin_ingest_status(user=Depends(get_optional_user)):
+    """Return ingestion status: row counts and last-updated timestamps."""
+    return _ingestion.get_ingestion_status()
 
 
 if __name__ == "__main__":

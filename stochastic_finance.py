@@ -166,6 +166,103 @@ class BlackScholes:
         )
 
     @classmethod
+    def price_batch(
+        cls,
+        S: float,
+        K: np.ndarray,
+        T: np.ndarray | float,
+        r: float,
+        sigma: np.ndarray,
+        option_type: np.ndarray | str,
+        q: float = 0.0,
+    ) -> dict:
+        """
+        Vectorized Black-Scholes for arrays of contracts.
+        Returns dict of numpy arrays: price, delta, gamma, theta, vega, rho.
+        """
+        K = np.asarray(K, dtype=float)
+        sigma = np.asarray(sigma, dtype=float)
+        T_arr = np.broadcast_to(np.asarray(T, dtype=float), K.shape)
+
+        n = len(K)
+        prices = np.full(n, np.nan)
+        deltas = np.full(n, np.nan)
+        gammas = np.full(n, np.nan)
+        thetas = np.full(n, np.nan)
+        vegas = np.full(n, np.nan)
+        rhos = np.full(n, np.nan)
+
+        # Mask for valid inputs
+        valid = (T_arr > 0) & (sigma > 0) & (K > 0) & (S > 0)
+        if not np.any(valid):
+            return dict(price=prices, delta=deltas, gamma=gammas,
+                        theta=thetas, vega=vegas, rho=rhos)
+
+        Kv = K[valid]
+        sv = sigma[valid]
+        Tv = T_arr[valid]
+
+        sqrtT = np.sqrt(Tv)
+        d1 = (np.log(S / Kv) + (r - q + 0.5 * sv ** 2) * Tv) / (sv * sqrtT)
+        d2 = d1 - sv * sqrtT
+
+        N = stats.norm.cdf
+        n_pdf = stats.norm.pdf
+
+        Nd1 = N(d1)
+        Nd2 = N(d2)
+        Nnd1 = N(-d1)
+        Nnd2 = N(-d2)
+        nd1 = n_pdf(d1)
+
+        eq = np.exp(-q * Tv)
+        er = np.exp(-r * Tv)
+
+        # Handle option_type as scalar or array
+        if isinstance(option_type, str):
+            is_call = np.ones(np.sum(valid), dtype=bool) if option_type == "call" else np.zeros(np.sum(valid), dtype=bool)
+        else:
+            ot_arr = np.asarray(option_type)
+            is_call = (ot_arr[valid] == "call")
+
+        # Prices
+        call_price = S * eq * Nd1 - Kv * er * Nd2
+        put_price = Kv * er * Nnd2 - S * eq * Nnd1
+        p = np.where(is_call, call_price, put_price)
+
+        # Delta
+        call_delta = eq * Nd1
+        put_delta = -eq * Nnd1
+        d = np.where(is_call, call_delta, put_delta)
+
+        # Gamma (same for call/put)
+        g = eq * nd1 / (S * sv * sqrtT)
+
+        # Vega (per 1% vol change)
+        v = S * eq * nd1 * sqrtT / 100
+
+        # Theta (per calendar day)
+        common_theta = -S * eq * nd1 * sv / (2 * sqrtT)
+        call_theta = (common_theta - r * Kv * er * Nd2 + q * S * eq * Nd1) / 365
+        put_theta = (common_theta + r * Kv * er * Nnd2 - q * S * eq * Nnd1) / 365
+        th = np.where(is_call, call_theta, put_theta)
+
+        # Rho (per 1% rate change)
+        call_rho = Kv * Tv * er * Nd2 / 100
+        put_rho = -Kv * Tv * er * Nnd2 / 100
+        rh = np.where(is_call, call_rho, put_rho)
+
+        prices[valid] = p
+        deltas[valid] = d
+        gammas[valid] = g
+        thetas[valid] = th
+        vegas[valid] = v
+        rhos[valid] = rh
+
+        return dict(price=prices, delta=deltas, gamma=gammas,
+                    theta=thetas, vega=vegas, rho=rhos)
+
+    @classmethod
     def implied_vol(
         cls,
         market_price: float,

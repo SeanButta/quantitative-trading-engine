@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 
 import numpy as np
+import pandas as pd
 import polars as pl
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -192,118 +193,86 @@ class FeatureEngine:
                 except Exception:
                     pass
 
-            # Build a lookup: (timestamp, symbol) → pca factors
-            ts_idx = {ts: i for i, ts in enumerate(ts_list)}
+            # Build PCA lookup DataFrame and join (vectorized)
+            pca_rows = []
+            for sym in pca_factors:
+                for idx, ts in enumerate(ts_list):
+                    pca_rows.append({
+                        "timestamp": ts,
+                        "symbol": sym,
+                        "_pf1": float(pca_factors[sym][1][idx]),
+                        "_pf2": float(pca_factors[sym][2][idx]),
+                        "_pf3": float(pca_factors[sym][3][idx]),
+                    })
 
-            # Update combined DataFrame
-            pf1 = []
-            pf2 = []
-            pf3 = []
-            for row in combined.iter_rows(named=True):
-                sym = row["symbol"]
-                ts = row["timestamp"]
-                idx = ts_idx.get(ts)
-                if idx is not None and sym in pca_factors:
-                    pf1.append(float(pca_factors[sym][1][idx]))
-                    pf2.append(float(pca_factors[sym][2][idx]))
-                    pf3.append(float(pca_factors[sym][3][idx]))
-                else:
-                    pf1.append(float("nan"))
-                    pf2.append(float("nan"))
-                    pf3.append(float("nan"))
-
-            combined = combined.with_columns([
-                pl.Series("pca_factor_1", pf1),
-                pl.Series("pca_factor_2", pf2),
-                pl.Series("pca_factor_3", pf3),
-            ])
+            if pca_rows:
+                pca_df = pl.DataFrame(pca_rows)
+                combined = combined.drop(["pca_factor_1", "pca_factor_2", "pca_factor_3"])
+                combined = combined.join(pca_df, on=["timestamp", "symbol"], how="left")
+                combined = combined.rename({"_pf1": "pca_factor_1", "_pf2": "pca_factor_2", "_pf3": "pca_factor_3"})
         except Exception as e:
             logger.warning(f"PCA factor computation failed: {e}")
 
         return combined
 
-    # ── Rolling helpers ──────────────────────────────────────
+    # ── Rolling helpers (vectorized via pandas C-optimized rolling) ─────
 
     @staticmethod
     def _rolling_mean(arr: np.ndarray, window: int) -> np.ndarray:
-        result = np.full(len(arr), np.nan)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.nanmean(arr[i - window + 1: i + 1])
-        return result
+        s = pd.Series(arr)
+        return s.rolling(window, min_periods=window).mean().to_numpy()
 
     @staticmethod
     def _rolling_std(arr: np.ndarray, window: int) -> np.ndarray:
-        result = np.full(len(arr), np.nan)
-        for i in range(window - 1, len(arr)):
-            w = arr[i - window + 1: i + 1]
-            valid = w[~np.isnan(w)]
-            if len(valid) > 1:
-                result[i] = float(np.std(valid, ddof=1))
-        return result
+        s = pd.Series(arr)
+        return s.rolling(window, min_periods=2).std(ddof=1).to_numpy()
 
     @staticmethod
     def _rolling_zscore(arr: np.ndarray, window: int) -> np.ndarray:
-        result = np.full(len(arr), np.nan)
-        for i in range(window - 1, len(arr)):
-            w = arr[i - window + 1: i + 1]
-            valid = w[~np.isnan(w)]
-            if len(valid) > 1:
-                mu = np.mean(valid)
-                sigma = np.std(valid, ddof=1)
-                if sigma > 0:
-                    result[i] = (arr[i] - mu) / sigma
-                else:
-                    result[i] = 0.0
+        s = pd.Series(arr)
+        mu = s.rolling(window, min_periods=2).mean()
+        sigma = s.rolling(window, min_periods=2).std(ddof=1)
+        result = ((s - mu) / sigma).fillna(0.0).to_numpy().copy()
+        # Restore NaN for initial window
+        result[:window - 1] = np.nan
         return result
 
     @staticmethod
     def _compute_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int) -> np.ndarray:
         n = len(close)
+        # Vectorized True Range computation
         tr = np.full(n, np.nan)
-        for i in range(1, n):
-            hl = high[i] - low[i]
-            hc = abs(high[i] - close[i - 1])
-            lc = abs(low[i] - close[i - 1])
-            tr[i] = max(hl, hc, lc)
+        hl = high[1:] - low[1:]
+        hc = np.abs(high[1:] - close[:-1])
+        lc = np.abs(low[1:] - close[:-1])
+        tr[1:] = np.maximum(hl, np.maximum(hc, lc))
 
-        atr = np.full(n, np.nan)
-        for i in range(window, n):
-            valid = tr[i - window + 1: i + 1]
-            valid = valid[~np.isnan(valid)]
-            if len(valid) > 0:
-                atr[i] = float(np.mean(valid))
-        return atr
+        # Rolling mean of TR
+        return pd.Series(tr).rolling(window, min_periods=1).mean().to_numpy()
 
     @staticmethod
     def _compute_rsi(close: np.ndarray, window: int) -> np.ndarray:
-        n = len(close)
-        rsi = np.full(n, np.nan)
         deltas = np.diff(close)
-        gains = np.maximum(deltas, 0)
-        losses = np.maximum(-deltas, 0)
+        gains = pd.Series(np.maximum(deltas, 0))
+        losses = pd.Series(np.maximum(-deltas, 0))
 
-        for i in range(window, n):
-            g = gains[i - window: i]
-            l = losses[i - window: i]
-            avg_gain = np.mean(g) if len(g) > 0 else 0
-            avg_loss = np.mean(l) if len(l) > 0 else 0
-            if avg_loss == 0:
-                rsi[i] = 100.0
-            else:
-                rs = avg_gain / avg_loss
-                rsi[i] = 100 - (100 / (1 + rs))
-        return rsi
+        avg_gain = gains.rolling(window, min_periods=window).mean()
+        avg_loss = losses.rolling(window, min_periods=window).mean()
+
+        rs = avg_gain / avg_loss
+        rsi_vals = 100 - (100 / (1 + rs))
+        # Where avg_loss == 0, RSI = 100
+        rsi_vals = rsi_vals.fillna(100.0)
+
+        result = np.full(len(close), np.nan)
+        result[window:] = rsi_vals.iloc[window - 1:].to_numpy()
+        return result
 
     @staticmethod
     def _compute_bb_width(close: np.ndarray, window: int) -> np.ndarray:
-        n = len(close)
-        bb_width = np.full(n, np.nan)
-        for i in range(window - 1, n):
-            w = close[i - window + 1: i + 1]
-            valid = w[~np.isnan(w)]
-            if len(valid) > 1:
-                mu = np.mean(valid)
-                sigma = np.std(valid, ddof=1)
-                if mu > 0:
-                    bb_width[i] = 4 * sigma / mu  # 2-sigma band width as % of price
-        return bb_width
+        s = pd.Series(close)
+        mu = s.rolling(window, min_periods=2).mean()
+        sigma = s.rolling(window, min_periods=2).std(ddof=1)
+        result = np.where(mu > 0, 4 * sigma / mu, np.nan)
+        result[:window - 1] = np.nan
+        return result

@@ -159,29 +159,56 @@ class OptionsProvider:
                     chain = ticker.option_chain(exp_str)
 
                     for opt_type, df_side in [("call", chain.calls), ("put", chain.puts)]:
-                        for _, row in df_side.iterrows():
-                            iv = float(row.get("impliedVolatility", 0) or 0)
-                            strike = float(row.get("strike", 0) or 0)
-                            greeks = _compute_greeks(spot, strike, T, rfr, iv, opt_type)
+                        if df_side.empty:
+                            continue
+
+                        # Extract arrays for vectorized Greeks
+                        strikes = df_side["strike"].fillna(0).to_numpy(dtype=float)
+                        ivs = df_side["impliedVolatility"].fillna(0).to_numpy(dtype=float)
+                        ivs = np.clip(ivs, 0, 20.0)
+                        bids = df_side["bid"].fillna(0).to_numpy(dtype=float)
+                        asks = df_side["ask"].fillna(0).to_numpy(dtype=float)
+                        last_prices = df_side["lastPrice"].fillna(0).to_numpy(dtype=float)
+                        volumes = df_side["volume"].fillna(0).to_numpy(dtype=int)
+                        ois = df_side["openInterest"].fillna(0).to_numpy(dtype=int)
+                        itms = df_side["inTheMoney"].fillna(False).to_numpy(dtype=bool)
+
+                        # Vectorized Black-Scholes Greeks
+                        try:
+                            from stochastic_finance import BlackScholes
+                            greeks = BlackScholes.price_batch(
+                                spot, strikes, T, rfr, ivs, opt_type
+                            )
+                        except Exception:
+                            n_contracts = len(strikes)
+                            greeks = dict(
+                                delta=np.full(n_contracts, float("nan")),
+                                gamma=np.full(n_contracts, float("nan")),
+                                theta=np.full(n_contracts, float("nan")),
+                                vega=np.full(n_contracts, float("nan")),
+                                rho=np.full(n_contracts, float("nan")),
+                            )
+
+                        for j in range(len(strikes)):
                             rows.append({
                                 "symbol":          symbol,
                                 "snapshot_at":     snapshot_ts,
                                 "expiration":      exp_str,
                                 "option_type":     opt_type,
                                 "spot":            spot,
-                                "strike":          strike,
-                                "bid":             float(row.get("bid", 0) or 0),
-                                "ask":             float(row.get("ask", 0) or 0),
-                                "last_price":      float(row.get("lastPrice", 0) or 0),
-                                "volume":          int(row.get("volume", 0) or 0),
-                                "open_interest":   int(row.get("openInterest", 0) or 0),
-                                "implied_vol":     iv,
-                                "in_the_money":    bool(row.get("inTheMoney", False)),
-                                "delta":           greeks["delta"],
-                                "gamma":           greeks["gamma"],
-                                "theta":           greeks["theta"],
-                                "vega":            greeks["vega"],
-                                "rho":             greeks["rho"],
+                                "strike":          float(strikes[j]),
+                                "bid":             float(bids[j]),
+                                "ask":             float(asks[j]),
+                                "last_price":      float(last_prices[j]),
+                                "volume":          int(volumes[j]),
+                                "open_interest":   int(ois[j]),
+                                "implied_vol":     float(ivs[j]),
+                                "in_the_money":    bool(itms[j]),
+                                "delta":           float(greeks["delta"][j]),
+                                "gamma":           float(greeks["gamma"][j]),
+                                "theta":           float(greeks["theta"][j]),
+                                "vega":            float(greeks["vega"][j]),
+                                "rho":             float(greeks["rho"][j]),
                             })
                 except Exception as exp_err:
                     logger.debug("Skipping %s expiry %s: %s", symbol, exp_str, exp_err)

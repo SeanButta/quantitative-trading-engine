@@ -95,7 +95,7 @@ class BacktestEngine:
         weights_fn: Callable[[dict, dict], dict] = None,
     ) -> BacktestResult:
         """
-        Run backtest.
+        Run backtest (vectorized).
 
         prices: DataFrame with (timestamp, symbol, open, close)
         signals: DataFrame with (timestamp, symbol, signal columns...)
@@ -108,13 +108,33 @@ class BacktestEngine:
 
         symbols = prices["symbol"].unique().sort().to_list()
         timestamps = prices["timestamp"].unique().sort().to_list()
+        n_t = len(timestamps)
+        n_s = len(symbols)
 
-        # Build price lookup
-        price_lookup = {}
+        if n_t == 0 or n_s == 0:
+            return BacktestResult(
+                equity_curve=np.array([]),
+                timestamps=[],
+                daily_returns=np.array([]),
+                trades=[],
+                weights_history=[],
+                metrics={},
+            )
+
+        sym_idx = {sym: i for i, sym in enumerate(symbols)}
+        ts_idx = {ts: i for i, ts in enumerate(timestamps)}
+
+        # --- Build price matrices [T x S] ---
+        close_matrix = np.full((n_t, n_s), np.nan)
+        open_matrix = np.full((n_t, n_s), np.nan)
         for row in prices.iter_rows(named=True):
-            price_lookup[(row["timestamp"], row["symbol"])] = row
+            ti = ts_idx.get(row["timestamp"])
+            si = sym_idx.get(row["symbol"])
+            if ti is not None and si is not None:
+                close_matrix[ti, si] = row["close"]
+                open_matrix[ti, si] = row["open"]
 
-        # Build signal lookup
+        # --- Build signal lookup (still dict-based for weights_fn compatibility) ---
         sig_cols = [c for c in signals.columns if c not in ("timestamp", "symbol")]
         signal_lookup = {}
         for row in signals.iter_rows(named=True):
@@ -122,79 +142,70 @@ class BacktestEngine:
                 c: row[c] for c in sig_cols
             }
 
-        # Portfolio state
+        # --- Vectorized portfolio simulation ---
         capital = self.config.initial_capital
-        positions = {sym: 0.0 for sym in symbols}  # shares held
+        positions_vec = np.zeros(n_s)
         prev_weights = {sym: 0.0 for sym in symbols}
 
-        equity_curve = []
-        daily_returns = []
+        equity_curve = np.empty(n_t)
+        daily_returns = np.empty(n_t)
         trades = []
         weights_history = []
 
         fee_mult = self.config.fee_bps / 10_000
         slip_mult = self.config.slippage_bps / 10_000
 
-        for i, ts in enumerate(timestamps):
-            # Portfolio value at this timestamp (using close prices)
-            portfolio_value = capital
-            for sym in symbols:
-                price_row = price_lookup.get((ts, sym))
-                if price_row and positions[sym] != 0:
-                    portfolio_value += positions[sym] * price_row["close"]
+        for i in range(n_t):
+            ts = timestamps[i]
+            close_row = close_matrix[i]
 
-            equity_curve.append(portfolio_value)
+            # Portfolio value: cash + positions . close (vectorized dot product)
+            pos_value = np.nansum(positions_vec * close_row)
+            portfolio_value = capital + pos_value
+            equity_curve[i] = portfolio_value
 
             if i == 0:
-                daily_returns.append(0.0)
+                daily_returns[i] = 0.0
                 weights_history.append(prev_weights.copy())
                 continue
 
             prev_val = equity_curve[i - 1]
-            daily_ret = (portfolio_value - prev_val) / prev_val if prev_val > 0 else 0.0
-            daily_returns.append(daily_ret)
+            daily_returns[i] = (portfolio_value - prev_val) / prev_val if prev_val > 0 else 0.0
 
-            # --- Signal → Target Weights (using CURRENT bar signals, trade NEXT bar) ---
-            if i < len(timestamps) - 1:
-                next_ts = timestamps[i + 1]
+            # --- Signal → Target Weights ---
+            if i < n_t - 1:
+                next_open_row = open_matrix[i + 1]
 
-                # Get signals for current timestamp
                 current_signals = {}
                 for sym in symbols:
                     current_signals[sym] = signal_lookup.get((ts, sym), {})
 
-                # Compute target weights
                 target_weights = weights_fn(current_signals, prev_weights, symbols)
 
-                # Execute trades at next open
-                for sym in symbols:
+                # Vectorized trade execution
+                for j, sym in enumerate(symbols):
                     target_w = target_weights.get(sym, 0.0)
                     current_w = prev_weights.get(sym, 0.0)
 
                     if abs(target_w - current_w) < 1e-4:
                         continue
 
-                    next_price_row = price_lookup.get((next_ts, sym))
-                    if next_price_row is None:
+                    exec_price = next_open_row[j]
+                    if np.isnan(exec_price) or exec_price <= 0:
                         continue
 
-                    exec_price = next_price_row["open"]
                     trade_value = (target_w - current_w) * portfolio_value
-
-                    # Apply slippage (adverse)
                     direction = 1 if trade_value > 0 else -1
                     slippage = abs(trade_value) * slip_mult * direction
                     fee = abs(trade_value) * fee_mult
-
                     net_cost = trade_value + slippage + fee * direction
 
-                    # Update positions
-                    shares_delta = trade_value / exec_price if exec_price > 0 else 0
-                    positions[sym] += shares_delta
+                    shares_delta = trade_value / exec_price
+                    positions_vec[j] += shares_delta
                     capital -= net_cost
 
                     trades.append(Trade(
-                        timestamp=next_ts,
+                        timestamp=timestamps[i + 1],
                         symbol=sym,
                         direction=direction,
                         quantity=abs(shares_delta),
@@ -208,15 +219,12 @@ class BacktestEngine:
 
             weights_history.append(prev_weights.copy())
 
-        # --- Compute Metrics ---
-        equity = np.array(equity_curve)
-        rets = np.array(daily_returns)
-        metrics = self._compute_metrics(equity, rets, trades)
+        metrics = self._compute_metrics(equity_curve, daily_returns, trades)
 
         return BacktestResult(
-            equity_curve=equity,
+            equity_curve=equity_curve,
             timestamps=timestamps,
-            daily_returns=rets,
+            daily_returns=daily_returns,
             trades=trades,
             weights_history=weights_history,
             metrics=metrics,
