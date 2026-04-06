@@ -442,10 +442,21 @@ function OverviewView({onNav, onDetail}) {
     return { summary: bullets };
   }, [scores, mkt, fi, cr, ca]);
 
+  // ── Unified regime (cross-tab alignment) ──
+  const [unifiedRegime, setUnifiedRegime] = useState(null);
+  useEffect(() => {
+    if (mkt) {
+      fetch("/api/regime/unified").then(r=>r.ok?r.json():null).then(d=>setUnifiedRegime(d)).catch(()=>{});
+    }
+  }, [mkt]);
+
   // ── Helper components ──
   const regimeColor = r => ({
     "Risk-On": C.grn, "Constructive": "#66bb6a", "Neutral": C.amb, "Cautious": "#ff8a65", "Risk-Off": C.red
   })[r] || C.mut;
+  const alignmentColor = a => ({
+    "Aligned": C.grn, "Partially Aligned": C.amb, "Diverging": "#ff8a65", "Conflicted": C.red
+  })[a] || C.mut;
 
   const pillarColor = s => s >= 0.5 ? C.grn : s <= -0.5 ? C.red : C.amb;
   const pillarLabel = s => s >= 0.5 ? "Positive" : s <= -0.5 ? "Negative" : "Neutral";
@@ -548,6 +559,33 @@ function OverviewView({onNav, onDetail}) {
               ))}
             </div>
           </Section>
+        )}
+
+        {/* ═══════════ CROSS-TAB ALIGNMENT ═══════════ */}
+        {unifiedRegime && unifiedRegime.alignment && (
+          <div style={{padding:"12px 16px", borderRadius:12, background:C.dim, border:`1px solid ${alignmentColor(unifiedRegime.alignment.overall_alignment)}30`,
+            display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10}}>
+            <div style={{display:"flex",gap:12,alignItems:"center"}}>
+              <div>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>SYSTEM ALIGNMENT</div>
+                <div style={mono(12, alignmentColor(unifiedRegime.alignment.overall_alignment), 700)}>{unifiedRegime.alignment.overall_alignment}</div>
+              </div>
+              <div style={{width:1,height:28,background:C.bdr}}/>
+              <div>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>DOMINANT</div>
+                <div style={mono(12, regimeColor(unifiedRegime.alignment.dominant_regime), 700)}>{unifiedRegime.alignment.dominant_regime}</div>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              {Object.entries(unifiedRegime.tabs || {}).map(([tab, data]) => (
+                <span key={tab} style={{...mono(8, regimeColor(data.mapped_regime), 600),
+                  padding:"2px 8px", borderRadius:10, background:regimeColor(data.mapped_regime)+"15",
+                  border:`1px solid ${regimeColor(data.mapped_regime)}30`}}>
+                  {tab.charAt(0).toUpperCase()+tab.slice(1)}: {data.mapped_regime}
+                </span>
+              ))}
+            </div>
+          </div>
         )}
 
         {/* ═══════════ 3. EQUITY LEADERSHIP ═══════════ */}
@@ -7594,13 +7632,16 @@ function MacroView() {
   const [searchResults, setSearchResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [activeSection, setActiveSection] = useState("snapshot"); // snapshot | charts
+  const [unifiedRegime, setUnifiedRegime] = useState(null);
 
   // ── Load macro snapshot ──
   useEffect(() => {
     setLoading(true);
     fetch("/api/macro/snapshot", {headers: token ? {Authorization:`Bearer ${token}`} : {}})
       .then(r => r.ok ? r.json() : Promise.reject("Snapshot error"))
-      .then(d => { setSnapshot(d); setLoading(false); })
+      .then(d => { setSnapshot(d); setLoading(false);
+        fetch("/api/regime/unified").then(r=>r.ok?r.json():null).then(u=>setUnifiedRegime(u)).catch(()=>{});
+      })
       .catch(e => { setErr(String(e)); setLoading(false); });
   }, []);
 
@@ -7742,6 +7783,33 @@ function MacroView() {
             </div>
           )}
         </Section>
+
+        {/* ── CROSS-TAB ALIGNMENT ── */}
+        {unifiedRegime && unifiedRegime.alignment && (
+          <div style={{padding:"12px 16px", borderRadius:12, background:C.dim, border:`1px solid ${C.amb}30`,
+            display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10}}>
+            <div style={{display:"flex",gap:12,alignItems:"center"}}>
+              <div>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>SYSTEM ALIGNMENT</div>
+                <div style={mono(12, unifiedRegime.alignment.overall_alignment === "Aligned" ? C.grn : unifiedRegime.alignment.overall_alignment === "Conflicted" ? C.red : C.amb, 700)}>
+                  {unifiedRegime.alignment.overall_alignment}
+                </div>
+              </div>
+              <div style={{width:1,height:28,background:C.bdr}}/>
+              <div style={{flex:1}}>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>CROSS-TAB</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:2}}>
+                  {Object.entries(unifiedRegime.tabs || {}).map(([tab, data]) => (
+                    <span key={tab} style={{...mono(8, regimeColor(snap.regime) || C.mut, 600),
+                      padding:"2px 8px", borderRadius:10, background:C.dim, border:`1px solid ${C.bdr}`}}>
+                      {tab.charAt(0).toUpperCase()+tab.slice(1)}: {data.mapped_regime}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── 2. PILLAR SCORECARDS ── */}
         <div>
@@ -10026,6 +10094,87 @@ function SectorsView() {
       </div>
 
       {jobBar}
+
+      {/* ── SECTOR REGIME & LEADERSHIP SNAPSHOT ── */}
+      {summaries && summaries.length > 0 && (()=>{
+        const CYCL = new Set(["Energy","Materials","Industrials","Financials","Consumer Discretionary"]);
+        const DEF = new Set(["Utilities","Consumer Staples","Health Care","Real Estate"]);
+        const GRO = new Set(["Information Technology","Communication Services"]);
+        const cached = summaries.filter(s=>s.cached);
+        if (cached.length < 3) return null;
+
+        const allChgs = cached.map(s => s.avg_change_1d || s.etf_change_1d || 0);
+        const advancing = cached.filter(s => (s.avg_change_1d||s.etf_change_1d||0) >= 0).length;
+        const breadthR = advancing / cached.length;
+        const avgChg = allChgs.reduce((a,b)=>a+b,0) / allChgs.length;
+
+        const cyc = cached.filter(s=>CYCL.has(s.sector)).map(s=>s.avg_change_1d||s.etf_change_1d||0);
+        const def_ = cached.filter(s=>DEF.has(s.sector)).map(s=>s.avg_change_1d||s.etf_change_1d||0);
+        const gro = cached.filter(s=>GRO.has(s.sector)).map(s=>s.avg_change_1d||s.etf_change_1d||0);
+        const cycAvg = cyc.length ? cyc.reduce((a,b)=>a+b,0)/cyc.length : 0;
+        const defAvg = def_.length ? def_.reduce((a,b)=>a+b,0)/def_.length : 0;
+        const groAvg = gro.length ? gro.reduce((a,b)=>a+b,0)/gro.length : 0;
+
+        let rotation;
+        if (breadthR >= 0.8 && cycAvg > 0 && defAvg > 0 && groAvg > 0) rotation = "Broad Participation";
+        else if (cycAvg > defAvg + 0.15 && cycAvg > groAvg + 0.1 && cycAvg > 0) rotation = "Cyclical Leadership";
+        else if (defAvg > cycAvg + 0.15 && defAvg > groAvg + 0.1) rotation = "Defensive Rotation";
+        else if (groAvg > cycAvg + 0.15 && groAvg > defAvg + 0.1 && groAvg > 0) rotation = "Growth Leadership";
+        else rotation = "Mixed Rotation";
+
+        // Map to shared regime
+        let mappedRegime;
+        if (rotation === "Broad Participation" && avgChg > 0.4) mappedRegime = "Risk-On";
+        else if (rotation === "Cyclical Leadership" && avgChg > 0.15) mappedRegime = "Constructive";
+        else if (rotation === "Growth Leadership" && breadthR < 0.4) mappedRegime = "Neutral";
+        else if (rotation === "Defensive Rotation") mappedRegime = "Cautious";
+        else if (avgChg < -0.35) mappedRegime = "Risk-Off";
+        else if (rotation === "Mixed Rotation") mappedRegime = "Transitional";
+        else mappedRegime = "Neutral";
+
+        const regCol = ({"Risk-On":C.grn,"Constructive":"#66bb6a","Neutral":C.amb,"Cautious":"#ff8a65","Risk-Off":C.red,"Transitional":C.amb})[mappedRegime]||C.mut;
+        const rotCol = ({"Broad Participation":C.grn,"Cyclical Leadership":"#66bb6a","Defensive Rotation":"#ff8a65","Growth Leadership":C.sky,"Mixed Rotation":C.amb})[rotation]||C.mut;
+
+        return (
+          <div style={{borderRadius:14,border:`1.5px solid ${regCol}30`,background:regCol+"07",padding:"16px 20px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12,marginBottom:12}}>
+              <div>
+                <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",marginBottom:4}}>SECTOR LEADERSHIP</div>
+                <div style={mono(20, rotCol, 800)}>{rotation}</div>
+              </div>
+              <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>REGIME</div>
+                  <div style={mono(14, regCol, 700)}>{mappedRegime}</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>BREADTH</div>
+                  <div style={mono(14, breadthR >= 0.7 ? C.grn : breadthR < 0.4 ? C.red : C.amb, 700)}>{advancing}/{cached.length}</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>AVG 1D</div>
+                  <div style={mono(14, avgChg >= 0 ? C.grn : C.red, 700)}>{avgChg >= 0 ? "+" : ""}{avgChg.toFixed(2)}%</div>
+                </div>
+              </div>
+            </div>
+            {/* Category breakdown */}
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+              <div style={{padding:"8px 10px",borderRadius:8,background:C.dim,textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>CYCLICALS</div>
+                <div style={mono(13, cycAvg >= 0 ? C.grn : C.red, 700)}>{cycAvg >= 0 ? "+" : ""}{cycAvg.toFixed(2)}%</div>
+              </div>
+              <div style={{padding:"8px 10px",borderRadius:8,background:C.dim,textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>DEFENSIVES</div>
+                <div style={mono(13, defAvg >= 0 ? C.grn : C.red, 700)}>{defAvg >= 0 ? "+" : ""}{defAvg.toFixed(2)}%</div>
+              </div>
+              <div style={{padding:"8px 10px",borderRadius:8,background:C.dim,textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>GROWTH</div>
+                <div style={mono(13, groAvg >= 0 ? C.grn : C.red, 700)}>{groAvg >= 0 ? "+" : ""}{groAvg.toFixed(2)}%</div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {loadingOv&&(
         <Card><div style={{...mono(11,C.mut),padding:"30px 0",textAlign:"center",display:"flex",gap:8,alignItems:"center",justifyContent:"center"}}><RefreshCw size={13}/>Loading sector data…</div></Card>

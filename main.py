@@ -2860,6 +2860,91 @@ def technical_analysis(
 
 
 # ---------------------------------------------------------------------------
+# Endpoints: Unified Regime Dashboard
+# ---------------------------------------------------------------------------
+
+@app.get("/regime/unified")
+def regime_unified():
+    """
+    Unified regime dashboard: cross-tab alignment of Markets, Macro, and Sectors.
+    Returns mapped regimes, alignment status, and narrative summary.
+    """
+    from regime_engine import build_unified_regime
+    from cache import cache
+
+    cached = cache.get("regime:unified")
+    if cached:
+        return cached
+
+    # Gather data from each tab
+    markets_scores = None
+    macro_snap = None
+    sector_data = None
+
+    # Markets data
+    try:
+        from cache import cache as _c
+        mkt = _c.get("market:overview")
+        if mkt:
+            # Compute scores inline (same logic as frontend)
+            fi = mkt.get("fixed_income", {})
+            cr = mkt.get("credit", {})
+            vix = mkt.get("vix", {}).get("value")
+            fg = mkt.get("sentiment", {}).get("score")
+
+            vol_s = 0
+            if vix is not None:
+                vol_s += (-0.5 if vix > 30 else 0.5 if vix < 20 else 0)
+            if fg is not None:
+                vol_s += (-0.5 if fg < 30 else 0.5 if fg > 60 else 0)
+            vol_s = max(-1, min(1, vol_s))
+
+            indices = mkt.get("indices", [])
+            greens = sum(1 for i in indices if (i.get("change_pct") or 0) >= 0)
+            eq_s = 1 if greens >= 3 else (-1 if greens <= 1 else 0)
+
+            curve = fi.get("yield_curve")
+            rates_s = 0
+            if curve is not None:
+                rates_s = 0.5 if curve > 0.5 else (-0.5 if curve < -0.2 else 0)
+            if fi.get("curve_regime") == "inverted":
+                rates_s -= 0.5
+            rates_s = max(-1, min(1, rates_s))
+
+            credit_s = 0
+            hyg_chg = cr.get("hyg", {}).get("change_pct")
+            if hyg_chg is not None:
+                credit_s += 0.5 if hyg_chg > 0 else -0.5
+            credit_s = max(-1, min(1, credit_s))
+
+            comp = 0.3 * vol_s + 0.25 * eq_s + 0.25 * credit_s + 0.2 * rates_s
+            regime = "Risk-On" if comp >= 0.5 else "Constructive" if comp >= 0.2 else "Neutral" if comp > -0.2 else "Cautious" if comp > -0.5 else "Risk-Off"
+            markets_scores = {"composite": comp, "regime": regime, "volatility": vol_s, "equities": eq_s, "rates": rates_s, "credit": credit_s}
+    except Exception as e:
+        logger.debug("Regime: markets data unavailable: %s", e)
+
+    # Macro data
+    try:
+        macro_snap = cache.get("macro:snapshot")
+    except Exception:
+        pass
+
+    # Sectors data
+    try:
+        from sectors_engine import SectorsStore
+        store = SectorsStore(SECTORS_DIR)
+        overview = store.overview()
+        if overview:
+            sector_data = overview
+    except Exception as e:
+        logger.debug("Regime: sectors data unavailable: %s", e)
+
+    result = build_unified_regime(markets_scores, macro_snap, sector_data)
+    cache.set("regime:unified", result, 300)  # 5 min cache
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Endpoints: Macro Regime Engine
 # ---------------------------------------------------------------------------
 
