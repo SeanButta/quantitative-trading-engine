@@ -636,6 +636,23 @@ class SignalHealth(Base):
 # Alpha Opportunity Engine Tables
 # ===========================================================================
 
+class CachedResult(Base):
+    """
+    Persistent computed-result cache. Stores any JSON-serializable
+    computation output keyed by (cache_key). Survives restarts,
+    shared across workers. Used for TA results, sentiment, advisor,
+    domain scores, etc.
+    """
+    __tablename__ = "cached_results"
+
+    cache_key    = Column(String, primary_key=True)          # e.g. "ta:AAPL:1y:1d", "sentiment:AAPL", "advisor:AAPL"
+    value_json   = Column(Text, nullable=False)
+    expires_at   = Column(DateTime, nullable=False, index=True)
+    created_at   = Column(DateTime, default=datetime.utcnow)
+    updated_at   = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    source       = Column(String, default="")                # which endpoint/job created this
+
+
 class UniverseRegistry(Base):
     """Central ticker registry for the Alpha scoring engine."""
     __tablename__ = "universe_registry"

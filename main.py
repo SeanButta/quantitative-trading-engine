@@ -2823,11 +2823,18 @@ def technical_analysis(
     cci_period:      int   = 20,
     williams_period: int   = 14,
 ):
-    """Fetch OHLCV from yfinance and return all technical indicators. Cached 15 min."""
+    """Fetch OHLCV from yfinance and return all technical indicators. DB-cached 4 hours, memory 15 min."""
     cache_key = f"ta:{symbol.upper()}:{period}:{interval}"
+    # Layer 1: Memory cache
     cached = _get_cache(cache_key)
     if cached is not None:
         return cached
+    # Layer 2: DB cache
+    from precompute import db_cache_get
+    db_cached = db_cache_get(SessionLocal, cache_key)
+    if db_cached is not None:
+        _set_cache(cache_key, db_cached, _TTL_TECHNICAL, "ta")
+        return db_cached
     try:
         from technical_analysis import fetch_and_compute
         sma_list = [int(x) for x in sma_periods.split(",") if x.strip().isdigit()]
@@ -2853,6 +2860,12 @@ def technical_analysis(
             result["god_mode"] = None
         out = _sanitize(result)
         _set_cache(cache_key, out, _TTL_TECHNICAL, "ta")
+        # Persist to DB for cross-request durability
+        try:
+            from precompute import db_cache_set, TTL_TA
+            db_cache_set(SessionLocal, cache_key, out, TTL_TA, source="ta_endpoint")
+        except Exception:
+            pass
         return out
     except Exception as e:
         logger.exception("TA compute failed for %s", symbol)
@@ -2865,21 +2878,37 @@ def technical_analysis(
 
 @app.get("/alpha/opportunities")
 def alpha_opportunities():
-    """Scan the default universe and return ranked Alpha opportunities."""
+    """Scan the default universe and return ranked Alpha opportunities. DB-first, live fallback."""
     from alpha_engine import DEFAULT_UNIVERSE, rank_opportunity
-    from ensemble_engine import normalize_ml_signal, normalize_sentiment_signal, normalize_technical_signals
+    from precompute import db_cache_get, db_cache_set, TTL_ALPHA
     from cache import cache
 
+    # Layer 1: Memory cache
     cached = cache.get("alpha:opportunities")
     if cached:
         return cached
 
+    # Layer 2: DB cache
+    db_cached = db_cache_get(SessionLocal, "alpha:opportunities")
+    if db_cached:
+        cache.set("alpha:opportunities", db_cached, 900)
+        return db_cached
+
+    # Layer 3: Compute from pre-cached domain scores (fast path)
     results = []
     for ticker in DEFAULT_UNIVERSE:
         sym = ticker["symbol"]
-        domain_outputs = []
+        # Try to read pre-computed domain score
+        domain_cached = db_cache_get(SessionLocal, f"alpha:domain:{sym}")
+        if domain_cached and domain_cached.get("alpha_score") is not None:
+            domain_cached["display_name"] = ticker["display_name"]
+            domain_cached["asset_type"] = ticker["asset_type"]
+            domain_cached["sector"] = ticker.get("sector", "")
+            results.append(domain_cached)
+            continue
 
-        # Technical signal as domain output
+        # Fallback: compute live (slow path)
+        domain_outputs = []
         try:
             from technical_analysis import fetch_and_compute
             from signal_strategies import StrategyEngine
@@ -2901,7 +2930,6 @@ def alpha_opportunities():
         except Exception:
             pass
 
-        # Sentiment as domain output
         try:
             from sentiment_engine import SentimentEngine
             se2 = SentimentEngine()
@@ -2932,7 +2960,8 @@ def alpha_opportunities():
         "scored": len(results),
         "timestamp": datetime.utcnow().isoformat(),
     }
-    cache.set("alpha:opportunities", output, 900)  # 15 min cache
+    cache.set("alpha:opportunities", output, 900)
+    db_cache_set(SessionLocal, "alpha:opportunities", output, TTL_ALPHA, source="alpha_endpoint")
     return output
 
 
@@ -3423,9 +3452,16 @@ def get_sentiment(symbol: str, window_hours: int = 24):
     """
     sym = symbol.upper()
     cache_key = f"sentiment:{sym}:{window_hours}"
+    # Layer 1: Memory
     cached = _get_cache(cache_key)
     if cached is not None:
         return cached
+    # Layer 2: DB
+    from precompute import db_cache_get
+    db_cached = db_cache_get(SessionLocal, f"sentiment:{sym}")
+    if db_cached is not None:
+        _set_cache(cache_key, db_cached, _TTL_SENTIMENT, "sentiment")
+        return db_cached
     try:
         from sentiment_engine import SentimentEngine
         engine = SentimentEngine()
@@ -3446,6 +3482,11 @@ def get_sentiment(symbol: str, window_hours: int = 24):
             "blurb":            result.blurb,
         })
         _set_cache(cache_key, out, _TTL_SENTIMENT, "sentiment")
+        try:
+            from precompute import db_cache_set, TTL_SENTIMENT
+            db_cache_set(SessionLocal, f"sentiment:{sym}", out, TTL_SENTIMENT, source="sentiment_endpoint")
+        except Exception:
+            pass
         return out
     except Exception as e:
         logger.exception("Sentiment failed for %s", sym)
@@ -5563,6 +5604,24 @@ def on_startup() -> None:
 from ingestion_scheduler import IngestionScheduler as _IngestionScheduler
 
 _ingestion = _IngestionScheduler(provider, SessionLocal)
+
+
+@app.post("/admin/precompute")
+def admin_precompute(
+    background_tasks: BackgroundTasks,
+    symbols: Optional[list[str]] = None,
+    user=Depends(get_optional_user),
+):
+    """Trigger batch pre-computation of TA, sentiment, and domain scores for all universe tickers."""
+    def _run():
+        from precompute import precompute_universe
+        result = precompute_universe(SessionLocal, symbols)
+        logger.info("Precompute complete: %s", result)
+
+    background_tasks.add_task(_run)
+    from alpha_engine import DEFAULT_UNIVERSE
+    n = len(symbols) if symbols else len(DEFAULT_UNIVERSE)
+    return {"status": "started", "tickers": n}
 
 
 @app.post("/admin/ingest/eod")
