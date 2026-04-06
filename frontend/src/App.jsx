@@ -4832,6 +4832,177 @@ function OptionsView() {
         {error && <div style={{...mono(10,C.red),marginTop:8,padding:"6px 10px",borderRadius:6,background:C.red+"10",border:`1px solid ${C.red}30`}}>✗ {error}</div>}
       </Card>
 
+      {/* ═══════════ OPTIONS REGIME SNAPSHOT + TOP OPPORTUNITIES ═══════════ */}
+      {chain && chain.length > 0 && summary && (()=>{
+        // ── Contract Scoring Engine ──
+        const hv20 = summary?.hv20 || 0;
+        const ivRank = summary?.iv_rank || 50;
+        const spot0 = chain[0]?.spot || 0;
+
+        // Vol Regime
+        const avgIV = chain.reduce((s,c) => s + (c.implied_vol||0), 0) / chain.length;
+        const ivHvRatio = hv20 > 0 ? avgIV / hv20 : 1;
+        const volRegime = ivHvRatio > 1.3 ? "Expensive" : ivHvRatio < 0.9 ? "Cheap" : "Fair";
+
+        // Skew Regime (put vs call IV)
+        const calls = chain.filter(c => c.option_type === "call" && c.implied_vol > 0);
+        const puts = chain.filter(c => c.option_type === "put" && c.implied_vol > 0);
+        const avgCallIV = calls.length ? calls.reduce((s,c)=>s+c.implied_vol,0)/calls.length : 0;
+        const avgPutIV = puts.length ? puts.reduce((s,c)=>s+c.implied_vol,0)/puts.length : 0;
+        const skewRegime = avgPutIV > avgCallIV * 1.1 ? "Put-rich" : avgCallIV > avgPutIV * 1.1 ? "Call-rich" : "Flat";
+
+        // Liquidity Regime
+        const liquidContracts = chain.filter(c => (c.open_interest||0) >= 500 && (c.bid||0) > 0);
+        const liqRatio = liquidContracts.length / Math.max(chain.length, 1);
+        const liquidityRegime = liqRatio > 0.4 ? "Strong" : liqRatio > 0.2 ? "Mixed" : "Weak";
+
+        // Strategy Bias
+        const strategyBias = volRegime === "Expensive" ? "Sell Premium" : volRegime === "Cheap" ? "Buy Vol" : (skewRegime === "Put-rich" ? "Neutral Structures" : "Sell Premium");
+
+        // Contract scoring
+        const scoreContract = (c) => {
+          let liq = 0, vol = 50, struc = 50, strat = 50, cat = 50;
+          // Liquidity
+          const mid = (c.bid > 0 && c.ask > 0) ? (c.bid + c.ask) / 2 : 0;
+          if (mid > 0) liq += 20;
+          const oi = c.open_interest || 0;
+          if (oi >= 5000) liq += 30; else if (oi >= 1000) liq += 22; else if (oi >= 250) liq += 14; else if (oi >= 50) liq += 6;
+          const v = c.volume || 0;
+          if (v >= 1000) liq += 25; else if (v >= 250) liq += 18; else if (v >= 50) liq += 10;
+          const spread = mid > 0 ? Math.abs((c.ask||0) - (c.bid||0)) / mid : 1;
+          if (spread <= 0.02) liq += 25; else if (spread <= 0.05) liq += 18; else if (spread <= 0.10) liq += 8; else liq -= 10;
+          liq = Math.max(0, Math.min(100, liq));
+
+          // Vol value
+          const iv = c.implied_vol || 0;
+          if (hv20 > 0) {
+            const ratio = iv / hv20;
+            if (ratio < 0.9) vol += 20; else if (ratio < 1.1) vol += 10; else if (ratio > 1.4) vol -= 15;
+          }
+          if (ivRank < 30) vol += 15; else if (ivRank > 70) vol -= 15;
+          vol = Math.max(0, Math.min(100, vol));
+
+          // Structure
+          const delta = Math.abs(c.delta || 0);
+          const dte = c.expiration ? Math.round((new Date(c.expiration) - new Date()) / 86400000) : 30;
+          if (delta >= 0.2 && delta <= 0.5) struc += 15;
+          if (dte >= 14 && dte <= 60) struc += 10;
+          struc = Math.max(0, Math.min(100, struc));
+
+          // Strategy fit
+          if (liquidityRegime === "Strong") strat += 10; else if (liquidityRegime === "Weak") strat -= 20;
+          strat = Math.max(0, Math.min(100, strat));
+
+          const composite = Math.round(0.25 * liq + 0.25 * vol + 0.20 * struc + 0.20 * strat + 0.10 * cat);
+          return { liq, vol, struc, strat, cat, composite };
+        };
+
+        // Score and rank
+        const scored = chain
+          .filter(c => (c.bid||0) > 0 || (c.open_interest||0) >= 50)
+          .map(c => ({...c, score: scoreContract(c)}))
+          .sort((a,b) => b.score.composite - a.score.composite);
+
+        // Top opportunities by category
+        const topCall = scored.find(c => c.option_type === "call" && Math.abs(c.delta||0) >= 0.3 && Math.abs(c.delta||0) <= 0.6);
+        const topPut = scored.find(c => c.option_type === "put" && Math.abs(c.delta||0) >= 0.2 && Math.abs(c.delta||0) <= 0.5);
+        const topHedge = scored.filter(c => c.option_type === "put" && Math.abs(c.delta||0) >= 0.15 && Math.abs(c.delta||0) <= 0.35).sort((a,b) => b.score.composite - a.score.composite)[0];
+        const topPremium = scored.filter(c => Math.abs(c.theta||0) > 0 && (c.open_interest||0) >= 500).sort((a,b) => Math.abs(b.theta||0) - Math.abs(a.theta||0))[0];
+        const topLongVol = scored.filter(c => (c.gamma||0) > 0.005).sort((a,b) => (b.gamma||0) - (a.gamma||0))[0];
+
+        const opps = [
+          topCall && {cat:"Directional Call", c:topCall, reason:`Δ${Math.abs(topCall.delta||0).toFixed(2)}, strong liquidity (OI ${topCall.open_interest})`},
+          topPut && {cat:"Directional Put", c:topPut, reason:`Δ${Math.abs(topPut.delta||0).toFixed(2)}, composite score ${topPut.score.composite}`},
+          topHedge && {cat:"Hedge Put", c:topHedge, reason:`Efficient downside at Δ${Math.abs(topHedge.delta||0).toFixed(2)}`},
+          topPremium && {cat:"Premium Sale", c:topPremium, reason:`Θ ${topPremium.theta?.toFixed(3)}/day, OI ${topPremium.open_interest}`},
+          topLongVol && {cat:"Long Vol", c:topLongVol, reason:`Γ ${topLongVol.gamma?.toFixed(4)}, event convexity`},
+        ].filter(Boolean);
+
+        const regCol = ({Expensive:C.red, Fair:C.amb, Cheap:C.grn})[volRegime] || C.mut;
+        const skewCol = ({["Put-rich"]:C.red, Flat:C.amb, ["Call-rich"]:C.grn})[skewRegime] || C.mut;
+        const liqCol = ({Strong:C.grn, Mixed:C.amb, Weak:C.red})[liquidityRegime] || C.mut;
+        const biasCol = ({["Buy Vol"]:C.grn, ["Sell Premium"]:"#ff8a65", ["Neutral Structures"]:C.amb, Hedge:C.red, Avoid:C.red})[strategyBias] || C.mut;
+
+        // Regime bullets
+        const bullets = [];
+        if (volRegime === "Expensive") bullets.push("IV is elevated relative to realized — favor premium-selling strategies");
+        else if (volRegime === "Cheap") bullets.push("IV is cheap relative to realized — long vol structures may be attractive");
+        else bullets.push("IV is fairly priced — focus on structure and liquidity");
+        if (skewRegime === "Put-rich") bullets.push("Downside hedges are relatively expensive — put skew is elevated");
+        if (liquidityRegime === "Strong") bullets.push("Liquidity is strong across the chain — execution should be efficient");
+        else if (liquidityRegime === "Weak") bullets.push("Liquidity is thin — widen expected fill ranges and reduce size");
+        if (summary?.iv_rank != null) bullets.push(`IV Rank at ${summary.iv_rank.toFixed(0)}% — ${summary.iv_rank > 70 ? "historically elevated" : summary.iv_rank < 30 ? "historically low" : "mid-range"}`);
+
+        return (<>
+          {/* Options Regime Snapshot */}
+          <div style={{borderRadius:14, border:`1.5px solid ${regCol}30`, background:regCol+"07", padding:"18px 20px"}}>
+            <div style={{...mono(11, C.headingTxt, 700), marginBottom:12}}>OPTIONS REGIME</div>
+            <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10, marginBottom:14}}>
+              <div style={{padding:"10px 12px",borderRadius:10,background:C.dim,textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>VOL REGIME</div>
+                <div style={mono(16, regCol, 800)}>{volRegime}</div>
+                <div style={mono(8, C.mut)}>IV/HV: {ivHvRatio.toFixed(2)}x</div>
+              </div>
+              <div style={{padding:"10px 12px",borderRadius:10,background:C.dim,textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>SKEW</div>
+                <div style={mono(16, skewCol, 800)}>{skewRegime}</div>
+                <div style={mono(8, C.mut)}>P:{(avgPutIV*100).toFixed(0)}% C:{(avgCallIV*100).toFixed(0)}%</div>
+              </div>
+              <div style={{padding:"10px 12px",borderRadius:10,background:C.dim,textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>LIQUIDITY</div>
+                <div style={mono(16, liqCol, 800)}>{liquidityRegime}</div>
+                <div style={mono(8, C.mut)}>{liquidContracts.length} tradable</div>
+              </div>
+              <div style={{padding:"10px 12px",borderRadius:10,background:C.dim,textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>STRATEGY BIAS</div>
+                <div style={mono(14, biasCol, 800)}>{strategyBias}</div>
+              </div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+              {bullets.map((b,i) => <div key={i} style={{display:"flex",gap:6}}><span style={mono(9,C.mut)}>•</span><span style={mono(9,C.txt)}>{b}</span></div>)}
+            </div>
+          </div>
+
+          {/* Top Opportunities */}
+          {opps.length > 0 && (
+            <div style={{borderRadius:14, border:`1.5px solid ${C.pur}30`, background:C.pur+"07", padding:"18px 20px"}}>
+              <div style={{...mono(11, C.headingTxt, 700), marginBottom:12}}>TOP OPPORTUNITIES</div>
+              <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : `repeat(${Math.min(opps.length, 3)},1fr)`, gap:10}}>
+                {opps.slice(0,5).map((opp,i) => {
+                  const c = opp.c;
+                  const dte = c.expiration ? Math.round((new Date(c.expiration) - new Date()) / 86400000) : 0;
+                  return (
+                    <div key={i} style={{padding:"12px 14px",borderRadius:10,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                        <Tag color={C.pur}>{opp.cat}</Tag>
+                        <span style={mono(14, c.score.composite >= 70 ? C.grn : c.score.composite >= 50 ? C.amb : C.red, 800)}>{c.score.composite}</span>
+                      </div>
+                      <div style={mono(12, C.headingTxt, 700)}>${c.strike} {c.option_type.toUpperCase()}</div>
+                      <div style={mono(9, C.mut)}>Exp: {c.expiration} · {dte}d · Δ{Math.abs(c.delta||0).toFixed(2)}</div>
+                      <div style={{display:"flex",justifyContent:"space-between",marginTop:6}}>
+                        <span style={mono(9, C.mut)}>Bid: ${(c.bid||0).toFixed(2)}</span>
+                        <span style={mono(9, C.mut)}>Ask: ${(c.ask||0).toFixed(2)}</span>
+                        <span style={mono(9, C.mut)}>IV: {((c.implied_vol||0)*100).toFixed(0)}%</span>
+                      </div>
+                      <div style={{...mono(8, C.txt), marginTop:6, lineHeight:1.4}}>{opp.reason}</div>
+                      {/* Sub-scores */}
+                      <div style={{display:"flex",gap:4,marginTop:6,flexWrap:"wrap"}}>
+                        {[["Liq",c.score.liq],["Vol",c.score.vol],["Str",c.score.struc],["Fit",c.score.strat]].map(([label,val]) => (
+                          <span key={label} style={{...mono(7, val >= 60 ? C.grn : val >= 40 ? C.amb : C.red, 600),
+                            padding:"1px 5px",borderRadius:4,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                            {label}:{val}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </>);
+      })()}
+
       {/* ── Price Chart ── */}
       {priceHistory.length > 0 && (
         <Card>
