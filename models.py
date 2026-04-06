@@ -630,3 +630,63 @@ class SignalHealth(Base):
     rolling_sharpe    = Column(Float, nullable=True)
     drift_warning     = Column(String, nullable=True)
     updated_at        = Column(DateTime, default=datetime.utcnow)
+
+
+# ===========================================================================
+# Alpha Opportunity Engine Tables
+# ===========================================================================
+
+class UniverseRegistry(Base):
+    """Central ticker registry for the Alpha scoring engine."""
+    __tablename__ = "universe_registry"
+
+    symbol         = Column(String, primary_key=True)
+    display_name   = Column(String, nullable=False)
+    asset_type     = Column(String, nullable=False)          # Equity, ETF, Index, SectorETF, Crypto, Futures
+    sector         = Column(String, nullable=True)
+    industry       = Column(String, nullable=True)
+    benchmark      = Column(String, nullable=True)
+    active         = Column(Boolean, default=True)
+    coverage_json  = Column(JSON, nullable=True)             # {macro, markets, sectors, options, technicals, quant, fundamentals, pairs}
+    universe_groups = Column(JSON, nullable=True)            # ["Core Equities", "Mega Cap Tech", ...]
+    tags           = Column(JSON, nullable=True)
+    readiness      = Column(String, default="Partial")       # Ready, Partial, Missing
+    created_at     = Column(DateTime, default=datetime.utcnow)
+    updated_at     = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class DomainOutput(Base):
+    """Normalized domain outputs per symbol for Alpha consumption."""
+    __tablename__ = "domain_outputs"
+
+    id            = Column(String, primary_key=True)         # UUID
+    symbol        = Column(String, nullable=False, index=True)
+    domain        = Column(String, nullable=False)           # macro, markets, sectors, options, technicals, quant, fundamentals, pairs
+    score         = Column(Float, nullable=True)
+    confidence    = Column(Float, nullable=True)
+    bias          = Column(String, nullable=True)
+    regime        = Column(String, nullable=True)
+    setup         = Column(String, nullable=True)
+    posture       = Column(String, nullable=True)
+    drivers_json  = Column(JSON, nullable=True)
+    risks_json    = Column(JSON, nullable=True)
+    timestamp     = Column(DateTime, nullable=False, index=True)
+
+
+class AlphaRanking(Base):
+    """Computed Alpha opportunity rankings."""
+    __tablename__ = "alpha_rankings"
+
+    id                = Column(String, primary_key=True)     # UUID
+    symbol            = Column(String, nullable=False, index=True)
+    timestamp         = Column(DateTime, nullable=False, index=True)
+    alpha_score       = Column(Float, nullable=True)
+    confidence        = Column(Float, nullable=True)
+    bias              = Column(String, nullable=True)
+    opportunity_type  = Column(String, nullable=True)
+    status            = Column(String, nullable=True)
+    posture           = Column(String, nullable=True)
+    domain_agreement  = Column(String, nullable=True)
+    top_drivers_json  = Column(JSON, nullable=True)
+    risks_json        = Column(JSON, nullable=True)
+    output_json       = Column(JSON, nullable=True)

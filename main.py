@@ -2860,6 +2860,90 @@ def technical_analysis(
 
 
 # ---------------------------------------------------------------------------
+# Endpoints: Alpha Opportunity Engine
+# ---------------------------------------------------------------------------
+
+@app.get("/alpha/opportunities")
+def alpha_opportunities():
+    """Scan the default universe and return ranked Alpha opportunities."""
+    from alpha_engine import DEFAULT_UNIVERSE, rank_opportunity
+    from ensemble_engine import normalize_ml_signal, normalize_sentiment_signal, normalize_technical_signals
+    from cache import cache
+
+    cached = cache.get("alpha:opportunities")
+    if cached:
+        return cached
+
+    results = []
+    for ticker in DEFAULT_UNIVERSE:
+        sym = ticker["symbol"]
+        domain_outputs = []
+
+        # Technical signal as domain output
+        try:
+            from technical_analysis import fetch_and_compute
+            from signal_strategies import StrategyEngine
+            ta = fetch_and_compute(sym, period="1y", interval="1d")
+            if ta:
+                se = StrategyEngine()
+                sigs = se.check_all(ta)
+                gm = se.god_mode(sigs, ta)
+                if gm:
+                    net = gm.get("net_score", 0)
+                    domain_outputs.append({
+                        "domain": "technicals", "score": max(-1, min(1, net)),
+                        "confidence": gm.get("confidence", 50),
+                        "bias": "Bullish" if net > 0.15 else ("Bearish" if net < -0.15 else "Neutral"),
+                        "setup": gm.get("direction", ""),
+                        "drivers": gm.get("primary_signals", [])[:2],
+                        "risks": [],
+                    })
+        except Exception:
+            pass
+
+        # Sentiment as domain output
+        try:
+            from sentiment_engine import SentimentEngine
+            se2 = SentimentEngine()
+            sent = se2.compute_signal(sym)
+            if sent and sent.get("score") is not None:
+                s = max(-1, min(1, sent["score"]))
+                domain_outputs.append({
+                    "domain": "quant", "score": s, "confidence": min(100, abs(s)*50 + (sent.get("articles",0))*2),
+                    "bias": "Bullish" if s > 0.15 else ("Bearish" if s < -0.15 else "Neutral"),
+                    "drivers": [f"Sentiment: {sent.get('direction','neutral')}"],
+                    "risks": [],
+                })
+        except Exception:
+            pass
+
+        if domain_outputs:
+            ranking = rank_opportunity(sym, domain_outputs)
+            ranking["display_name"] = ticker["display_name"]
+            ranking["asset_type"] = ticker["asset_type"]
+            ranking["sector"] = ticker.get("sector", "")
+            results.append(ranking)
+
+    results.sort(key=lambda x: abs(x["alpha_score"]), reverse=True)
+
+    output = {
+        "opportunities": results,
+        "universe_size": len(DEFAULT_UNIVERSE),
+        "scored": len(results),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    cache.set("alpha:opportunities", output, 900)  # 15 min cache
+    return output
+
+
+@app.get("/alpha/universe")
+def alpha_universe():
+    """Return the current universe registry."""
+    from alpha_engine import DEFAULT_UNIVERSE
+    return {"universe": DEFAULT_UNIVERSE, "count": len(DEFAULT_UNIVERSE)}
+
+
+# ---------------------------------------------------------------------------
 # Endpoints: Signal Pipeline & Ensemble
 # ---------------------------------------------------------------------------
 

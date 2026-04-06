@@ -9730,6 +9730,154 @@ function PortfolioHubView() {
 }
 
 // Lab = Backtest runner + Results browser + Stochastic finance tools
+// ── AlphaView ─────────────────────────────────────────────────────────────────
+function AlphaView() {
+  const C = useC();
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [filter, setFilter] = useState("all"); // all, active, preentry, watchlist
+
+  useEffect(() => {
+    setLoading(true);
+    fetch("/api/alpha/opportunities")
+      .then(r => r.ok ? r.json() : Promise.reject("Alpha engine error"))
+      .then(d => { setData(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const opps = data?.opportunities || [];
+  const filtered = filter === "all" ? opps : opps.filter(o => {
+    if (filter === "active") return o.status === "Active Trade";
+    if (filter === "preentry") return o.status === "Pre-Entry";
+    if (filter === "watchlist") return o.status === "Watchlist";
+    return true;
+  });
+
+  const biasCol = s => s >= 0.15 ? C.grn : s <= -0.15 ? C.red : C.amb;
+  const statusCol = s => ({"Active Trade":C.grn,"Pre-Entry":C.sky,"Watchlist":C.amb,"Weak":C.red,"No Trade":C.mut})[s] || C.mut;
+  const confCol = c => c >= 60 ? C.grn : c >= 35 ? C.amb : C.red;
+
+  // Regime snapshot
+  const activeCount = opps.filter(o => o.status === "Active Trade").length;
+  const preEntryCount = opps.filter(o => o.status === "Pre-Entry").length;
+  const avgScore = opps.length ? opps.reduce((s,o) => s + o.alpha_score, 0) / opps.length : 0;
+  const avgConf = opps.length ? opps.reduce((s,o) => s + o.confidence, 0) / opps.length : 0;
+  const regimeLabel = activeCount >= 5 ? "High Opportunity Environment" : activeCount >= 2 ? "Moderate Opportunity Environment" : preEntryCount >= 3 ? "Selective Opportunity Environment" : "Low Opportunity Environment";
+  const regCol = activeCount >= 5 ? C.grn : activeCount >= 2 ? "#66bb6a" : C.amb;
+
+  const bullets = [];
+  if (activeCount > 0) bullets.push(`${activeCount} active trade opportunities identified`);
+  if (preEntryCount > 0) bullets.push(`${preEntryCount} pre-entry setups approaching trigger`);
+  const topType = opps.length ? opps.reduce((acc, o) => { acc[o.opportunity_type] = (acc[o.opportunity_type]||0)+1; return acc; }, {}) : {};
+  const dominantType = Object.entries(topType).sort((a,b) => b[1]-a[1])[0];
+  if (dominantType) bullets.push(`Most common setup: ${dominantType[0]} (${dominantType[1]} tickers)`);
+  if (avgConf > 50) bullets.push("Overall confidence is moderate-to-high");
+  else bullets.push("Overall confidence is mixed — selective positioning warranted");
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div>
+        <Lbl>Alpha</Lbl>
+        <div style={mono(10,C.mut)}>Unified opportunity engine — cross-domain ranking across the full universe</div>
+      </div>
+
+      {loading && <Card><div style={{...mono(11,C.mut),textAlign:"center",padding:"40px 0"}}>Scanning universe and computing Alpha scores...</div></Card>}
+
+      {data && (<>
+        {/* ── ALPHA REGIME SNAPSHOT ── */}
+        <div style={{borderRadius:14,border:`1.5px solid ${regCol}30`,background:regCol+"07",padding:"18px 20px"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12,marginBottom:14}}>
+            <div>
+              <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",marginBottom:4}}>ALPHA REGIME</div>
+              <div style={mono(18, regCol, 800)}>{regimeLabel}</div>
+            </div>
+            <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>NET BIAS</div>
+                <div style={mono(14, biasCol(avgScore), 700)}>{avgScore >= 0.15 ? "Bullish" : avgScore <= -0.15 ? "Bearish" : "Neutral"}</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>CONFIDENCE</div>
+                <div style={mono(14, confCol(avgConf), 700)}>{avgConf.toFixed(0)}%</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>ACTIVE</div>
+                <div style={mono(14, activeCount > 0 ? C.grn : C.mut, 700)}>{activeCount}</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>PRE-ENTRY</div>
+                <div style={mono(14, preEntryCount > 0 ? C.sky : C.mut, 700)}>{preEntryCount}</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>UNIVERSE</div>
+                <div style={mono(14, C.headingTxt, 700)}>{data.scored}/{data.universe_size}</div>
+              </div>
+            </div>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:4}}>
+            {bullets.map((b,i) => <div key={i} style={{display:"flex",gap:6}}><span style={mono(9,C.mut)}>•</span><span style={mono(9,C.txt)}>{b}</span></div>)}
+          </div>
+        </div>
+
+        {/* ── FILTERS ── */}
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {[["all","All"],["active","Active Trade"],["preentry","Pre-Entry"],["watchlist","Watchlist"]].map(([k,l]) => (
+            <Pill key={k} label={l} active={filter===k} onClick={()=>setFilter(k)}/>
+          ))}
+        </div>
+
+        {/* ── OPPORTUNITY FEED ── */}
+        <Card>
+          <Lbl>RANKED OPPORTUNITIES</Lbl>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {filtered.length === 0 && <div style={mono(10,C.mut)}>No opportunities match current filter.</div>}
+            {filtered.map((opp,i) => (
+              <div key={opp.symbol} style={{display:"grid",gridTemplateColumns: C.isMobile ? "1fr" : "60px 1fr 80px 80px 100px 120px",gap:8,alignItems:"center",padding:"10px 14px",borderRadius:10,background:C.dim,border:`1px solid ${statusCol(opp.status)}20`}}>
+                {/* Rank */}
+                <div style={mono(14, C.mut, 700)}>#{i+1}</div>
+                {/* Symbol + Name */}
+                <div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={mono(12, C.headingTxt, 700)}>{opp.symbol}</span>
+                    <span style={mono(9, C.mut)}>{opp.display_name}</span>
+                    <Tag color={statusCol(opp.status)}>{opp.status}</Tag>
+                  </div>
+                  <div style={{display:"flex",gap:6,marginTop:3}}>
+                    <span style={mono(8, C.sky)}>{opp.opportunity_type}</span>
+                    {opp.top_drivers?.slice(0,1).map((d,j) => <span key={j} style={mono(8, C.mut)}>· {d}</span>)}
+                  </div>
+                </div>
+                {/* Score */}
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(7,C.mut,600),letterSpacing:"0.06em"}}>SCORE</div>
+                  <div style={mono(14, biasCol(opp.alpha_score), 800)}>{opp.alpha_score > 0 ? "+" : ""}{(opp.alpha_score*100).toFixed(0)}</div>
+                </div>
+                {/* Confidence */}
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(7,C.mut,600),letterSpacing:"0.06em"}}>CONF</div>
+                  <div style={mono(14, confCol(opp.confidence), 700)}>{opp.confidence.toFixed(0)}%</div>
+                </div>
+                {/* Bias */}
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(7,C.mut,600),letterSpacing:"0.06em"}}>BIAS</div>
+                  <div style={mono(11, biasCol(opp.alpha_score), 600)}>{opp.bias}</div>
+                </div>
+                {/* Posture */}
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(7,C.mut,600),letterSpacing:"0.06em"}}>POSTURE</div>
+                  <div style={mono(10, opp.posture?.includes("Long")?C.grn:opp.posture?.includes("Short")?C.red:C.amb, 600)}>{opp.posture}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <div style={mono(8,C.mut)}>Alpha scores computed from Technical + Sentiment signals. Full domain coverage expanding.</div>
+      </>)}
+    </div>
+  );
+}
+
 function LabView() {
   const C = useC();
   const [tab, setTab] = useState("backtest");
@@ -10919,17 +11067,26 @@ function SectorsView() {
 
 // ── App ─────────────────────────────────────────────────
 const NAV=[
-  {id:"markets",   l:"Markets",   I:BarChart2},   // Overview + News
-  {id:"advisor",   l:"Fundamentals",  I:Compass},
-  {id:"macro",     l:"Macro",     I:Database},
-  {id:"sectors",   l:"Sectors",   I:Layers},
-  {id:"options",   l:"Options",   I:Activity},
-  {id:"technical", l:"Technical", I:TrendingUp},
-  {id:"signals",   l:"Quant",     I:Zap},
-  {id:"pairs",     l:"Pairs",     I:Shuffle},
-  {id:"portfolio", l:"Portfolio", I:Briefcase},   // Holdings + Optimizer
-  {id:"paper",     l:"Paper",     I:BookOpen},    // Paper trading
-  {id:"lab",       l:"Lab",       I:FlaskConical},// Backtest + Report + Stochastic
+  // ANALYSIS
+  {id:"_analysis", l:"ANALYSIS", section:true},
+  {id:"markets",   l:"Markets",      I:BarChart2},
+  {id:"macro",     l:"Macro",        I:Database},
+  {id:"sectors",   l:"Sectors",      I:Layers},
+  {id:"options",   l:"Options",      I:Activity},
+  {id:"technical", l:"Technical",    I:TrendingUp},
+  {id:"signals",   l:"Quant",        I:Zap},
+  {id:"pairs",     l:"Pairs",        I:Shuffle},
+  {id:"advisor",   l:"Fundamentals", I:Compass},
+  // DECISION
+  {id:"_decision", l:"DECISION", section:true},
+  {id:"alpha",     l:"Alpha",        I:Target},
+  // EXECUTION
+  {id:"_execution",l:"EXECUTION", section:true},
+  {id:"portfolio", l:"Portfolio",    I:Briefcase},
+  {id:"paper",     l:"Paper",        I:BookOpen},
+  // RESEARCH
+  {id:"_research", l:"RESEARCH", section:true},
+  {id:"lab",       l:"Lab",          I:FlaskConical},
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -12416,6 +12573,7 @@ function AppShell() {
     sectors:   <SectorsView/>,
     signals:   <SignalsView/>,
     pairs:     <PairsView/>,
+    alpha:     <AlphaView/>,
     portfolio: <PortfolioHubView/>,
     paper:     <PaperTradingView/>,
     lab:       <LabView/>,
@@ -12458,7 +12616,10 @@ function AppShell() {
             )}
           </div>
           <nav style={{flex:1,padding:"10px 8px",overflowY:"auto"}}>
-            {NAV.map(({id,l,I})=>{
+            {NAV.map(({id,l,I,section})=>{
+              if (section) return (
+                <div key={id} style={{...mono(8,C.mut+"88",700),letterSpacing:"0.12em",padding:"12px 10px 4px",textTransform:"uppercase"}}>{l}</div>
+              );
               const a=view===id;
               return (
                 <button key={id} onClick={()=>{setView(id);setDetailSym(null);if(isMobile)setNavOpen(false);}} style={{display:"flex",alignItems:"center",gap:10,width:"100%",padding:"8px 10px",borderRadius:8,marginBottom:2,border:`1px solid ${a?C.grn+"30":"transparent"}`,background:a?C.grnBg:"transparent",cursor:"pointer",transition:"all .15s",...mono(11,a?C.grn:C.mut,a?700:400)}}
