@@ -9385,8 +9385,19 @@ function SectorsView() {
       .catch(e=>{setErr(String(e));setLoadingOv(false);});
   };
   useEffect(()=>{
-    fetchSummaries();
-    if (C.isMobile) triggerRefresh();
+    setLoadingOv(true); setErr(null);
+    fetch("/api/sectors")
+      .then(r=>r.ok?r.json():Promise.reject("Backend offline"))
+      .then(d=>{
+        setSummaries(d); setLoadingOv(false);
+        // Auto-refresh if no sectors are cached or all have zero data
+        const cached = (d || []).filter(s => s.cached);
+        const hasData = cached.some(s => s.total_market_cap > 0 || (s.etf_price != null && s.etf_price > 0));
+        if (cached.length === 0 || !hasData) {
+          triggerRefresh();
+        }
+      })
+      .catch(e=>{setErr(String(e));setLoadingOv(false);});
   },[]);
 
   useEffect(()=>{
@@ -9440,7 +9451,7 @@ function SectorsView() {
   // ── Helpers ──────────────────────────────────────────────
   const fp=(v,d=1)=>v==null?"—":`${v>=0?"+":""}${v.toFixed(d)}%`;
   const fn=(v,d=2)=>v==null?"—":v.toFixed(d);
-  const fbn=(v)=>v==null?"—":v>=1000?`$${(v/1000).toFixed(1)}T`:`$${v.toFixed(0)}B`;
+  const fbn=(v)=>v==null||v<=0?"—":v>=1000?`$${(v/1000).toFixed(1)}T`:`$${v.toFixed(0)}B`;
   const cc=(v)=>v==null?C.mut:v>=0?C.grn:C.red;
   const sigCol=(lbl)=>({"STRONG BUY":C.grn,"BUY":"#66bb6a","NEUTRAL":C.mut,"SELL":"#ef9a9a","STRONG SELL":C.red}[lbl]||C.mut);
   const valCol=(lbl)=>lbl==="UNDERVALUED"?C.grn:lbl==="OVERVALUED"?C.red:C.mut;
@@ -10100,7 +10111,7 @@ function SectorsView() {
         const CYCL = new Set(["Energy","Materials","Industrials","Financials","Consumer Discretionary"]);
         const DEF = new Set(["Utilities","Consumer Staples","Health Care","Real Estate"]);
         const GRO = new Set(["Information Technology","Communication Services"]);
-        const cached = summaries.filter(s=>s.cached);
+        const cached = summaries.filter(s=>s.cached && (s.total_market_cap > 0 || (s.etf_price != null && s.etf_price > 0)));
         if (cached.length < 3) return null;
 
         const allChgs = cached.map(s => s.avg_change_1d || s.etf_change_1d || 0);
@@ -10200,12 +10211,12 @@ function SectorsView() {
                     <Tag color={col}>{s.etf}</Tag>
                   </div>
                 </div>
-                {!s.cached?(
+                {(!s.cached || (s.total_market_cap == null || s.total_market_cap <= 0) && (s.etf_price == null || s.etf_price <= 0))?(
                   <div style={{...mono(10,C.mut),padding:"12px 0",textAlign:"center",borderTop:`1px solid ${C.bdr}`}}>
-                    <div style={{marginBottom:8}}>No data cached</div>
+                    <div style={{marginBottom:8}}>{s.cached ? "Data stale — refresh needed" : "No data cached"}</div>
                     <button onClick={e=>{e.stopPropagation();triggerRefresh([s.sector]);}}
                       style={{...mono(9,col,700),padding:"4px 12px",borderRadius:6,background:col+"15",border:`1px solid ${col}30`,cursor:"pointer"}}>
-                      Fetch Now
+                      {s.cached ? "Refresh" : "Fetch Now"}
                     </button>
                   </div>
                 ):(
