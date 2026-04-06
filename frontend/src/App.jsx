@@ -317,25 +317,153 @@ function OverviewView({onNav, onDetail}) {
   };
   useEffect(() => { doFetch(); }, []);
 
-  // ── Colour helpers ──────────────────────────────────────────────────────
-  const vixCol    = r => r==="extreme_fear"?C.red : r==="fear"?"#ff8a65" : r==="calm"?C.amb : C.grn;
-  const sentCol   = s => s>=60?C.grn : s>=40?C.amb : C.red;
+  // ── Colour helpers ──
   const chgColor  = c => c==null?C.mut : c>=0?C.grn : C.red;
-  const curveCol  = r => r==="inverted"?C.red : r==="flat"?C.amb : C.grn;
   const stressCol = s => s==="high"?C.red : s==="elevated"?C.amb : C.grn;
 
   const fi = mkt?.fixed_income  || {};
   const cr = mkt?.credit        || {};
   const ca = mkt?.cross_asset   || [];
 
-  return (
-    <div style={{display:"flex",flexDirection:"column",gap:12}}>
+  // ═══════════════════════════════════════════════════════════
+  // MARKET SCORING ENGINE (client-side, computed from mkt data)
+  // ═══════════════════════════════════════════════════════════
+  const scores = useMemo(() => {
+    if (!mkt) return null;
 
-      {/* ── Page header ─────────────────────────────────────────────────── */}
+    // 1. Volatility / Sentiment
+    let volScore = 0;
+    const vixVal = mkt.vix?.value;
+    if (vixVal != null) {
+      if (vixVal > 30) volScore -= 0.5;
+      else if (vixVal > 20) volScore += 0;
+      else volScore += 0.5;
+    }
+    const fgVal = mkt.sentiment?.score;
+    if (fgVal != null) {
+      if (fgVal < 30) volScore -= 0.5;
+      else if (fgVal > 60) volScore += 0.5;
+    }
+    volScore = Math.max(-1, Math.min(1, volScore));
+
+    // 2. Growth / Equities
+    let eqScore = 0;
+    const indices = (mkt.indices || []);
+    const greens = indices.filter(i => (i.change_pct || 0) >= 0).length;
+    const total = indices.length || 1;
+    if (greens / total >= 0.75) eqScore = 1;
+    else if (greens / total >= 0.5) eqScore = 0.5;
+    else if (greens / total <= 0.25) eqScore = -1;
+    else eqScore = -0.5;
+    // IWM strength bonus (small-cap = risk-on)
+    const iwm = indices.find(i => i.symbol === "IWM");
+    if (iwm && iwm.change_pct > 0.5) eqScore = Math.min(1, eqScore + 0.25);
+    eqScore = Math.max(-1, Math.min(1, eqScore));
+
+    // 3. Rates / Policy
+    let ratesScore = 0;
+    const curveVal = fi.yield_curve;
+    if (curveVal != null) {
+      if (curveVal > 0.5) ratesScore += 0.5;
+      else if (curveVal < -0.2) ratesScore -= 0.5;
+    }
+    const curveRegime = fi.curve_regime;
+    if (curveRegime === "inverted") ratesScore -= 0.5;
+    else if (curveRegime === "steepening") ratesScore += 0.25;
+    ratesScore = Math.max(-1, Math.min(1, ratesScore));
+
+    // 4. Credit Risk
+    let creditScore = 0;
+    const hygChg = cr.hyg?.change_pct;
+    const lqdChg = cr.lqd?.change_pct;
+    if (hygChg != null) creditScore += hygChg > 0 ? 0.5 : -0.5;
+    if (hygChg != null && lqdChg != null) {
+      const spread = hygChg - lqdChg;
+      if (spread > 0.1) creditScore += 0.25; // HYG outperforming = risk-on
+      else if (spread < -0.3) creditScore -= 0.25;
+    }
+    const stressLevel = cr.stress;
+    if (stressLevel === "high") creditScore -= 0.5;
+    creditScore = Math.max(-1, Math.min(1, creditScore));
+
+    // Composite
+    const composite = 0.3 * volScore + 0.25 * eqScore + 0.25 * creditScore + 0.2 * ratesScore;
+
+    // Regime classification
+    let regime;
+    if (composite >= 0.5) regime = "Risk-On";
+    else if (composite >= 0.2) regime = "Constructive";
+    else if (composite >= -0.2) regime = "Neutral";
+    else if (composite >= -0.5) regime = "Cautious";
+    else regime = "Risk-Off";
+
+    return { volatility: volScore, equities: eqScore, rates: ratesScore, credit: creditScore, composite: Math.round(composite * 100) / 100, regime };
+  }, [mkt, fi, cr]);
+
+  // ── Narrative Engine ──
+  const narrative = useMemo(() => {
+    if (!scores || !mkt) return null;
+    const bullets = [];
+
+    // Regime summary
+    const regimeDesc = {
+      "Risk-On": "Risk appetite is strong — broad participation across risk assets",
+      "Constructive": "Risk appetite is constructive — equities and credit confirm",
+      "Neutral": "Risk appetite is neutral — mixed signals across pillars",
+      "Cautious": "Risk appetite is cautious — defensive posture warranted",
+      "Risk-Off": "Risk appetite is deteriorating — stress signals across pillars",
+    };
+    bullets.push(regimeDesc[scores.regime] || "Market regime is unclear");
+
+    // Yield curve
+    if (fi.curve_regime === "inverted") bullets.push("Yield curve remains inverted — recession signal active");
+    else if (fi.curve_regime === "steepening") bullets.push("Yield curve steepening reduces recession concern");
+    else bullets.push("Yield curve is flat — policy uncertainty persists");
+
+    // Credit
+    if (scores.credit >= 0.5) bullets.push("Credit markets are calm — no stress signals");
+    else if (scores.credit <= -0.5) bullets.push("Credit stress rising — HYG underperforming, spreads widening");
+    else bullets.push("Credit conditions are stable");
+
+    // Equities
+    const greens = (mkt.indices || []).filter(i => (i.change_pct || 0) >= 0);
+    if (greens.length >= 3) bullets.push("Equity leadership is broad — " + greens.length + "/4 indices positive");
+    else if (greens.length <= 1) bullets.push("Equity leadership is narrow — risk of breadth deterioration");
+    else bullets.push("Equity performance is mixed");
+
+    // Cross-asset
+    const gold = ca.find(a => a.symbol === "GLD");
+    const dollar = ca.find(a => a.symbol === "UUP");
+    if (gold && gold.change_pct > 0.5 && dollar && dollar.change_pct > 0.3)
+      bullets.push("Gold and dollar both rising — flight-to-safety signals");
+    else if (gold && gold.change_pct < -0.3 && scores.equities > 0)
+      bullets.push("Gold weakness confirms risk-on rotation");
+
+    return { summary: bullets };
+  }, [scores, mkt, fi, cr, ca]);
+
+  // ── Helper components ──
+  const regimeColor = r => ({
+    "Risk-On": C.grn, "Constructive": "#66bb6a", "Neutral": C.amb, "Cautious": "#ff8a65", "Risk-Off": C.red
+  })[r] || C.mut;
+
+  const pillarColor = s => s >= 0.5 ? C.grn : s <= -0.5 ? C.red : C.amb;
+  const pillarLabel = s => s >= 0.5 ? "Positive" : s <= -0.5 ? "Negative" : "Neutral";
+
+  const Section = ({accent, children}) => (
+    <div style={{borderRadius:14, border:`1.5px solid ${accent||C.bdr}30`, background:(accent||C.surf)+"07", padding:"18px 20px"}}>
+      {children}
+    </div>
+  );
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+
+      {/* ── Header ── */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
         <div>
           <Lbl>Market Overview</Lbl>
-          <div style={mono(10,C.mut)}>Live market intelligence · 5-min cache · All tiers</div>
+          <div style={mono(10,C.mut)}>Market decision cockpit — regime, leadership, confirmation, and risk</div>
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           {mkt?.as_of && <Tag color={C.mut}>Updated {mkt.as_of.slice(11,16)} UTC</Tag>}
@@ -343,8 +471,7 @@ function OverviewView({onNav, onDetail}) {
           <button onClick={()=>doFetch(true)} disabled={mktLoading}
             style={{display:"flex",alignItems:"center",gap:5,...mono(9,mktLoading?C.grn:C.mut),
               padding:"5px 12px",borderRadius:8,border:`1px solid ${mktLoading?C.grn+"55":C.bdr}`,
-              background:mktLoading?C.grnBg:"transparent",cursor:mktLoading?"not-allowed":"pointer",
-              transition:"all .2s"}}>
+              background:mktLoading?C.grnBg:"transparent",cursor:mktLoading?"not-allowed":"pointer"}}>
             <RefreshCw size={11} style={{animation:mktLoading?"spin 0.8s linear infinite":undefined}}/>
             {mktLoading ? "Fetching…" : "Refresh"}
           </button>
@@ -352,315 +479,250 @@ function OverviewView({onNav, onDetail}) {
         </div>
       </div>
 
-      {mktLoading && (
-        <Card>
-          <div style={{...mono(11,C.mut),textAlign:"center",padding:"36px 0",display:"flex",
-            alignItems:"center",justifyContent:"center",gap:10}}>
-            <RefreshCw size={14}/> Fetching market data from yfinance…
-          </div>
-        </Card>
+      {mktLoading && !mkt && (
+        <Card><div style={{...mono(11,C.mut),textAlign:"center",padding:"36px 0",display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
+          <RefreshCw size={14}/> Fetching market data…
+        </div></Card>
       )}
       {mktErr && !mktLoading && (
-        <Card>
-          <div style={{...mono(10,C.red),padding:"6px 0"}}>⚠ {mktErr}</div>
-          <div style={{...mono(9,C.mut),marginTop:4}}>Make sure the FastAPI backend is running.</div>
-        </Card>
+        <Card><div style={{...mono(10,C.red),padding:"6px 0"}}>⚠ {mktErr}</div></Card>
       )}
 
-      {mkt && <>
+      {mkt && scores && (<>
 
-        {/* ══════════════════════════════════════════════════════════════
-            TIER 1 — VOLATILITY & REGIME
-        ══════════════════════════════════════════════════════════════ */}
-        <SectionSep label="Volatility & Regime"/>
-        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"1.1fr 1fr 1fr",gap:12}}>
+        {/* ═══════════ 1. MARKET REGIME & RISK APPETITE ═══════════ */}
+        <Section accent={regimeColor(scores.regime)}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:14,marginBottom:14}}>
+            <div>
+              <div style={{...mono(9, C.mut, 700), letterSpacing:"0.1em", marginBottom:4}}>MARKET REGIME</div>
+              <div style={mono(24, regimeColor(scores.regime), 800)}>{scores.regime}</div>
+            </div>
+            <div style={{display:"flex",gap:18,flexWrap:"wrap"}}>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>COMPOSITE</div>
+                <div style={mono(20, pillarColor(scores.composite), 800)}>{scores.composite > 0 ? "+" : ""}{scores.composite.toFixed(2)}</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>VIX</div>
+                <div style={mono(16, mkt.vix?.regime === "calm" ? C.grn : mkt.vix?.regime === "extreme_fear" ? C.red : C.amb, 700)}>
+                  {mkt.vix?.value?.toFixed(1) || "—"}
+                </div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>FEAR & GREED</div>
+                <div style={mono(16, (mkt.sentiment?.score||50) >= 60 ? C.grn : (mkt.sentiment?.score||50) < 40 ? C.red : C.amb, 700)}>
+                  {mkt.sentiment?.score || "—"} <span style={mono(9, C.mut)}>{mkt.sentiment?.label || ""}</span>
+                </div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>YIELD CURVE</div>
+                <div style={mono(16, fi.curve_regime === "inverted" ? C.red : fi.curve_regime === "steepening" ? C.grn : C.amb, 700)}>
+                  {fi.yield_curve != null ? (fi.yield_curve > 0 ? "+" : "") + fi.yield_curve.toFixed(2) + "%" : "—"}
+                </div>
+              </div>
+            </div>
+          </div>
 
-          {/* VIX card */}
-          <div onClick={()=>onDetail?.("^VIX")}
-            style={{padding:"18px 20px",borderRadius:14,background:C.surf,cursor:"pointer",
-              border:`1px solid ${C.bdr}`,borderLeft:`3px solid ${vixCol(mkt.vix.regime)}`,
-              transition:"background .15s"}}
-            onMouseEnter={e=>{e.currentTarget.style.background=vixCol(mkt.vix.regime)+"0a";}}
-            onMouseLeave={e=>{e.currentTarget.style.background=C.surf;}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-              <span style={{...mono(8,C.mut,700),letterSpacing:"0.12em"}}>VIX · VOLATILITY INDEX</span>
-              <span style={{...mono(8,vixCol(mkt.vix.regime),700),padding:"2px 8px",borderRadius:10,
-                background:vixCol(mkt.vix.regime)+"1a"}}>
-                {mkt.vix.regime?.replace(/_/g," ").toUpperCase()}
-              </span>
-            </div>
-            <div style={{display:"flex",alignItems:"baseline",gap:12,marginBottom:14}}>
-              <span style={mono(42,vixCol(mkt.vix.regime),800)}>{mkt.vix.value?.toFixed(1)??"—"}</span>
-              {mkt.vix.change_pct!=null && (
-                <span style={mono(13,mkt.vix.change_pct>=0?C.red:C.grn,700)}>
-                  {mkt.vix.change_pct>=0?"+":""}{mkt.vix.change_pct.toFixed(2)}%
-                </span>
-              )}
-            </div>
-            <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-              {[["< 15","Complacent",C.grn],["15–20","Calm",C.amb],["20–30","Fear","#ff8a65"],["> 30","Panic",C.red]].map(([r,l,c])=>(
-                <div key={r} style={{padding:"3px 8px",borderRadius:14,border:`1px solid ${c}35`,
-                  background:c+"12",...mono(8,c,700)}}>{r} {l}</div>
+          {/* Pillar scores row */}
+          <div style={{display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:10, marginBottom:14}}>
+            {[["Volatility", scores.volatility], ["Equities", scores.equities], ["Rates", scores.rates], ["Credit", scores.credit]].map(([name, val]) => (
+              <div key={name} style={{padding:"8px 12px", borderRadius:8, background:C.dim, textAlign:"center"}}>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>{name.toUpperCase()}</div>
+                <div style={mono(16, pillarColor(val), 800)}>{val > 0 ? "+" : ""}{val.toFixed(1)}</div>
+                <div style={mono(8, pillarColor(val), 600)}>{pillarLabel(val)}</div>
+              </div>
+            ))}
+          </div>
+        </Section>
+
+        {/* ═══════════ 2. TODAY'S MARKET READ ═══════════ */}
+        {narrative && (
+          <Section accent={C.pur}>
+            <div style={{...mono(11, C.headingTxt, 700), marginBottom:10}}>TODAY'S MARKET READ</div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {narrative.summary.map((b,i) => (
+                <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                  <span style={mono(10, C.mut)}>•</span>
+                  <span style={mono(10, C.txt)}>{b}</span>
+                </div>
               ))}
             </div>
-          </div>
-
-          {/* Fear & Greed — composite indicator, no dedicated ticker */}
-          <div style={{padding:"18px 20px",borderRadius:14,background:C.surf,border:`1px solid ${C.bdr}`}}>
-            <div style={{...mono(8,C.mut,700),letterSpacing:"0.12em",marginBottom:6}}>FEAR & GREED · COMPOSITE</div>
-            <div style={{display:"flex",alignItems:"baseline",gap:10,marginBottom:12}}>
-              <span style={mono(42,sentCol(mkt.sentiment.score),800)}>{mkt.sentiment.score}</span>
-              <span style={mono(12,sentCol(mkt.sentiment.score),700)}>{mkt.sentiment.label}</span>
-            </div>
-            <div style={{position:"relative",marginBottom:6}}>
-              <div style={{height:8,borderRadius:4,
-                background:`linear-gradient(to right,${C.red},${C.amb} 50%,${C.grn})`}}/>
-              <div style={{position:"absolute",top:-5,
-                left:`${Math.min(Math.max(mkt.sentiment.score,1),99)}%`,
-                width:3,height:18,background:C.headingTxt,borderRadius:2,
-                transform:"translateX(-50%)",boxShadow:"0 0 5px rgba(0,0,0,.5)"}}/>
-            </div>
-            <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
-              <span style={mono(7,C.red)}>Fear</span>
-              <span style={mono(7,C.mut)}>Neutral</span>
-              <span style={mono(7,C.grn)}>Greed</span>
-            </div>
-            <div style={mono(8,C.mut)}>VIX (40%) · SPY momentum (35%) · Sector breadth (25%)</div>
-          </div>
-
-          {/* Yield Curve */}
-          <div onClick={()=>onDetail?.("^TNX")}
-            style={{padding:"18px 20px",borderRadius:14,background:C.surf,cursor:"pointer",
-              border:`1px solid ${C.bdr}`,transition:"background .15s",
-              borderLeft:`3px solid ${fi.curve_regime ? curveCol(fi.curve_regime) : C.bdr}`}}
-            onMouseEnter={e=>{e.currentTarget.style.background=curveCol(fi.curve_regime||"steepening")+"0a";}}
-            onMouseLeave={e=>{e.currentTarget.style.background=C.surf;}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-              <span style={{...mono(8,C.mut,700),letterSpacing:"0.12em"}}>10Y − 3M YIELD CURVE</span>
-              {fi.curve_regime && (
-                <span style={{...mono(8,curveCol(fi.curve_regime),700),padding:"2px 8px",borderRadius:10,
-                  background:curveCol(fi.curve_regime)+"1a"}}>
-                  {fi.curve_regime.toUpperCase()}
-                </span>
-              )}
-            </div>
-            {fi.yield_curve != null ? (<>
-              <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:14}}>
-                <span style={mono(38,curveCol(fi.curve_regime),800)}>
-                  {fi.yield_curve >= 0 ? "+" : ""}{fi.yield_curve.toFixed(2)}%
-                </span>
-              </div>
-              {/* Visual bar comparison */}
-              {fi.ten_year?.value != null && fi.three_month?.value != null && (() => {
-                const mx = Math.max(fi.ten_year.value, fi.three_month.value);
-                return (
-                  <div style={{display:"flex",flexDirection:"column",gap:7}}>
-                    {[["10Y", fi.ten_year.value, C.sky],["3M", fi.three_month.value, C.pur]].map(([lbl,val,col])=>(
-                      <div key={lbl} style={{display:"flex",alignItems:"center",gap:8}}>
-                        <span style={{...mono(8,C.mut,700),width:22,flexShrink:0}}>{lbl}</span>
-                        <div style={{flex:1,height:5,borderRadius:3,background:C.dim}}>
-                          <div style={{width:`${(val/mx*100).toFixed(0)}%`,height:"100%",borderRadius:3,background:col,
-                            transition:"width .3s"}}/>
-                        </div>
-                        <span style={{...mono(10,col,700),width:38,textAlign:"right"}}>{val.toFixed(2)}%</span>
-                      </div>
-                    ))}
-                    <div style={mono(8,C.mut)}>
-                      {fi.curve_regime==="inverted" ? "⚠ Inversion historically precedes recessions 12–18 mo." :
-                       fi.curve_regime==="flat"      ? "Curve flattening — watch for further compression." :
-                       "Normal shape — no near-term recession signal."}
-                    </div>
-                  </div>
-                );
-              })()}
-            </>) : (
-              <div style={mono(11,C.mut)}>Yield data unavailable</div>
-            )}
-          </div>
-        </div>
-
-        {/* ══════════════════════════════════════════════════════════════
-            TIER 2 — EQUITY INDICES
-        ══════════════════════════════════════════════════════════════ */}
-        <SectionSep label="Equity Indices"/>
-        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:10}}>
-          {mkt.indices.map(idx => {
-            const names = {SPY:"S&P 500", QQQ:"Nasdaq 100", IWM:"Russell 2000", DIA:"Dow Jones"};
-            return <MacroTile key={idx.symbol} sym={idx.symbol} name={names[idx.symbol]||idx.symbol}
-              price={idx.price} chg={idx.change_pct} onClick={()=>onDetail?.(idx.symbol)}/>;
-          })}
-        </div>
-
-        {/* ══════════════════════════════════════════════════════════════
-            TIER 3 — FIXED INCOME & CREDIT
-        ══════════════════════════════════════════════════════════════ */}
-        <SectionSep label="Fixed Income & Credit"/>
-        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:10}}>
-
-          {/* 10Y Treasury */}
-          {[{sym:"^TNX",label:"10Y Treasury Yield",col:C.sky, val:fi.ten_year?.value,
-              bps:fi.ten_year?.daily_chg_bp, extra:null},
-            {sym:"^IRX",label:"3M T-Bill Yield",   col:C.pur, val:fi.three_month?.value,
-              bps:fi.three_month?.daily_chg_bp, extra:null},
-            {sym:"HYG", label:"High Yield Bonds",  col:C.headingTxt, price:cr.hyg?.price,
-              chg:cr.hyg?.change_pct, badge: cr.stress ? {label:`Credit stress: ${cr.stress}`, col:stressCol(cr.stress)} : null},
-            {sym:"LQD", label:"Invest. Grade Bonds",col:C.headingTxt, price:cr.lqd?.price,
-              chg:cr.lqd?.change_pct, badge: cr.spread_change!=null ? {label:`HYG−LQD Δ ${cr.spread_change>=0?"+":""}${cr.spread_change?.toFixed(2)}%`, col:cr.spread_change>=0?C.grn:C.red} : null},
-          ].map(t => (
-            <div key={t.sym} onClick={()=>onDetail?.(t.sym)}
-              style={{padding:"12px 14px",borderRadius:12,background:C.surf,border:`1px solid ${C.bdr}`,
-                cursor:"pointer",transition:"border-color .15s, background .15s"}}
-              onMouseEnter={e=>{e.currentTarget.style.borderColor=(t.col||C.mut)+"70"; e.currentTarget.style.background=(t.col||C.mut)+"08";}}
-              onMouseLeave={e=>{e.currentTarget.style.borderColor=C.bdr; e.currentTarget.style.background=C.surf;}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
-                <span style={{...mono(9,C.mut,700),letterSpacing:"0.06em"}}>{t.sym}</span>
-                {t.chg != null && (
-                  <span style={{...mono(8,chgColor(t.chg),700),padding:"2px 6px",borderRadius:8,background:chgColor(t.chg)+"16"}}>
-                    {t.chg>=0?"+":""}{t.chg.toFixed(2)}%
-                  </span>
-                )}
-              </div>
-              <div style={{...mono(9,C.mut),marginBottom:6}}>{t.label}</div>
-              <div style={mono(22,t.col,800)}>
-                {t.val != null ? `${t.val.toFixed(2)}%` : t.price != null ? `$${t.price.toFixed(2)}` : "—"}
-              </div>
-              {t.bps != null && (
-                <div style={mono(10,t.bps>=0?C.red:C.grn,700)}>
-                  {t.bps>=0?"+":""}{t.bps.toFixed(0)} bps today
-                </div>
-              )}
-              {t.badge && (
-                <div style={{...mono(8,t.badge.col,700),marginTop:4,padding:"2px 8px",borderRadius:8,
-                  background:t.badge.col+"16",display:"inline-block"}}>
-                  {t.badge.label}
-                </div>
-              )}
-              <div style={{...mono(7,C.mut),marginTop:3,opacity:0.55}}>↗ View 5Y chart</div>
-            </div>
-          ))}
-        </div>
-
-        {/* ══════════════════════════════════════════════════════════════
-            TIER 4 — CROSS-ASSET
-        ══════════════════════════════════════════════════════════════ */}
-        <SectionSep label="Cross-Asset"/>
-        {ca.length > 0 ? (
-          <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:10}}>
-            {ca.map(a => <MacroTile key={a.symbol} sym={a.symbol} name={a.name} price={a.price} chg={a.change_pct}
-            onClick={()=>onDetail?.(a.symbol)}/>)}
-          </div>
-        ) : (
-          <Card><div style={mono(10,C.mut)}>Cross-asset data unavailable</div></Card>
+          </Section>
         )}
 
-        {/* Cross-asset signal legend */}
-        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:8}}>
-          {[
-            ["GLD","Gold ↑ = flight-to-safety / inflation hedge",C.amb],
-            ["USO","Oil ↑ = inflationary pressure / global demand",C.red],
-            ["COPX","Copper ↑ = global growth is healthy",C.grn],
-            ["UUP","Dollar ↑ = risk-off / headwind for risk assets",C.sky],
-          ].map(([sym,desc,col])=>(
-            <div key={sym} style={{padding:"8px 10px",borderRadius:10,background:col+"08",
-              border:`1px solid ${col}20`,display:"flex",gap:8,alignItems:"flex-start"}}>
-              <span style={{...mono(8,col,700),flexShrink:0,paddingTop:1}}>{sym}</span>
-              <span style={mono(8,C.mut)}>{desc}</span>
-            </div>
-          ))}
+        {/* ═══════════ 3. EQUITY LEADERSHIP ═══════════ */}
+        <div>
+          <SectionSep label="Equity Leadership"/>
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10, marginTop:10}}>
+            {(mkt.indices || []).map(idx => {
+              const names = {SPY:"S&P 500",QQQ:"Nasdaq 100",IWM:"Russell 2000",DIA:"Dow Jones"};
+              return (
+                <div key={idx.symbol} onClick={()=>onDetail?.(idx.symbol)}
+                  style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${chgColor(idx.change_pct)}25`,cursor:"pointer",transition:"border-color .15s"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <span style={mono(10, C.headingTxt, 700)}>{names[idx.symbol] || idx.symbol}</span>
+                    <Tag color={chgColor(idx.change_pct)}>{idx.symbol}</Tag>
+                  </div>
+                  <div style={mono(18, C.headingTxt, 800)}>${idx.price?.toFixed(2)}</div>
+                  <div style={{...mono(11, chgColor(idx.change_pct), 700), marginTop:4}}>
+                    {idx.change_pct >= 0 ? "+" : ""}{idx.change_pct?.toFixed(2)}%
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
-        {/* ══════════════════════════════════════════════════════════════
-            TIER 5 — SECTOR HEATMAP (collapsible)
-        ══════════════════════════════════════════════════════════════ */}
-        <SectionSep label="Sector Heatmap"/>
-        <Card>
-          {/* Clickable header */}
-          <div onClick={()=>setSectorsOpen(o=>!o)}
-            style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-              cursor:"pointer",userSelect:"none",marginBottom: sectorsOpen ? 12 : 0}}>
-            <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-              <Lbl>11 SPDR Sectors · Today</Lbl>
-              <Tag color={mkt.sectors.filter(s=>s.change_pct>0).length>5?C.grn:C.red}>
-                {mkt.sectors.filter(s=>s.change_pct>0).length}/11 advancing
-              </Tag>
+        {/* ═══════════ 4. RATES & CREDIT CONFIRMATION ═══════════ */}
+        <div>
+          <SectionSep label="Rates & Credit Confirmation"/>
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10, marginTop:10}}>
+            {/* 10Y Treasury */}
+            <div style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${C.sky}25`}}>
+              <div style={{...mono(9,C.mut,700),letterSpacing:"0.08em",marginBottom:4}}>10Y TREASURY</div>
+              <div style={mono(18, C.sky, 800)}>{fi.ten_year?.value?.toFixed(2) || "—"}%</div>
+              {fi.ten_year?.daily_chg_bp != null && <div style={mono(10, chgColor(fi.ten_year.daily_chg_bp), 600)}>{fi.ten_year.daily_chg_bp > 0 ? "+" : ""}{fi.ten_year.daily_chg_bp.toFixed(1)} bps</div>}
             </div>
-            <span style={{...mono(9,C.mut),display:"flex",alignItems:"center",gap:5}}>
-              {sectorsOpen ? <><ChevronRight size={12} style={{transform:"rotate(-90deg)"}}/> Collapse</>
-                           : <><ChevronRight size={12} style={{transform:"rotate(90deg)"}}/> Expand</>}
-            </span>
+            {/* 3M T-Bill */}
+            <div style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${C.pur}25`}}>
+              <div style={{...mono(9,C.mut,700),letterSpacing:"0.08em",marginBottom:4}}>3M T-BILL</div>
+              <div style={mono(18, C.pur, 800)}>{fi.three_month?.value?.toFixed(2) || "—"}%</div>
+              {fi.three_month?.daily_chg_bp != null && <div style={mono(10, chgColor(fi.three_month.daily_chg_bp), 600)}>{fi.three_month.daily_chg_bp > 0 ? "+" : ""}{fi.three_month.daily_chg_bp.toFixed(1)} bps</div>}
+            </div>
+            {/* HYG */}
+            <div style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${stressCol(cr.stress)}25`}} onClick={()=>onDetail?.("HYG")}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                <span style={{...mono(9,C.mut,700),letterSpacing:"0.08em"}}>HIGH YIELD</span>
+                {cr.stress && <Tag color={stressCol(cr.stress)}>{cr.stress}</Tag>}
+              </div>
+              <div style={mono(18, C.headingTxt, 800)}>${cr.hyg?.price?.toFixed(2) || "—"}</div>
+              <div style={mono(10, chgColor(cr.hyg?.change_pct), 600)}>{cr.hyg?.change_pct >= 0 ? "+" : ""}{cr.hyg?.change_pct?.toFixed(2) || "—"}%</div>
+              <div style={{...mono(8, C.mut), marginTop:4}}>
+                {scores.credit >= 0.5 ? "Credit stable — no stress" : scores.credit <= -0.5 ? "Credit stress rising" : "Credit conditions mixed"}
+              </div>
+            </div>
+            {/* LQD */}
+            <div style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${C.bdr}`}} onClick={()=>onDetail?.("LQD")}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                <span style={{...mono(9,C.mut,700),letterSpacing:"0.08em"}}>INV. GRADE</span>
+                {cr.spread_change != null && <Tag color={chgColor(-cr.spread_change)}>{cr.spread_change > 0 ? "+" : ""}{cr.spread_change.toFixed(2)}%</Tag>}
+              </div>
+              <div style={mono(18, C.headingTxt, 800)}>${cr.lqd?.price?.toFixed(2) || "—"}</div>
+              <div style={mono(10, chgColor(cr.lqd?.change_pct), 600)}>{cr.lqd?.change_pct >= 0 ? "+" : ""}{cr.lqd?.change_pct?.toFixed(2) || "—"}%</div>
+            </div>
           </div>
+        </div>
 
-          {/* Collapsed: mini pill strip */}
-          {!sectorsOpen && (
-            <div style={{display:"flex",gap:5,flexWrap:"wrap",marginTop:8}}>
-              {[...mkt.sectors].sort((a,b)=>b.change_pct-a.change_pct).map(s=>{
-                const col = s.change_pct>=0?C.grn:C.red;
-                return (
-                  <div key={s.symbol} style={{padding:"3px 9px",borderRadius:8,background:col+"14",
-                    border:`1px solid ${col}28`,...mono(8,col,700)}}>
-                    {s.symbol} {s.change_pct>=0?"+":""}{s.change_pct.toFixed(1)}%
+        {/* ═══════════ 5. CROSS-ASSET CONFIRMATION ═══════════ */}
+        <div>
+          <SectionSep label="Cross-Asset Confirmation"/>
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10, marginTop:10}}>
+            {ca.map(a => {
+              const interp = {
+                GLD: a.change_pct > 0 ? "Flight-to-safety / inflation hedge" : "Risk-on rotation away from safety",
+                USO: a.change_pct > 0 ? "Inflationary pressure / global demand" : "Demand concerns / deflationary signal",
+                COPX: a.change_pct > 0 ? "Global growth is healthy" : "Industrial demand weakening",
+                UUP: a.change_pct > 0 ? "Risk-off / headwind for risk assets" : "Dollar weakness supports risk assets",
+              };
+              return (
+                <div key={a.symbol} style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${chgColor(a.change_pct)}25`}}
+                  onClick={()=>onDetail?.(a.symbol)}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                    <span style={mono(10, C.headingTxt, 700)}>{a.name}</span>
+                    <Tag color={chgColor(a.change_pct)}>{a.symbol}</Tag>
                   </div>
-                );
-              })}
-            </div>
-          )}
+                  <div style={mono(18, C.headingTxt, 800)}>${a.price?.toFixed(2)}</div>
+                  <div style={mono(10, chgColor(a.change_pct), 600)}>{a.change_pct >= 0 ? "+" : ""}{a.change_pct?.toFixed(2)}%</div>
+                  <div style={{...mono(8, C.mut), marginTop:6, lineHeight:1.4}}>{interp[a.symbol] || ""}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
 
-          {/* Expanded: full heatmap */}
-          {sectorsOpen && (
-            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(125px,1fr))",gap:6}}>
-              {mkt.sectors.map(s=>{
-                const intensity = Math.min(Math.abs(s.change_pct)/2.5,1);
-                const col = s.change_pct>=0?C.grn:C.red;
-                const bg  = s.change_pct>=0
-                  ? `rgba(0,230,118,${0.06+intensity*0.20})`
-                  : `rgba(255,82,82,${0.06+intensity*0.20})`;
-                return (
-                  <div key={s.symbol} style={{padding:"10px 12px",borderRadius:10,background:bg,
-                    border:`1px solid ${col}28`}}>
-                    <div style={mono(9,col,700)}>{s.symbol}</div>
-                    <div style={{...mono(9,C.txt),marginBottom:4,whiteSpace:"nowrap",
-                      overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</div>
-                    <div style={mono(14,col,800)}>{s.change_pct>=0?"+":""}{s.change_pct.toFixed(2)}%</div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+        {/* ═══════════ 6. BREADTH & SECTOR PARTICIPATION ═══════════ */}
+        {mkt.sectors && (
+          <div>
+            <SectionSep label="Breadth & Sector Participation"/>
+            <Card>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <span style={mono(10, C.headingTxt, 700)}>Sector Heatmap</span>
+                  {(() => {
+                    const adv = mkt.sectors.filter(s => (s.change_pct||0) >= 0).length;
+                    return <Tag color={adv >= 8 ? C.grn : adv >= 5 ? C.amb : C.red}>{adv}/{mkt.sectors.length} advancing</Tag>;
+                  })()}
+                </div>
+                <button onClick={()=>setSectorsOpen(!sectorsOpen)}
+                  style={{...mono(9,C.mut,600),background:"transparent",border:`1px solid ${C.bdr}`,borderRadius:6,padding:"3px 10px",cursor:"pointer"}}>
+                  {sectorsOpen ? "Collapse" : "Expand"}
+                </button>
+              </div>
+
+              {!sectorsOpen && (
+                <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                  {[...mkt.sectors].sort((a,b) => (b.change_pct||0) - (a.change_pct||0)).map(s => (
+                    <span key={s.symbol} style={{...mono(8, chgColor(s.change_pct), 600),
+                      padding:"2px 6px",borderRadius:4,background:chgColor(s.change_pct)+"12",border:`1px solid ${chgColor(s.change_pct)}22`}}>
+                      {s.symbol.replace("XL","")} {s.change_pct >= 0 ? "+" : ""}{s.change_pct?.toFixed(1)}%
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {sectorsOpen && (
+                <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fill, minmax(125px, 1fr))`,gap:6}}>
+                  {[...mkt.sectors].sort((a,b) => (b.change_pct||0) - (a.change_pct||0)).map(s => {
+                    const intensity = Math.min(1, Math.abs(s.change_pct || 0) / 2);
+                    return (
+                      <div key={s.symbol} style={{padding:"10px",borderRadius:8,textAlign:"center",
+                        background:(s.change_pct >= 0 ? C.grn : C.red) + Math.round(intensity * 25).toString(16).padStart(2,"0"),
+                        border:`1px solid ${chgColor(s.change_pct)}30`}}>
+                        <div style={mono(9, C.headingTxt, 700)}>{s.name}</div>
+                        <div style={mono(8, C.mut)}>{s.symbol}</div>
+                        <div style={mono(12, chgColor(s.change_pct), 800)}>{s.change_pct >= 0 ? "+" : ""}{s.change_pct?.toFixed(2)}%</div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          </div>
+        )}
+
+        {/* ═══════════ 7. GO DEEPER ═══════════ */}
+        <div>
+          <SectionSep label="Go Deeper"/>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:8}}>
+            {[["Sectors","sectors","Sector rotation & relative strength"],
+              ["Technical","technical","Price action & signal analysis"],
+              ["Options","options","Options chain & strategy builder"]].map(([label, view, desc]) => (
+              <button key={view} onClick={()=>onNav(view)}
+                style={{flex:1,minWidth:150,padding:"14px 16px",borderRadius:12,background:C.surf,
+                  border:`1px solid ${C.sky}25`,cursor:"pointer",textAlign:"left",transition:"border-color .15s"}}>
+                <div style={mono(11, C.sky, 700)}>{label}</div>
+                <div style={{...mono(9, C.mut), marginTop:4}}>{desc}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* ═══════════ 8. SYSTEM STATUS ═══════════ */}
+        <Card>
+          <Lbl>System Status</Lbl>
+          <div style={{display:"grid",gridTemplateColumns: C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:8}}>
+            {[["Data Layer","3 / 3",C.grn],["Signal Engine","5 active",C.grn],
+              ["Options Feed","Live",C.grn],["Statistical Val","49 / 49",C.grn]].map(([k,v,c])=>(
+              <div key={k} style={{padding:"8px 10px",borderRadius:8,background:c+"08",border:`1px solid ${c}22`}}>
+                <div style={{...mono(8,C.mut,700),letterSpacing:"0.08em",marginBottom:2}}>{k.toUpperCase()}</div>
+                <div style={mono(12,c,800)}>{v}</div>
+                <div style={{...mono(7,C.mut),marginTop:1}}>operational</div>
+              </div>
+            ))}
+          </div>
         </Card>
 
-        {/* ── Quick Nav ── */}
-        <SectionSep label="Actions"/>
-        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"repeat(3,1fr)",gap:10}}>
-          {[{l:"Sectors",v:"sectors",I:Layers,c:C.grn},
-            {l:"Technical",v:"technical",I:TrendingUp,c:C.sky},
-            {l:"Options",v:"options",I:Activity,c:C.amb}].map(({l,v,I,c})=>(
-            <button key={v} onClick={()=>onNav(v)}
-              style={{display:"flex",alignItems:"center",justifyContent:"space-between",
-                padding:"13px 16px",borderRadius:12,border:`1px solid ${c}30`,
-                background:"transparent",cursor:"pointer",...mono(12,c,700)}}
-              onMouseEnter={e=>e.currentTarget.style.background=c+"10"}
-              onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-              <span style={{display:"flex",alignItems:"center",gap:8}}><I size={14}/>{l}</span>
-              <ArrowRight size={13}/>
-            </button>
-          ))}
-        </div>
-      </>}
-
-      {/* ── Engine Status (always visible) ── */}
-      <SectionSep label="Engine Status"/>
-      <Card>
-        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:8}}>
-          {[["Data Layer","3 / 3",C.grn],["Signal Engine","5 active",C.grn],
-            ["Options Feed","Live",C.grn],["Statistical Val","49 / 49",C.grn]].map(([k,v,c])=>(
-            <div key={k} style={{padding:"10px 12px",borderRadius:10,background:c+"08",border:`1px solid ${c}22`}}>
-              <div style={{...mono(8,C.mut,700),letterSpacing:"0.09em",marginBottom:4}}>{k.toUpperCase()}</div>
-              <div style={mono(14,c,800)}>{v}</div>
-              <div style={{...mono(8,C.mut),marginTop:2}}>operational</div>
-            </div>
-          ))}
-        </div>
-      </Card>
+      </>)}
 
     </div>
   );
