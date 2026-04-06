@@ -1720,6 +1720,7 @@ function SignalsView() {
   const [mlSig,       setMlSig]      = useState(null);
   const [sentiment,   setSentiment]  = useState(null);
   const [mlLoading,   setMlLoading]  = useState(false);
+  const [ensemble,    setEnsemble]   = useState(null);
 
   // Fetch projects once on mount
   useEffect(() => {
@@ -1770,6 +1771,11 @@ function SignalsView() {
         if (sr.ok) setSentiment(await sr.json());
       } catch(_) {}
       setMlLoading(false);
+      // Also fetch ensemble
+      try {
+        const er = await fetch(`/api/signals/ensemble/${symbol}`);
+        if (er.ok) setEnsemble(await er.json());
+      } catch(_) {}
     }, 800);
     return () => clearTimeout(t);
   }, [symbol]);
@@ -1893,6 +1899,61 @@ function SignalsView() {
           </div>
         </Card>
       )}
+
+      {/* ═══════════ ENSEMBLE REGIME SNAPSHOT ═══════════ */}
+      {ensemble && (()=>{
+        const sc = ensemble.score || 0;
+        const conf = ensemble.confidence || 0;
+        const biasCol = sc >= 0.15 ? C.grn : sc <= -0.15 ? C.red : C.amb;
+        const confCol = conf >= 60 ? C.grn : conf >= 35 ? C.amb : C.red;
+        const agreeCol = (ensemble.agreement_score||0) >= 60 ? C.grn : (ensemble.agreement_score||0) >= 40 ? C.amb : C.red;
+        return (
+          <div style={{borderRadius:14,border:`1.5px solid ${biasCol}30`,background:biasCol+"07",padding:"18px 20px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12,marginBottom:14}}>
+              <div>
+                <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",marginBottom:4}}>ENSEMBLE DECISION</div>
+                <div style={mono(20, biasCol, 800)}>{ensemble.bias || "Neutral"}</div>
+              </div>
+              <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>SCORE</div>
+                  <div style={mono(18, biasCol, 800)}>{sc > 0 ? "+" : ""}{(sc*100).toFixed(0)}</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>CONFIDENCE</div>
+                  <div style={mono(14, confCol, 700)}>{conf.toFixed(0)}%</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>AGREEMENT</div>
+                  <div style={mono(14, agreeCol, 700)}>{(ensemble.agreement_score||0).toFixed(0)}%</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>POSTURE</div>
+                  <div style={mono(11, biasCol, 700)}>{ensemble.posture || "—"}</div>
+                </div>
+              </div>
+            </div>
+            {/* Active signals */}
+            {ensemble.active_signals?.length > 0 && (
+              <div style={{display:"grid",gridTemplateColumns: C.isMobile ? "1fr" : `repeat(${Math.min(ensemble.active_signals.length,4)},1fr)`,gap:8,marginBottom:12}}>
+                {ensemble.active_signals.map((s,i) => (
+                  <div key={i} style={{padding:"8px 10px",borderRadius:8,background:C.dim,border:`1px solid ${s.score>=0?C.grn:C.red}22`}}>
+                    <div style={{...mono(8,C.mut,600),letterSpacing:"0.06em"}}>{s.signal_name}</div>
+                    <div style={mono(14, s.score >= 0 ? C.grn : C.red, 800)}>{s.score > 0 ? "+" : ""}{(s.score*100).toFixed(0)}</div>
+                    <div style={mono(7, C.mut)}>{s.signal_type} · wt:{(s.weight*100).toFixed(0)}%</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {/* Narrative */}
+            {ensemble.narrative?.length > 0 && (
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                {ensemble.narrative.map((b,i) => <div key={i} style={{display:"flex",gap:6}}><span style={mono(9,C.mut)}>•</span><span style={mono(9,C.txt)}>{b}</span></div>)}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* ── Results ── */}
       {results && !isRunning && (
@@ -9271,6 +9332,153 @@ function PairsView() {
         </div>
       </Card>
 
+      {/* ═══════════ PAIRS SIGNAL ENGINE ═══════════ */}
+      {pairs && pairs.pairs?.length > 0 && (()=>{
+        const ap = pairs.pairs;
+
+        // ── Scoring engine ──
+        const clamp = (v,lo=0,hi=100) => Math.max(lo,Math.min(hi,v));
+        const scorePair = (p) => {
+          // A. Statistical Validity (0-100)
+          let stat = 0;
+          if (p.p_value < 0.01) stat += 45; else if (p.p_value < 0.05) stat += 35; else if (p.p_value < 0.10) stat += 20;
+          if (p.correlation >= 0.9) stat += 30; else if (p.correlation >= 0.8) stat += 22; else if (p.correlation >= 0.7) stat += 15;
+          stat += 15; // assume hedge stable
+          stat = clamp(stat);
+
+          // B. Mean Reversion Quality (0-100)
+          const hl = p.half_life || 999;
+          let mr = hl <= 5 ? 90 : hl <= 10 ? 75 : hl <= 20 ? 60 : hl <= 40 ? 40 : 20;
+
+          // C. Entry Readiness (0-100)
+          const absZ = Math.abs(p.current_zscore || 0);
+          const dist = Math.max(0, zEntry - absZ);
+          let entry = absZ >= zEntry ? 100 : dist <= 0.25 ? 80 : dist <= 0.5 ? 60 : dist <= 1.0 ? 35 : 15;
+
+          // D. Backtest Quality (0-100)
+          let bt = 40;
+          if ((p.recent_return || 0) > 0) bt += 15; else bt -= 10;
+          const sh = p.sharpe || 0;
+          if (sh >= 1.5) bt += 30; else if (sh >= 1.0) bt += 20; else if (sh >= 0.5) bt += 10; else if (sh < 0) bt -= 20;
+          bt = clamp(bt);
+
+          // E. Trade Efficiency (0-100)
+          let eff = 50;
+          if (hl <= 20) eff += 20; else if (hl > 40) eff -= 15;
+          if (p.hedge_ratio > 0 && p.hedge_ratio < 2) eff += 15;
+          eff = clamp(eff);
+
+          const composite = 0.30*stat + 0.20*mr + 0.20*entry + 0.20*bt + 0.10*eff;
+          const normalized = Math.max(-1, Math.min(1, (composite / 100) * 2 - 1));
+          const confidence = Math.round(0.35*stat + 0.25*mr + 0.20*bt + 0.20*entry);
+
+          // Status
+          let status;
+          if (absZ >= zEntry && stat >= 40) status = "Active Trade";
+          else if (dist <= 0.5 && stat >= 30) status = "Pre-Entry";
+          else if (stat >= 30) status = "Watchlist";
+          else if (stat >= 15) status = "Weak";
+          else status = "Invalid";
+
+          // Direction
+          const dir = p.current_zscore >= 0
+            ? `Short ${p.symbol_a} / Long ${p.symbol_b}`
+            : `Long ${p.symbol_a} / Short ${p.symbol_b}`;
+
+          return { stat, mr, entry, bt, eff, composite: Math.round(composite), normalized: Math.round(normalized*100)/100, confidence, status, direction: dir, distToEntry: dist.toFixed(2) };
+        };
+
+        const scored = ap.map(p => ({...p, score: scorePair(p)})).sort((a,b) => b.score.composite - a.score.composite);
+
+        // Regime
+        const active = scored.filter(p => p.score.status === "Active Trade").length;
+        const preEntry = scored.filter(p => p.score.status === "Pre-Entry").length;
+        const watchlist = scored.filter(p => p.score.status === "Watchlist").length;
+        const avgScore = scored.length ? scored.reduce((s,p) => s + p.score.normalized, 0) / scored.length : 0;
+
+        let regimeLabel;
+        if (active >= 2) regimeLabel = "High Opportunity";
+        else if (active >= 1 || preEntry >= 2) regimeLabel = "Mean-Reverting";
+        else if (watchlist >= 2) regimeLabel = "Watchlist Only";
+        else if (scored.length === 0) regimeLabel = "No Valid Pairs";
+        else regimeLabel = "Low Opportunity";
+
+        const regimeCol = ({"High Opportunity":C.grn,"Mean-Reverting":"#66bb6a","Low Opportunity":C.amb,"Watchlist Only":C.amb,"No Valid Pairs":C.red,"Dislocated":C.red})[regimeLabel] || C.mut;
+        const statusCol = s => ({"Active Trade":C.grn,"Pre-Entry":C.sky,"Watchlist":C.amb,"Weak":C.red,"Invalid":C.mut})[s] || C.mut;
+
+        // Bullets
+        const bullets = [];
+        if (active > 0) bullets.push(`${active} pair${active>1?"s":""} at entry threshold — active trade signals`);
+        if (preEntry > 0) bullets.push(`${preEntry} pair${preEntry>1?"s":""} approaching entry — monitor for spread expansion`);
+        if (watchlist > 0) bullets.push(`${watchlist} statistically valid pair${watchlist>1?"s":""} on watchlist`);
+        const hlVals = scored.map(p => p.half_life).filter(v => v != null && v > 0);
+        if (hlVals.length) bullets.push(`Median half-life: ${hlVals.sort((a,b)=>a-b)[Math.floor(hlVals.length/2)].toFixed(1)} trading days`);
+        if (!active && !preEntry) bullets.push("No pairs currently at entry — spreads are near equilibrium");
+
+        return (<>
+          {/* Pairs Regime Snapshot */}
+          <div style={{borderRadius:14,border:`1.5px solid ${regimeCol}30`,background:regimeCol+"07",padding:"18px 20px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12,marginBottom:14}}>
+              <div>
+                <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",marginBottom:4}}>PAIRS REGIME</div>
+                <div style={mono(20, regimeCol, 800)}>{regimeLabel}</div>
+              </div>
+              <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>AVG SCORE</div>
+                  <div style={mono(16, avgScore >= 0 ? C.grn : C.red, 800)}>{avgScore >= 0 ? "+" : ""}{(avgScore*100).toFixed(0)}</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>ACTIVE</div>
+                  <div style={mono(16, active > 0 ? C.grn : C.mut, 700)}>{active}</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>PRE-ENTRY</div>
+                  <div style={mono(16, preEntry > 0 ? C.sky : C.mut, 700)}>{preEntry}</div>
+                </div>
+                <div style={{textAlign:"center"}}>
+                  <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>WATCHLIST</div>
+                  <div style={mono(14, C.amb, 700)}>{watchlist}</div>
+                </div>
+              </div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+              {bullets.map((b,i) => <div key={i} style={{display:"flex",gap:6}}><span style={mono(9,C.mut)}>•</span><span style={mono(9,C.txt)}>{b}</span></div>)}
+            </div>
+          </div>
+
+          {/* Top Opportunities */}
+          {scored.filter(p => p.score.status !== "Invalid" && p.score.status !== "Weak").length > 0 && (
+            <div style={{borderRadius:14,border:`1.5px solid ${C.pur}30`,background:C.pur+"07",padding:"18px 20px"}}>
+              <div style={{...mono(11,C.headingTxt,700),marginBottom:12}}>TOP RELATIVE VALUE OPPORTUNITIES</div>
+              <div style={{display:"grid",gridTemplateColumns: C.isMobile ? "1fr" : `repeat(${Math.min(3, scored.filter(p=>p.score.status!=="Invalid"&&p.score.status!=="Weak").length)},1fr)`,gap:10}}>
+                {scored.filter(p => p.score.status !== "Invalid" && p.score.status !== "Weak").slice(0,3).map((p,i) => (
+                  <div key={i} style={{padding:"14px 16px",borderRadius:10,background:C.dim,border:`1px solid ${statusCol(p.score.status)}25`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                      <span style={mono(12, C.headingTxt, 700)}>{p.symbol_a} / {p.symbol_b}</span>
+                      <span style={mono(16, p.score.composite >= 60 ? C.grn : p.score.composite >= 40 ? C.amb : C.red, 800)}>{p.score.composite}</span>
+                    </div>
+                    <Tag color={statusCol(p.score.status)}>{p.score.status}</Tag>
+                    <div style={{...mono(9, C.txt), marginTop:6}}>{p.score.direction}</div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:4,marginTop:8}}>
+                      <div><span style={mono(8,C.mut)}>Z-Score: </span><span style={mono(9, zCol(p.current_zscore), 700)}>{(p.current_zscore||0).toFixed(2)}</span></div>
+                      <div><span style={mono(8,C.mut)}>Dist: </span><span style={mono(9, C.txt, 600)}>{p.score.distToEntry}σ</span></div>
+                      <div><span style={mono(8,C.mut)}>Half-life: </span><span style={mono(9, C.txt, 600)}>{p.half_life?.toFixed(1) || "—"}d</span></div>
+                      <div><span style={mono(8,C.mut)}>Conf: </span><span style={mono(9, p.score.confidence >= 60 ? C.grn : C.amb, 600)}>{p.score.confidence}%</span></div>
+                    </div>
+                    <div style={{display:"flex",gap:4,marginTop:8,flexWrap:"wrap"}}>
+                      {[["Stat",p.score.stat],["MR",p.score.mr],["Entry",p.score.entry],["BT",p.score.bt],["Eff",p.score.eff]].map(([l,v])=>(
+                        <span key={l} style={{...mono(7,v>=60?C.grn:v>=40?C.amb:C.red,600),padding:"1px 5px",borderRadius:4,background:C.dim,border:`1px solid ${C.bdr}`}}>{l}:{v}</span>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>);
+      })()}
+
       {/* ── Pairs Trading Synthesis ── */}
       {pairs && (() => {
         const allPairs   = pairs.pairs || [];
@@ -9523,17 +9731,80 @@ function PortfolioHubView() {
 
 // Lab = Backtest runner + Results browser + Stochastic finance tools
 function LabView() {
+  const C = useC();
   const [tab, setTab] = useState("backtest");
+  const [registry, setRegistry] = useState(null);
+
+  useEffect(() => {
+    if (tab === "registry") {
+      fetch("/api/signals/registry").then(r=>r.ok?r.json():[]).then(d=>setRegistry(d)).catch(()=>setRegistry([]));
+    }
+  }, [tab]);
+
   return (
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
-      <div style={{display:"flex",gap:8}}>
-        {[["backtest","Backtest"],["report","Report"],["stochastic","Stochastic"]].map(([id,l])=>(
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        {[["backtest","Backtest"],["report","Report"],["stochastic","Modeling"],["registry","Signal Registry"]].map(([id,l])=>(
           <Pill key={id} label={l} active={tab===id} onClick={()=>setTab(id)}/>
         ))}
       </div>
       {tab==="backtest"   && <BacktestView/>}
       {tab==="report"     && <ReportView/>}
       {tab==="stochastic" && <StochasticView/>}
+      {tab==="registry" && (
+        <div style={{display:"flex",flexDirection:"column",gap:14}}>
+          <div>
+            <Lbl>Signal Registry</Lbl>
+            <div style={mono(10,C.mut)}>Central registry of all signals — ML, rule-based, statistical, sentiment, regime</div>
+          </div>
+          {/* Built-in signals */}
+          <Card>
+            <Lbl>PLATFORM SIGNALS</Lbl>
+            <div style={{display:"grid",gridTemplateColumns: C.isMobile ? "1fr" : "repeat(2,1fr)",gap:10}}>
+              {[
+                {name:"ML Gradient Boosting",type:"ML",status:"Live",horizon:"Short",desc:"Walk-forward trained classifier using 11 technical features"},
+                {name:"News Sentiment",type:"Sentiment",status:"Live",horizon:"Short",desc:"Keyword lexicon scoring across RSS feeds (Yahoo, CNBC, WSJ)"},
+                {name:"Technical 28-Signal",type:"Rule",status:"Live",horizon:"Short",desc:"28 event + structural signals from trend, momentum, liquidity"},
+                {name:"5-Signal Quant Engine",type:"Statistical",status:"Live",horizon:"Medium",desc:"Conditional prob, Bayesian, regression alpha, PCA regime, fat-tail"},
+                {name:"Macro Regime",type:"Regime",status:"Live",horizon:"Long",desc:"8-pillar macro scoring: growth, inflation, labor, policy, liquidity, credit, fiscal, global"},
+                {name:"Pairs Statistical Arb",type:"Statistical",status:"Live",horizon:"Short",desc:"Engle-Granger cointegration + Kalman filter z-score signals"},
+              ].map((s,i) => (
+                <div key={i} style={{padding:"12px 14px",borderRadius:10,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                    <span style={mono(11, C.headingTxt, 700)}>{s.name}</span>
+                    <Tag color={C.grn}>{s.status}</Tag>
+                  </div>
+                  <div style={{display:"flex",gap:6,marginBottom:6}}>
+                    <Tag color={C.sky}>{s.type}</Tag>
+                    <Tag color={C.amb}>{s.horizon}</Tag>
+                  </div>
+                  <div style={mono(9, C.mut)}>{s.desc}</div>
+                </div>
+              ))}
+            </div>
+          </Card>
+          {/* Custom signals from DB */}
+          {registry && registry.length > 0 && (
+            <Card>
+              <Lbl>CUSTOM SIGNALS</Lbl>
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {registry.map((s,i) => (
+                  <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                    <div>
+                      <span style={mono(10, C.headingTxt, 600)}>{s.name}</span>
+                      <span style={{...mono(8, C.mut), marginLeft:8}}>{s.type} · {s.horizon}</span>
+                    </div>
+                    <Tag color={s.status === "Live" ? C.grn : s.status === "Validated" ? C.sky : s.status === "Experimental" ? C.amb : C.mut}>{s.status}</Tag>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+          {registry && registry.length === 0 && (
+            <Card><div style={mono(10, C.mut)}>No custom signals registered yet. Use the Backtest tab to create and validate signals.</div></Card>
+          )}
+        </div>
+      )}
     </div>
   );
 }

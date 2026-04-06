@@ -520,3 +520,113 @@ class ProviderSyncRun(Base):
     records_processed = Column(Integer, default=0)
     error_message     = Column(Text, nullable=True)
     metadata_json     = Column(JSON, nullable=True)
+
+
+# ===========================================================================
+# Unified Signal Pipeline Tables
+# ===========================================================================
+
+class SignalDefinition(Base):
+    """Central registry of all signals (ML, rule-based, statistical, etc.)."""
+    __tablename__ = "signal_definitions"
+
+    id            = Column(String, primary_key=True)             # UUID
+    name          = Column(String, nullable=False)
+    description   = Column(Text, nullable=True)
+    signal_type   = Column(String, nullable=False)               # ML, Rule, Statistical, Sentiment, Regime, Volatility, Composite
+    status        = Column(String, default="Draft")              # Draft, Experimental, Validated, Live, Archived, Disabled
+    horizon       = Column(String, default="Medium")             # Short, Medium, Long
+    version       = Column(String, default="1.0")
+    config_json   = Column(JSON, nullable=True)
+    metadata_json = Column(JSON, nullable=True)
+    created_at    = Column(DateTime, default=datetime.utcnow)
+    updated_at    = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SignalBacktest(Base):
+    """Backtest results for a signal definition."""
+    __tablename__ = "signal_backtests"
+
+    id                  = Column(String, primary_key=True)       # UUID
+    signal_id           = Column(String, nullable=False, index=True)
+    symbols             = Column(JSON, nullable=True)
+    start_date          = Column(Date, nullable=True)
+    end_date            = Column(Date, nullable=True)
+    metrics_json        = Column(JSON, nullable=True)            # CAGR, Sharpe, max DD, etc.
+    equity_curve_json   = Column(JSON, nullable=True)
+    benchmark_curve_json = Column(JSON, nullable=True)
+    created_at          = Column(DateTime, default=datetime.utcnow)
+
+
+class SignalValidationReport(Base):
+    """Validation results determining promotion eligibility."""
+    __tablename__ = "signal_validation_reports"
+
+    id                      = Column(String, primary_key=True)   # UUID
+    signal_id               = Column(String, nullable=False, index=True)
+    validation_score        = Column(Float, nullable=True)
+    robustness_score        = Column(Float, nullable=True)
+    implementability_score  = Column(Float, nullable=True)
+    overfit_risk            = Column(String, nullable=True)      # Low, Moderate, High
+    promotion_eligible      = Column(Boolean, default=False)
+    report_json             = Column(JSON, nullable=True)
+    created_at              = Column(DateTime, default=datetime.utcnow)
+
+
+class LiveSignalRegistry(Base):
+    """Active signals deployed into the live ensemble."""
+    __tablename__ = "live_signal_registry"
+
+    id            = Column(String, primary_key=True)             # UUID
+    signal_id     = Column(String, nullable=False, index=True)
+    live_weight   = Column(Float, default=0.1)
+    is_active     = Column(Boolean, default=True)
+    promoted_at   = Column(DateTime, nullable=True)
+    disabled_at   = Column(DateTime, nullable=True)
+    notes         = Column(Text, nullable=True)
+
+
+class LiveSignalOutput(Base):
+    """Point-in-time signal outputs from live signals."""
+    __tablename__ = "live_signal_outputs"
+
+    id            = Column(String, primary_key=True)             # UUID
+    signal_id     = Column(String, nullable=False, index=True)
+    symbol        = Column(String, nullable=False)
+    timestamp     = Column(DateTime, nullable=False, index=True)
+    score         = Column(Float, nullable=True)                 # -1 to +1
+    confidence    = Column(Float, nullable=True)                 # 0 to 100
+    bias          = Column(String, nullable=True)
+    posture       = Column(String, nullable=True)
+    summary_json  = Column(JSON, nullable=True)
+    drivers_json  = Column(JSON, nullable=True)
+    risks_json    = Column(JSON, nullable=True)
+
+
+class EnsembleOutput(Base):
+    """Aggregated ensemble decision outputs."""
+    __tablename__ = "ensemble_outputs"
+
+    id              = Column(String, primary_key=True)           # UUID
+    symbol          = Column(String, nullable=False, index=True)
+    horizon         = Column(String, nullable=True)
+    timestamp       = Column(DateTime, nullable=False, index=True)
+    score           = Column(Float, nullable=True)
+    confidence      = Column(Float, nullable=True)
+    bias            = Column(String, nullable=True)
+    posture         = Column(String, nullable=True)
+    agreement_score = Column(Float, nullable=True)
+    output_json     = Column(JSON, nullable=True)
+
+
+class SignalHealth(Base):
+    """Live signal monitoring and health status."""
+    __tablename__ = "signal_health"
+
+    id                = Column(String, primary_key=True)         # UUID
+    signal_id         = Column(String, nullable=False, index=True)
+    status            = Column(String, default="Healthy")        # Healthy, Drifting, Degrading, Stale, Disabled
+    rolling_hit_rate  = Column(Float, nullable=True)
+    rolling_sharpe    = Column(Float, nullable=True)
+    drift_warning     = Column(String, nullable=True)
+    updated_at        = Column(DateTime, default=datetime.utcnow)

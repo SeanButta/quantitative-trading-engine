@@ -2860,6 +2860,105 @@ def technical_analysis(
 
 
 # ---------------------------------------------------------------------------
+# Endpoints: Signal Pipeline & Ensemble
+# ---------------------------------------------------------------------------
+
+@app.get("/signals/ensemble/{symbol}")
+def signals_ensemble(symbol: str):
+    """
+    Compute the live ensemble decision output for a symbol.
+    Combines ML, sentiment, technical, and quant signals.
+    """
+    from ensemble_engine import (
+        normalize_ml_signal, normalize_sentiment_signal,
+        normalize_technical_signals, compute_ensemble, generate_ensemble_narrative,
+    )
+    from cache import cache
+
+    cache_key = f"ensemble:{symbol}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    signals = []
+
+    # ML signal
+    try:
+        from ml_signal_engine import MLSignalEngine
+        from feature_engine import FeatureEngine
+        import yfinance as yf
+        from datetime import datetime, timedelta
+        hist = yf.Ticker(symbol).history(start=(datetime.now() - timedelta(days=1095)).strftime("%Y-%m-%d"), auto_adjust=True)
+        if not hist.empty:
+            import polars as pl
+            rows = [{"timestamp": idx.to_pydatetime(), "symbol": symbol,
+                     "open": float(r["Open"]), "high": float(r["High"]),
+                     "low": float(r["Low"]), "close": float(r["Close"]),
+                     "volume": float(r["Volume"])} for idx, r in hist.iterrows()]
+            raw = pl.DataFrame(rows).with_columns(pl.col("timestamp").cast(pl.Datetime("us")))
+            fe = FeatureEngine()
+            features = fe.compute(raw)
+            ml = MLSignalEngine()
+            ml_result = ml.run(features, symbol)
+            if ml_result:
+                norm = normalize_ml_signal({"p_up": ml_result.p_up, "accuracy": ml_result.accuracy,
+                                           "top_feature": ml_result.top_feature})
+                if norm:
+                    signals.append(norm)
+    except Exception as e:
+        logger.debug("Ensemble ML failed for %s: %s", symbol, e)
+
+    # Sentiment
+    try:
+        from sentiment_engine import SentimentEngine
+        se = SentimentEngine()
+        sent = se.compute_signal(symbol)
+        if sent:
+            norm = normalize_sentiment_signal(sent)
+            if norm:
+                signals.append(norm)
+    except Exception as e:
+        logger.debug("Ensemble sentiment failed for %s: %s", symbol, e)
+
+    # Technical signals
+    try:
+        from technical_analysis import fetch_and_compute
+        from signal_strategies import StrategyEngine
+        ta = fetch_and_compute(symbol, period="1y", interval="1d")
+        if ta:
+            se2 = StrategyEngine()
+            sigs = se2.check_all(ta)
+            gm = se2.god_mode(sigs, ta)
+            if gm:
+                norm = normalize_technical_signals(sigs, gm)
+                if norm:
+                    signals.append(norm)
+    except Exception as e:
+        logger.debug("Ensemble technical failed for %s: %s", symbol, e)
+
+    ensemble = compute_ensemble(signals)
+    ensemble["narrative"] = generate_ensemble_narrative(ensemble)
+    ensemble["symbol"] = symbol
+    ensemble["timestamp"] = datetime.utcnow().isoformat()
+
+    cache.set(cache_key, ensemble, 900)  # 15 min cache
+    return ensemble
+
+
+@app.get("/signals/registry")
+def signals_registry():
+    """List all signal definitions."""
+    from models import SignalDefinition
+    session = SessionLocal()
+    try:
+        defs = session.query(SignalDefinition).all()
+        return [{"id": d.id, "name": d.name, "type": d.signal_type, "status": d.status,
+                 "horizon": d.horizon, "version": d.version} for d in defs]
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
 # Endpoints: Unified Regime Dashboard
 # ---------------------------------------------------------------------------
 
