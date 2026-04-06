@@ -4731,6 +4731,18 @@ function OptionsView() {
     ? (Array.isArray(chain) ? chain.filter(r=>r.expiration===selExp) : [])
     : (Array.isArray(chain) ? chain : []);
 
+  // Precompute which strategies have attractive contracts (for button highlighting)
+  const strategyHasOpps = useMemo(() => {
+    const result = {};
+    if (!visibleChain?.length) return result;
+    for (const key of Object.keys(OPTION_STRATEGIES)) {
+      const strat = OPTION_STRATEGIES[key];
+      const hasAttractive = visibleChain.some(r => strat.score(r) === "attractive");
+      result[key] = hasAttractive;
+    }
+    return result;
+  }, [visibleChain, selExp]);
+
   const calls = visibleChain.filter(r=>r.option_type==="call").sort((a,b)=>a.strike-b.strike);
   const puts  = visibleChain.filter(r=>r.option_type==="put").sort((a,b)=>a.strike-b.strike);
   const spot  = visibleChain[0]?.spot || null;
@@ -5108,7 +5120,8 @@ function OptionsView() {
             <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
               {Object.entries(OPTION_STRATEGIES).filter(([,s])=>s.group===grp).map(([key,strat])=>{
                 const isActive = activeStrategy===key;
-                const col = isActive ? "#00e676" : C.txt;
+                const hasOpps = strategyHasOpps[key];
+                const col = isActive ? "#00e676" : hasOpps ? C.txt : C.mut;
                 return (
                   <button key={key} onClick={()=>{
                     if(isActive){ setActiveStrategy(null); }
@@ -5116,18 +5129,19 @@ function OptionsView() {
                       setActiveStrategy(key);
                       if(CALL_ONLY.has(key))      setChainView("calls");
                       else if(PUT_ONLY.has(key))  setChainView("puts");
-                      // else leave current view
                     }
                   }}
                     style={{
-                      ...mono(10,isActive?"#001a0a":col, isActive?700:400),
+                      ...mono(10, isActive?"#001a0a":col, isActive?700: hasOpps?500:400),
                       padding:"5px 14px", borderRadius:20,
-                      border:`1px solid ${isActive?"#00e676":C.bdr}`,
-                      background: isActive ? "#00e676" : C.dim,
+                      border:`1px solid ${isActive?"#00e676": hasOpps?C.grn+"40":C.bdr}`,
+                      background: isActive ? "#00e676" : hasOpps ? C.grn+"08" : C.dim,
                       cursor:"pointer", transition:"all .15s",
                       boxShadow: isActive ? "0 0 8px #00e67640" : "none",
+                      opacity: hasOpps || isActive ? 1 : 0.45,
                     }}>
                     {strat.label}
+                    {hasOpps && !isActive && <span style={{...mono(7,C.grn),marginLeft:4}}>●</span>}
                   </button>
                 );
               })}
