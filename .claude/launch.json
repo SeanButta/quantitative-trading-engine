@@ -3,17 +3,11 @@
   "configurations": [
     {
       "name": "quant-frontend",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
+      "runtimeExecutable": "/usr/local/bin/node",
+      "runtimeArgs": ["node_modules/.bin/vite", "--port", "5173"],
       "port": 5173,
-      "autoPort": true
-    },
-    {
-      "name": "quant-backend",
-      "runtimeExecutable": "bash",
-      "runtimeArgs": ["/Users/sean_dlresearch/Desktop/Quantative Trading Engine/start_backend.sh"],
-      "port": 8002,
-      "autoPort": true
+      "autoPort": true,
+      "cwd": "frontend"
     }
   ]
 }

@@ -8369,7 +8369,6 @@ function TradeAdvisorView() {
   const [loading, setLoading] = useState(false);
   const [data,    setData]    = useState(null);
   const [err,     setErr]     = useState(null);
-  const [optExpanded, setOptExpanded] = useState(false);
 
   const run = () => {
     const sym = input.trim().toUpperCase();
@@ -8385,11 +8384,10 @@ function TradeAdvisorView() {
       .catch(e => { setErr(String(e)); setLoading(false); });
   };
 
-  const sCol = s => s >= 0.2 ? C.grn : s <= -0.2 ? C.red : C.amb;
-  const dIco = d => d === "bullish" ? "▲" : d === "bearish" ? "▼" : "●";
   const dCol = d => d === "bullish" ? C.grn : d === "bearish" ? C.red : C.amb;
 
   // helpers used throughout
+  // ── Formatting helpers ──
   const fmtCap = v => {
     if (!v) return "—";
     if (v >= 1e12) return "$" + (v/1e12).toFixed(2) + "T";
@@ -8399,10 +8397,12 @@ function TradeAdvisorView() {
   };
   const fmtFCF = v => {
     if (!v) return "—";
-    if (Math.abs(v) >= 1e9)  return (v >= 0 ? "+" : "") + "$" + (v/1e9).toFixed(1) + "B";
-    if (Math.abs(v) >= 1e6)  return (v >= 0 ? "+" : "") + "$" + (v/1e6).toFixed(0) + "M";
+    if (Math.abs(v) >= 1e9)  return (v >= 0 ? "+" : "-") + "$" + (Math.abs(v)/1e9).toFixed(1) + "B";
+    if (Math.abs(v) >= 1e6)  return (v >= 0 ? "+" : "-") + "$" + (Math.abs(v)/1e6).toFixed(0) + "M";
     return "$" + v.toLocaleString();
   };
+  const fmtPct = (v,dec=1) => v != null ? (v >= 0 ? "+" : "") + v.toFixed(dec) + "%" : "—";
+  const fmtNum = (v,dec=1) => v != null ? v.toFixed(dec) : "—";
   const analystLabel = mean => {
     if (mean == null) return {label:"—", col:C.mut};
     if (mean <= 1.5)  return {label:"Strong Buy",  col:"#00c853"};
@@ -8411,15 +8411,166 @@ function TradeAdvisorView() {
     if (mean <= 4.5)  return {label:"Underperform", col:C.red};
     return              {label:"Sell",         col:"#d50000"};
   };
+  const metricColor = (v,good,bad) => v == null ? C.mut : v >= good ? C.grn : v <= bad ? C.red : C.amb;
+
+  // ── Thesis generation ──
+  const buildThesis = (f, sent, comp) => {
+    if (!f) return [];
+    const bullets = [];
+    // Valuation
+    const pe = f.pe_ratio;
+    if (pe != null) {
+      if (pe < 12) bullets.push({text:"Deep value — trailing P/E well below market average", col:C.grn});
+      else if (pe < 20) bullets.push({text:"Reasonably valued — P/E in line with market", col:C.amb});
+      else if (pe < 35) bullets.push({text:"Premium valuation — priced for growth", col:C.amb});
+      else bullets.push({text:"Elevated multiple — requires sustained high growth to justify", col:C.red});
+    }
+    if (f.target_upside != null) {
+      if (f.target_upside > 20) bullets.push({text:`Trading ~${Math.round(f.target_upside)}% below consensus target — potential re-rating`, col:C.grn});
+      else if (f.target_upside < -10) bullets.push({text:`Trading ${Math.round(Math.abs(f.target_upside))}% above consensus target — limited upside`, col:C.red});
+    }
+    // Quality
+    const roe = f.roe;
+    if (roe != null) {
+      if (roe > 20) bullets.push({text:`High-quality business — ROE of ${roe.toFixed(0)}% with ${f.gross_margin > 50 ? "strong" : "adequate"} margins`, col:C.grn});
+      else if (roe > 10) bullets.push({text:`Adequate returns on equity (${roe.toFixed(0)}%)`, col:C.amb});
+      else bullets.push({text:`Below-average returns on equity (${roe.toFixed(0)}%)`, col:C.red});
+    }
+    // Growth
+    if (f.revenue_growth != null && f.eps_growth != null) {
+      const rg = f.revenue_growth, eg = f.eps_growth;
+      if (rg > 10 && eg > 10) bullets.push({text:`Strong growth — revenue +${rg.toFixed(0)}%, EPS +${eg.toFixed(0)}%`, col:C.grn});
+      else if (rg > 0 && eg > 0) bullets.push({text:`Moderate growth — revenue +${rg.toFixed(0)}%, EPS +${eg.toFixed(0)}%`, col:C.amb});
+      else bullets.push({text:`Growth headwinds — revenue ${fmtPct(rg,0)}, EPS ${fmtPct(eg,0)}`, col:C.red});
+    }
+    // Risk
+    if (f.debt_to_equity != null && f.debt_to_equity > 200) bullets.push({text:`High leverage (D/E ${f.debt_to_equity.toFixed(0)}%) introduces downside risk`, col:C.red});
+    if (f.free_cash_flow != null && f.free_cash_flow < 0) bullets.push({text:"Negative free cash flow — cash burn warrants monitoring", col:C.red});
+    return bullets;
+  };
+
+  // ── Risk assessment ──
+  const buildRisks = (f) => {
+    if (!f) return [];
+    const risks = [];
+    if (f.debt_to_equity != null && f.debt_to_equity > 200) risks.push({text:`High leverage — D/E ratio of ${f.debt_to_equity.toFixed(0)}%`, severity:"High", col:C.red});
+    if (f.debt_to_equity != null && f.debt_to_equity > 100 && f.debt_to_equity <= 200) risks.push({text:`Moderate leverage — D/E ratio of ${f.debt_to_equity.toFixed(0)}%`, severity:"Medium", col:C.amb});
+    if (f.free_cash_flow != null && f.free_cash_flow < 0) risks.push({text:"Negative free cash flow", severity:"High", col:C.red});
+    if (f.beta != null && f.beta > 1.5) risks.push({text:`High market sensitivity — beta of ${f.beta.toFixed(2)}`, severity:"Medium", col:C.amb});
+    if (f.short_ratio != null && f.short_ratio > 5) risks.push({text:`Elevated short interest — short ratio ${f.short_ratio.toFixed(1)}`, severity:"Medium", col:C.amb});
+    if (f.current_ratio != null && f.current_ratio < 1) risks.push({text:`Liquidity concern — current ratio ${f.current_ratio.toFixed(2)}`, severity:"High", col:C.red});
+    if (f.pe_ratio != null && f.pe_ratio > 50) risks.push({text:`Extreme valuation — P/E of ${f.pe_ratio.toFixed(0)}x`, severity:"Medium", col:C.amb});
+    if (f.eps_growth != null && f.eps_growth < -10) risks.push({text:`Earnings declining — EPS growth ${fmtPct(f.eps_growth,0)}`, severity:"High", col:C.red});
+    if (risks.length === 0) risks.push({text:"No major risk flags identified", severity:"Low", col:C.grn});
+    return risks;
+  };
+
+  // ── Earnings quality score (1-10) ──
+  const calcEarningsQuality = (f) => {
+    if (!f) return {score:null, factors:[]};
+    let score = 5; // baseline
+    const factors = [];
+    if (f.free_cash_flow != null && f.free_cash_flow > 0) { score += 1.5; factors.push({text:"Positive free cash flow", col:C.grn}); }
+    else if (f.free_cash_flow != null) { score -= 1.5; factors.push({text:"Negative free cash flow", col:C.red}); }
+    if (f.earnings_streak != null && f.earnings_streak >= 4) { score += 1.5; factors.push({text:`${f.earnings_streak} consecutive earnings beats`, col:C.grn}); }
+    else if (f.earnings_streak != null && f.earnings_streak >= 2) { score += 0.5; factors.push({text:`${f.earnings_streak} consecutive earnings beats`, col:C.amb}); }
+    if (f.gross_margin != null && f.gross_margin > 40) { score += 0.5; factors.push({text:"Strong gross margins", col:C.grn}); }
+    if (f.last_eps_surprise != null && f.last_eps_surprise > 0) { score += 0.5; factors.push({text:`Positive EPS surprise (${fmtPct(f.last_eps_surprise)})`, col:C.grn}); }
+    else if (f.last_eps_surprise != null && f.last_eps_surprise < 0) { score -= 1; factors.push({text:`Negative EPS surprise (${fmtPct(f.last_eps_surprise)})`, col:C.red}); }
+    if (f.revenue_growth != null && f.revenue_growth > 0) { score += 0.5; factors.push({text:"Revenue growth positive", col:C.grn}); }
+    return {score: Math.max(1, Math.min(10, Math.round(score))), factors};
+  };
+
+  // ── Investor fit ──
+  const calcInvestorFit = (f) => {
+    if (!f) return [];
+    return [
+      {label:"Value Investors", fit: (f.pe_ratio != null && f.pe_ratio < 18 && f.target_upside != null && f.target_upside > 10)},
+      {label:"Growth Investors", fit: (f.revenue_growth != null && f.revenue_growth > 10 && f.eps_growth != null && f.eps_growth > 10)},
+      {label:"Income / Dividend", fit: (f.div_yield != null && f.div_yield > 2)},
+      {label:"Quality Compounders", fit: (f.roe != null && f.roe > 15 && f.gross_margin != null && f.gross_margin > 30)},
+      {label:"Tactical / Short-term", fit: (f.revenue_growth != null || f.eps_growth != null)},
+    ];
+  };
+
+  // ── Final verdict ──
+  const calcVerdict = (f, risks, eq) => {
+    if (!f) return {verdict:"Insufficient data", confidence:"Low", action:"Investigate further"};
+    let valScore = 0, qualScore = 0, riskScore = 0;
+    if (f.pe_ratio != null && f.pe_ratio < 18) valScore += 2;
+    else if (f.pe_ratio != null && f.pe_ratio < 25) valScore += 1;
+    if (f.target_upside != null && f.target_upside > 15) valScore += 1;
+    if (f.roe != null && f.roe > 15) qualScore += 2;
+    if (f.gross_margin != null && f.gross_margin > 40) qualScore += 1;
+    if (f.revenue_growth != null && f.revenue_growth > 5) qualScore += 1;
+    riskScore = risks.filter(r => r.severity === "High").length;
+
+    let verdict, action, confidence;
+    const total = valScore + qualScore - riskScore * 1.5;
+    if (total >= 4) { verdict = "Fundamentally attractive"; action = "Consider for portfolio"; confidence = "High"; }
+    else if (total >= 2) { verdict = riskScore > 0 ? "Undervalued with elevated risk" : "Fairly valued with solid fundamentals"; action = "Investigate further"; confidence = "Moderate"; }
+    else if (total >= 0) { verdict = "Mixed fundamentals"; action = "Monitor for improvement"; confidence = "Low"; }
+    else { verdict = "Weak fundamentals"; action = "Avoid or reduce exposure"; confidence = "Low"; }
+
+    if (eq && eq.score >= 8) confidence = "High";
+    return {verdict, confidence, action};
+  };
+
+  // ── Market alignment ──
+  const calcAlignment = (sent, catalysts) => {
+    if (!sent) return {label:"Insufficient Data", col:C.mut};
+    const s = sent.score || 0;
+    const m = sent.momentum || 0;
+    const nCat = (catalysts?.catalysts || []).length;
+    const nHead = (catalysts?.headwinds || []).length;
+    const net = s + m * 0.5 + (nCat - nHead) * 0.1;
+    if (net > 0.3) return {label:"Supportive", col:C.grn};
+    if (net < -0.3) return {label:"Diverging", col:C.red};
+    return {label:"Mixed", col:C.amb};
+  };
+
+  // ── Precompute section data when loaded ──
+  const f = data?.fundamentals || {};
+  const sent = data?.sentiment || {};
+  const cats = data?.catalysts_headwinds || {};
+  const tech = data?.technical || {};
+  const thesis = buildThesis(f, sent, data?.composite);
+  const risks = buildRisks(f);
+  const eq = calcEarningsQuality(f);
+  const fits = calcInvestorFit(f);
+  const verdict = calcVerdict(f, risks, eq);
+  const alignment = calcAlignment(sent, cats);
+  const al = analystLabel(f.recommend_mean);
+  const price = tech?.latest_close;
+
+  // Section wrapper helper
+  const Section = ({accent, children, style:sx}) => (
+    <div style={{borderRadius:14, border:`1.5px solid ${accent}30`, background:accent+"07", padding:"18px 20px", ...sx}}>
+      {children}
+    </div>
+  );
+  const SectionTitle = ({children, sub}) => (
+    <div style={{marginBottom:14}}>
+      <div style={mono(13, C.headingTxt, 700)}>{children}</div>
+      {sub && <div style={{...mono(9, C.mut), marginTop:3}}>{sub}</div>}
+    </div>
+  );
+  const MetricCard = ({label, value, color, sub}) => (
+    <div style={{padding:"10px 12px", borderRadius:10, background:C.dim, border:`1px solid ${C.bdr}`}}>
+      <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:4}}>{label}</div>
+      <div style={mono(16, color || C.headingTxt, 700)}>{value}</div>
+      {sub && <div style={{...mono(8, C.mut), marginTop:2}}>{sub}</div>}
+    </div>
+  );
 
   return (
-    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
       <div>
         <Lbl>Fundamentals</Lbl>
-        <div style={mono(10,C.mut)}>Valuation · analyst consensus · earnings quality · catalysts & headwinds → macro context</div>
+        <div style={mono(10,C.mut)}>Institutional-grade equity underwriting — valuation, quality, risk, and market alignment</div>
       </div>
 
-      {/* Controls */}
+      {/* Search */}
       <Card>
         <div style={{display:"flex",gap:12,alignItems:"flex-end"}}>
           <div style={{flex:1}}>
@@ -8457,842 +8608,332 @@ function TradeAdvisorView() {
       {data && (<>
 
         {/* ══════════════════════════════════════════════════════════════════
-            1. FUNDAMENTALS SNAPSHOT — the headline numbers investors care about
+            1. THESIS SNAPSHOT
            ══════════════════════════════════════════════════════════════════ */}
-        {data.fundamentals && (()=>{
-          const f = data.fundamentals;
-          const price = data.technical?.latest_close;
-          const al = analystLabel(f.recommend_mean);
+        {data.fundamentals && (()=>{ return (<div style={{display:"flex",flexDirection:"column",gap:16}}>
 
-          // Valuation verdict
-          const valScore = [
-            f.pe_ratio != null && f.pe_ratio < 20,
-            f.forward_pe != null && f.forward_pe < 18,
-            f.pb_ratio != null && f.pb_ratio < 3,
-            f.peg_ratio != null && f.peg_ratio < 1.5,
-            f.target_upside != null && f.target_upside > 10,
-            f.graham_number != null && price != null && price < f.graham_number * 1.2,
-          ].filter(Boolean).length;
-          const overScore = [
-            f.pe_ratio != null && f.pe_ratio > 35,
-            f.pb_ratio != null && f.pb_ratio > 5,
-            f.peg_ratio != null && f.peg_ratio > 3,
-            f.target_upside != null && f.target_upside < -5,
-            f.graham_number != null && price != null && price > f.graham_number * 1.5,
-          ].filter(Boolean).length;
-          const valVerdict = overScore > valScore + 1
-            ? {label:"Appears Overvalued",  col:C.red}
-            : valScore > overScore + 1
-            ? {label:"Appears Undervalued", col:C.grn}
-            : {label:"Fairly Valued",       col:C.amb};
-
-          // 52-week position
-          const w52pos = (price && f.fifty_two_week_high && f.fifty_two_week_low)
-            ? Math.round((price - f.fifty_two_week_low) / (f.fifty_two_week_high - f.fifty_two_week_low) * 100)
-            : null;
-
-          return (
-            <div style={{borderRadius:12,border:`1.5px solid ${C.sky}30`,background:C.sky+"07",padding:"16px 18px"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14}}>
-                <DollarSign size={13} style={{color:C.sky}}/>
-                <span style={mono(9,C.sky,700)}>FUNDAMENTALS · {f.symbol}</span>
-                <span style={{...mono(9,valVerdict.col,700),marginLeft:"auto",padding:"2px 10px",
-                  borderRadius:20,border:`1px solid ${valVerdict.col}55`,background:valVerdict.col+"15"}}>
-                  {valVerdict.label}
-                </span>
+        {/* ── 1. THESIS SNAPSHOT ── */}
+        <Section accent={C.pur}>
+          <SectionTitle sub="Instant synthesis of the investment case">THESIS SNAPSHOT</SectionTitle>
+          {f.company_name && <div style={{...mono(11, C.headingTxt, 600), marginBottom:10}}>
+            {f.company_name} ({data.symbol}) {f.sector ? `— ${f.sector}` : ""} {f.industry ? `· ${f.industry}` : ""}
+          </div>}
+          {price && <div style={{...mono(9, C.mut), marginBottom:12}}>
+            Last: <span style={mono(12, C.headingTxt, 700)}>${price.toFixed(2)}</span>
+            {f.market_cap ? <span style={{marginLeft:14}}>Mkt Cap: <span style={mono(11, C.headingTxt, 600)}>{fmtCap(f.market_cap)}</span></span> : null}
+          </div>}
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {thesis.map((b,i) => (
+              <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start"}}>
+                <span style={{...mono(11, b.col), flexShrink:0, marginTop:1}}>{b.col === C.grn ? "+" : b.col === C.red ? "−" : "·"}</span>
+                <span style={mono(11, C.txt)}>{b.text}</span>
               </div>
+            ))}
+          </div>
+        </Section>
 
-              <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:10,marginBottom:14}}>
-                {/* Valuation */}
-                <div style={{padding:"10px 12px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
-                  <div style={{...mono(8,C.mut,700),marginBottom:6,letterSpacing:"0.08em"}}>VALUATION</div>
-                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                    <KV k="P/E (TTM)"   v={f.pe_ratio   != null ? f.pe_ratio.toFixed(1)+"×"    : "—"}
-                        vc={f.pe_ratio > 35 ? C.red : f.pe_ratio < 15 ? C.grn : C.txt}/>
-                    <KV k="Fwd P/E"    v={f.forward_pe  != null ? f.forward_pe.toFixed(1)+"×"  : "—"}/>
-                    <KV k="P/B"        v={f.pb_ratio    != null ? f.pb_ratio.toFixed(2)+"×"    : "—"}
-                        vc={f.pb_ratio > 5 ? C.red : f.pb_ratio < 1.5 ? C.grn : C.txt}/>
-                    <KV k="EV/EBITDA"  v={f.ev_to_ebitda!= null ? f.ev_to_ebitda.toFixed(1)+"×": "—"}/>
-                    <KV k="PEG"        v={f.peg_ratio   != null ? f.peg_ratio.toFixed(2)        : "—"}
-                        vc={f.peg_ratio > 2 ? C.red : f.peg_ratio < 1 ? C.grn : C.txt}/>
+        {/* ── 2. VALUATION OVERVIEW ── */}
+        <Section accent={C.sky}>
+          <SectionTitle sub="Is the stock cheap or expensive?">VALUATION OVERVIEW</SectionTitle>
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(5,1fr)", gap:10, marginBottom:16}}>
+            <MetricCard label="P/E (TTM)" value={fmtNum(f.pe_ratio)} color={metricColor(f.pe_ratio, 0, 30)} sub="Trailing" />
+            <MetricCard label="P/E (Fwd)" value={fmtNum(f.forward_pe)} color={metricColor(f.forward_pe, 0, 25)} sub="Forward" />
+            <MetricCard label="EV/EBITDA" value={fmtNum(f.ev_to_ebitda)} color={metricColor(f.ev_to_ebitda, 0, 20)} />
+            <MetricCard label="P/B" value={fmtNum(f.pb_ratio)} color={metricColor(f.pb_ratio, 0, 5)} />
+            <MetricCard label="PEG" value={fmtNum(f.peg_ratio)} color={f.peg_ratio != null ? (f.peg_ratio < 1 ? C.grn : f.peg_ratio > 2 ? C.red : C.amb) : C.mut} />
+          </div>
+
+          {/* Analyst targets + intrinsic value */}
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : "1fr 1fr", gap:12}}>
+            <div style={{padding:"12px 14px", borderRadius:10, background:C.dim, border:`1px solid ${C.bdr}`}}>
+              <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:8}}>ANALYST PRICE TARGETS</div>
+              {f.analyst_target_low != null && f.analyst_target_high != null && (
+                <div style={{marginBottom:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                    <span style={mono(9, C.red, 600)}>${f.analyst_target_low?.toFixed(0)}</span>
+                    <span style={mono(9, C.grn, 600)}>${f.analyst_target_high?.toFixed(0)}</span>
+                  </div>
+                  <div style={{height:6,borderRadius:3,background:C.bdr,position:"relative",overflow:"hidden"}}>
+                    {price && <div style={{
+                      position:"absolute", left:`${Math.min(100,Math.max(0,(price - f.analyst_target_low)/(f.analyst_target_high - f.analyst_target_low)*100))}%`,
+                      top:0, width:3, height:6, background:C.sky, borderRadius:1
+                    }}/>}
+                    <div style={{height:"100%",borderRadius:3,background:`linear-gradient(90deg,${C.red}40,${C.amb}40,${C.grn}40)`}}/>
+                  </div>
+                  <div style={{display:"flex",justifyContent:"center",marginTop:6}}>
+                    <span style={mono(10, C.sky, 700)}>Mean: ${f.analyst_target_mean?.toFixed(0) || "—"}</span>
                   </div>
                 </div>
-
-                {/* Market snapshot */}
-                <div style={{padding:"10px 12px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
-                  <div style={{...mono(8,C.mut,700),marginBottom:6,letterSpacing:"0.08em"}}>MARKET SNAPSHOT</div>
-                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                    <KV k="Mkt Cap"    v={fmtCap(f.market_cap)}/>
-                    <KV k="Beta"       v={f.beta     != null ? f.beta.toFixed(2)                : "—"}
-                        vc={f.beta > 1.5 ? C.amb : C.txt}/>
-                    <KV k="Div Yield"  v={f.div_yield!= null ? f.div_yield.toFixed(2)+"%"       : "—"}
-                        vc={f.div_yield > 0 ? C.grn : C.mut}/>
-                    <KV k="Free CF"    v={fmtFCF(f.free_cash_flow)}
-                        vc={f.free_cash_flow > 0 ? C.grn : C.red}/>
-                    <KV k="Short Ratio" v={f.short_ratio != null ? f.short_ratio.toFixed(1)+"d" : "—"}
-                        vc={f.short_ratio > 5 ? C.red : C.txt}/>
-                  </div>
+              )}
+              {f.target_upside != null && (
+                <div style={{display:"flex",justifyContent:"center"}}>
+                  <Tag color={f.target_upside > 0 ? C.grn : C.red}>{f.target_upside > 0 ? "+" : ""}{f.target_upside.toFixed(1)}% upside</Tag>
                 </div>
-
-                {/* Quality */}
-                <div style={{padding:"10px 12px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
-                  <div style={{...mono(8,C.mut,700),marginBottom:6,letterSpacing:"0.08em"}}>QUALITY</div>
-                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                    <KV k="Gross Margin"  v={f.gross_margin    != null ? f.gross_margin.toFixed(1)+"%"    : "—"}
-                        vc={f.gross_margin > 40 ? C.grn : f.gross_margin < 20 ? C.red : C.txt}/>
-                    <KV k="Net Margin"    v={f.net_margin      != null ? f.net_margin.toFixed(1)+"%"      : "—"}
-                        vc={f.net_margin > 15 ? C.grn : f.net_margin < 0 ? C.red : C.txt}/>
-                    <KV k="ROE"           v={f.roe             != null ? f.roe.toFixed(1)+"%"             : "—"}
-                        vc={f.roe > 15 ? C.grn : f.roe < 0 ? C.red : C.txt}/>
-                    <KV k="D/E Ratio"     v={f.debt_to_equity  != null ? f.debt_to_equity.toFixed(2)      : "—"}
-                        vc={f.debt_to_equity > 2 ? C.red : f.debt_to_equity < 0.5 ? C.grn : C.txt}/>
-                    <KV k="Current Ratio" v={f.current_ratio   != null ? f.current_ratio.toFixed(2)       : "—"}
-                        vc={f.current_ratio < 1 ? C.red : C.txt}/>
-                  </div>
-                </div>
-
-                {/* Growth & Earnings */}
-                <div style={{padding:"10px 12px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
-                  <div style={{...mono(8,C.mut,700),marginBottom:6,letterSpacing:"0.08em"}}>GROWTH & EARNINGS</div>
-                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                    <KV k="Rev Growth"  v={f.revenue_growth != null ? (f.revenue_growth>=0?"+":"")+f.revenue_growth.toFixed(1)+"%" : "—"}
-                        vc={f.revenue_growth > 5 ? C.grn : f.revenue_growth < 0 ? C.red : C.txt}/>
-                    <KV k="EPS Growth"  v={f.eps_growth     != null ? (f.eps_growth>=0?"+":"")+f.eps_growth.toFixed(1)+"%"      : "—"}
-                        vc={f.eps_growth > 0 ? C.grn : C.red}/>
-                    <KV k="EPS (TTM)"   v={f.trailing_eps   != null ? "$"+f.trailing_eps.toFixed(2)                              : "—"}/>
-                    <KV k="Earn Beats"  v={f.earnings_streak > 0 ? `${f.earnings_streak}Q streak ✓`
-                                          : f.earnings_streak < 0 ? `${Math.abs(f.earnings_streak)}Q misses` : "—"}
-                        vc={f.earnings_streak > 0 ? C.grn : f.earnings_streak < 0 ? C.red : C.txt}/>
-                    <KV k="Last Surprise" v={f.last_eps_surprise != null ? (f.last_eps_surprise>=0?"+":"")+f.last_eps_surprise.toFixed(1)+"%" : "—"}
-                        vc={f.last_eps_surprise > 0 ? C.grn : C.red}/>
-                  </div>
-                </div>
-              </div>
-
-              {/* Analyst Consensus Row */}
-              <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"stretch"}}>
-                {/* Rating dial */}
-                <div style={{flex:1,minWidth:200,padding:"10px 14px",borderRadius:8,
-                  background:al.col+"12",border:`1px solid ${al.col}40`,
-                  display:"flex",alignItems:"center",gap:14}}>
-                  <div style={{textAlign:"center"}}>
-                    <div style={{...mono(20,al.col,800),lineHeight:1}}>{al.label}</div>
-                    <div style={{...mono(8,C.mut),marginTop:3}}>
-                      {f.analyst_count ? `${f.analyst_count} analysts` : "analyst consensus"}
-                    </div>
-                  </div>
-                  {f.recommend_mean != null && (
-                    <div style={{flex:1}}>
-                      <div style={{...mono(8,C.mut),marginBottom:5}}>
-                        RATING SCALE — {f.recommend_mean.toFixed(1)}/5.0
-                      </div>
-                      <div style={{height:6,borderRadius:3,background:C.dim,overflow:"hidden",position:"relative"}}>
-                        <div style={{
-                          position:"absolute",left:0,top:0,bottom:0,
-                          width:((f.recommend_mean-1)/4*100)+"%",
-                          background:`linear-gradient(to right, #00c853, ${C.amb}, #d50000)`,
-                          borderRadius:3,transition:"width .4s"
-                        }}/>
-                      </div>
-                      <div style={{display:"flex",justifyContent:"space-between",marginTop:3}}>
-                        <span style={mono(7,"#00c853")}>Strong Buy</span>
-                        <span style={mono(7,C.mut)}>Hold</span>
-                        <span style={mono(7,C.red)}>Strong Sell</span>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Price target */}
-                {(f.analyst_target_mean || f.analyst_target_high || f.analyst_target_low) && (
-                  <div style={{flex:1,minWidth:200,padding:"10px 14px",borderRadius:8,
-                    background:C.dim,border:`1px solid ${C.bdr}`}}>
-                    <div style={{...mono(8,C.mut,700),marginBottom:8,letterSpacing:"0.08em"}}>ANALYST PRICE TARGETS</div>
-                    {price && (
-                      <div style={{marginBottom:8}}>
-                        <div style={{...mono(8,C.mut),marginBottom:4}}>
-                          Current: <span style={{color:C.headingTxt,fontWeight:700}}>${Number(price).toFixed(2)}</span>
-                          {f.analyst_target_mean && (
-                            <span style={{color: f.analyst_target_mean > price ? C.grn : C.red,fontWeight:700,marginLeft:8}}>
-                              → ${f.analyst_target_mean.toFixed(2)} mean
-                              {" ("}{f.analyst_target_mean>price?"+":""}{((f.analyst_target_mean-price)/price*100).toFixed(1)}%)
-                            </span>
-                          )}
-                        </div>
-                        {f.analyst_target_low && f.analyst_target_high && (
-                          <div style={{position:"relative",height:14,marginTop:4}}>
-                            <div style={{position:"absolute",top:4,left:0,right:0,height:6,
-                              borderRadius:3,background:C.bdr}}/>
-                            {/* Range bar */}
-                            {(()=>{
-                              const lo=f.analyst_target_low, hi=f.analyst_target_high;
-                              const range=hi-lo||1;
-                              const pctLow=0, pctHigh=100;
-                              const pctMean=f.analyst_target_mean?(f.analyst_target_mean-lo)/range*100:50;
-                              const pctPrice=(price-lo)/range*100;
-                              return (<>
-                                <div style={{position:"absolute",top:4,
-                                  left:pctLow+"%",width:(pctHigh-pctLow)+"%",height:6,
-                                  borderRadius:3,background:`${C.grn}40`}}/>
-                                {f.analyst_target_mean && (
-                                  <div style={{position:"absolute",top:2,
-                                    left:`calc(${Math.max(0,Math.min(100,pctMean))}% - 1px)`,
-                                    width:2,height:10,background:C.grn,borderRadius:1}}/>
-                                )}
-                                <div style={{position:"absolute",top:2,
-                                  left:`calc(${Math.max(0,Math.min(100,pctPrice))}% - 4px)`,
-                                  width:8,height:10,background:C.headingTxt,borderRadius:2}}/>
-                              </>);
-                            })()}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    <div style={{display:"flex",gap:12}}>
-                      {f.analyst_target_low  && <KV k="Low"  v={"$"+f.analyst_target_low.toFixed(2)}  vc={C.red}/>}
-                      {f.analyst_target_mean && <KV k="Mean" v={"$"+f.analyst_target_mean.toFixed(2)} vc={C.sky}/>}
-                      {f.analyst_target_high && <KV k="High" v={"$"+f.analyst_target_high.toFixed(2)} vc={C.grn}/>}
-                    </div>
-                  </div>
-                )}
-
-                {/* Intrinsic value / 52W range */}
-                <div style={{flex:1,minWidth:160,padding:"10px 14px",borderRadius:8,
-                  background:C.dim,border:`1px solid ${C.bdr}`}}>
-                  <div style={{...mono(8,C.mut,700),marginBottom:8,letterSpacing:"0.08em"}}>INTRINSIC VALUE</div>
-                  {f.graham_number && (
-                    <div style={{marginBottom:6}}>
-                      <div style={mono(8,C.mut)}>Graham Number</div>
-                      <div style={{...mono(16, price && price < f.graham_number ? C.grn : price && price > f.graham_number * 1.3 ? C.red : C.amb, 700)}}>
-                        ${f.graham_number.toFixed(2)}
-                      </div>
-                      {price && (
-                        <div style={mono(8,C.mut)}>
-                          {price < f.graham_number
-                            ? `▼ ${((f.graham_number-price)/f.graham_number*100).toFixed(0)}% below intrinsic value`
-                            : `▲ ${((price-f.graham_number)/f.graham_number*100).toFixed(0)}% above intrinsic value`}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                  {w52pos != null && (
-                    <>
-                      <div style={{...mono(8,C.mut),marginBottom:4}}>52-Week Range</div>
-                      <div style={{height:6,borderRadius:3,background:C.bdr,overflow:"hidden",marginBottom:3}}>
-                        <div style={{height:"100%",width:w52pos+"%",
-                          background:w52pos>70?C.grn:w52pos<30?C.red:C.amb,borderRadius:3}}/>
-                      </div>
-                      <div style={{display:"flex",justifyContent:"space-between"}}>
-                        <span style={mono(7,C.mut)}>${f.fifty_two_week_low?.toFixed(0)}</span>
-                        <span style={mono(7,C.sky)}>{w52pos}th pct</span>
-                        <span style={mono(7,C.mut)}>${f.fifty_two_week_high?.toFixed(0)}</span>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
+              )}
             </div>
+
+            <div style={{padding:"12px 14px", borderRadius:10, background:C.dim, border:`1px solid ${C.bdr}`}}>
+              <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:8}}>INTRINSIC VALUE</div>
+              {f.graham_number != null && f.graham_number > 0 ? (
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                    <span style={mono(9, C.mut)}>Graham Number</span>
+                    <span style={mono(16, C.headingTxt, 700)}>${f.graham_number.toFixed(0)}</span>
+                  </div>
+                  {price && <div style={{...mono(9, f.graham_number > price ? C.grn : C.red), marginTop:6}}>
+                    {f.graham_number > price ? `${((f.graham_number/price - 1)*100).toFixed(0)}% above current price — undervalued` : `${((1 - f.graham_number/price)*100).toFixed(0)}% below current price — overvalued`}
+                  </div>}
+                </div>
+              ) : <div style={mono(10, C.mut)}>Insufficient data for intrinsic value estimate</div>}
+            </div>
+          </div>
+
+          {/* Valuation drivers */}
+          <div style={{marginTop:14, padding:"10px 14px", borderRadius:8, background:C.dim}}>
+            <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:6}}>VALUATION DRIVERS</div>
+            <div style={mono(10, C.txt, 400)}>
+              {f.pe_ratio != null && f.forward_pe != null && f.forward_pe < f.pe_ratio && <div style={{marginBottom:3}}>Forward P/E ({fmtNum(f.forward_pe)}x) below trailing ({fmtNum(f.pe_ratio)}x) — earnings expected to improve</div>}
+              {f.pe_ratio != null && f.forward_pe != null && f.forward_pe >= f.pe_ratio && <div style={{marginBottom:3}}>Forward P/E ({fmtNum(f.forward_pe)}x) at or above trailing ({fmtNum(f.pe_ratio)}x) — growth may be slowing</div>}
+              {f.peg_ratio != null && f.peg_ratio < 1 && <div style={{marginBottom:3}}>PEG below 1.0 — growth not fully priced in</div>}
+              {f.ev_to_ebitda != null && f.ev_to_ebitda < 10 && <div>Low EV/EBITDA — enterprise value is modest relative to cash earnings</div>}
+              {f.ev_to_ebitda != null && f.ev_to_ebitda > 25 && <div>High EV/EBITDA — premium pricing assumes durable competitive advantage</div>}
+            </div>
+          </div>
+        </Section>
+
+        {/* ── 3. BUSINESS QUALITY ── */}
+        {(()=>{
+          const qualityGood = (f.roe > 15 && f.gross_margin > 35);
+          const qAccent = qualityGood ? C.grn : C.amb;
+          return (
+            <Section accent={qAccent}>
+              <SectionTitle sub="Is this a high-quality business?">BUSINESS QUALITY</SectionTitle>
+              <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10, marginBottom:12}}>
+                <MetricCard label="Gross Margin" value={f.gross_margin != null ? f.gross_margin.toFixed(1) + "%" : "—"} color={metricColor(f.gross_margin, 40, 20)} />
+                <MetricCard label="Operating Margin" value={f.operating_margin != null ? f.operating_margin.toFixed(1) + "%" : "—"} color={metricColor(f.operating_margin, 20, 5)} />
+                <MetricCard label="Net Margin" value={f.net_margin != null ? f.net_margin.toFixed(1) + "%" : "—"} color={metricColor(f.net_margin, 15, 0)} />
+                <MetricCard label="ROE" value={f.roe != null ? f.roe.toFixed(1) + "%" : "—"} color={metricColor(f.roe, 15, 5)} />
+              </div>
+              {f.employees && f.revenue_ttm && (
+                <div style={{...mono(9, C.mut), marginTop:4}}>
+                  Revenue per employee: <span style={mono(10, C.headingTxt, 600)}>{fmtCap(f.revenue_ttm / f.employees)}</span>
+                  <span style={{marginLeft:12}}>({f.employees.toLocaleString()} employees)</span>
+                </div>
+              )}
+            </Section>
           );
         })()}
 
-        {/* ══════════════════════════════════════════════════════════════════
-            2. FULL ANALYSIS — fundamentals-first narrative
-           ══════════════════════════════════════════════════════════════════ */}
-        {(()=>{
-          const parts = [];
-          const f = data.fundamentals;
+        {/* ── 4. BALANCE SHEET & CAPITAL ALLOCATION ── */}
+        <Section accent={C.sky}>
+          <SectionTitle sub="Can this company survive and allocate capital effectively?">BALANCE SHEET</SectionTitle>
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10, marginBottom:12}}>
+            <MetricCard label="Debt / Equity" value={f.debt_to_equity != null ? f.debt_to_equity.toFixed(0) + "%" : "—"} color={f.debt_to_equity != null ? (f.debt_to_equity < 50 ? C.grn : f.debt_to_equity < 150 ? C.amb : C.red) : C.mut} />
+            <MetricCard label="Current Ratio" value={fmtNum(f.current_ratio, 2)} color={metricColor(f.current_ratio, 1.5, 1)} />
+            <MetricCard label="Free Cash Flow" value={fmtFCF(f.free_cash_flow)} color={f.free_cash_flow != null ? (f.free_cash_flow > 0 ? C.grn : C.red) : C.mut} />
+            <MetricCard label="Short Ratio" value={fmtNum(f.short_ratio)} color={f.short_ratio != null ? (f.short_ratio < 3 ? C.grn : f.short_ratio < 6 ? C.amb : C.red) : C.mut} />
+          </div>
+          <div style={{padding:"8px 12px", borderRadius:8, background:C.dim}}>
+            <span style={mono(10, C.txt)}>
+              {f.debt_to_equity != null && f.debt_to_equity < 50 && "Conservative balance sheet — low leverage. "}
+              {f.debt_to_equity != null && f.debt_to_equity >= 50 && f.debt_to_equity < 150 && "Moderate leverage — manageable if cash flows remain stable. "}
+              {f.debt_to_equity != null && f.debt_to_equity >= 150 && "Elevated leverage — monitor closely. "}
+              {f.free_cash_flow != null && f.free_cash_flow > 0 && "Positive FCF supports buybacks and debt reduction."}
+              {f.free_cash_flow != null && f.free_cash_flow <= 0 && "Negative FCF — dependent on external financing."}
+            </span>
+          </div>
+        </Section>
 
-          // Lead with fundamentals & valuation
-          if (f) {
-            const pe = f.pe_ratio, fpe = f.forward_pe, tgt = f.analyst_target_mean;
-            const price = data.technical?.latest_close;
-            const al = analystLabel(f.recommend_mean);
-            if (pe != null || tgt != null) {
-              let v = "";
-              if (pe != null) {
-                const valDesc = pe<12?"deeply discounted":pe<18?"attractively valued":pe<25?"fairly valued":pe<35?"premium-priced":"richly valued";
-                v += `At a trailing P/E of ${pe.toFixed(1)}×, ${data.symbol} is ${valDesc}`;
-                if (fpe != null) {
-                  v += pe > fpe + 2 ? `, with earnings expected to improve (forward P/E ${fpe.toFixed(1)}×)` : fpe > pe + 2 ? `, though forward earnings estimates imply compression (fwd P/E ${fpe.toFixed(1)}×)` : "";
-                }
-                v += ".";
-              }
-              if (f.graham_number && price) {
-                v += price < f.graham_number
-                  ? ` The Graham Number — a classic intrinsic value benchmark — sits at $${f.graham_number.toFixed(2)}, suggesting the stock may be trading below fair value.`
-                  : ` The Graham Number of $${f.graham_number.toFixed(2)} implies the stock is trading at a premium to its intrinsic value.`;
-              }
-              if (tgt && f.analyst_count > 0) {
-                const updown = tgt > (price||tgt) ? `${((tgt-(price||tgt))/(price||tgt)*100).toFixed(1)}% upside` : `${(((price||tgt)-tgt)/(price||tgt)*100).toFixed(1)}% downside`;
-                v += ` ${f.analyst_count} analysts covering the stock have a consensus target of $${tgt.toFixed(2)} — implying ${updown} — with an overall rating of "${al.label}".`;
-              }
-              if (v) parts.push(v);
-            }
+        {/* ── 5. GROWTH & HISTORICAL TRENDS ── */}
+        <Section accent={C.grn}>
+          <SectionTitle sub="What direction is the business moving?">GROWTH & TRENDS</SectionTitle>
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10}}>
+            <MetricCard label="Revenue Growth (YoY)" value={fmtPct(f.revenue_growth)} color={metricColor(f.revenue_growth, 5, -5)}
+              sub={f.revenue_growth > 0 ? "↑ expanding" : f.revenue_growth < 0 ? "↓ contracting" : "→ flat"} />
+            <MetricCard label="EPS Growth" value={fmtPct(f.eps_growth)} color={metricColor(f.eps_growth, 5, -5)}
+              sub={f.eps_growth > 0 ? "↑ improving" : f.eps_growth < 0 ? "↓ declining" : "→ flat"} />
+            <MetricCard label="Earnings Streak" value={f.earnings_streak != null ? f.earnings_streak + " Qs" : "—"} color={metricColor(f.earnings_streak, 3, 0)}
+              sub={f.earnings_streak >= 4 ? "consistent beats" : f.earnings_streak >= 2 ? "recent beats" : "mixed"} />
+            <MetricCard label="Last EPS Surprise" value={fmtPct(f.last_eps_surprise)} color={metricColor(f.last_eps_surprise, 0, -5)}
+              sub={f.last_eps_surprise > 0 ? "beat estimates" : f.last_eps_surprise < 0 ? "missed estimates" : ""} />
+          </div>
+        </Section>
 
-            // Business quality
-            const qParts = [];
-            if (f.gross_margin != null) qParts.push(f.gross_margin > 40 ? `strong gross margins (${f.gross_margin.toFixed(1)}%)` : f.gross_margin > 20 ? `moderate gross margins (${f.gross_margin.toFixed(1)}%)` : `thin gross margins (${f.gross_margin.toFixed(1)}%)`);
-            if (f.net_margin   != null) qParts.push(f.net_margin > 15 ? `healthy net margins of ${f.net_margin.toFixed(1)}%` : f.net_margin > 0 ? `slim but positive net margins of ${f.net_margin.toFixed(1)}%` : "negative net income");
-            if (f.roe          != null) qParts.push(f.roe > 20 ? `a high return on equity of ${f.roe.toFixed(1)}%` : f.roe > 10 ? `a moderate ROE of ${f.roe.toFixed(1)}%` : `a below-average ROE of ${f.roe.toFixed(1)}%`);
-            if (f.debt_to_equity != null) qParts.push(f.debt_to_equity < 0.5 ? "a conservatively leveraged balance sheet" : f.debt_to_equity < 1.5 ? `a manageable debt load (D/E ${f.debt_to_equity.toFixed(2)})` : `elevated leverage at ${f.debt_to_equity.toFixed(2)}× debt/equity`);
-            if (qParts.length > 0) parts.push(`The business demonstrates ${qParts.join(", ")}.`);
-
-            // Earnings & growth
-            const gParts = [];
-            if (f.revenue_growth != null) gParts.push(f.revenue_growth > 15 ? `rapid revenue growth of ${f.revenue_growth.toFixed(1)}%` : f.revenue_growth > 5 ? `steady revenue growth of ${f.revenue_growth.toFixed(1)}%` : f.revenue_growth > 0 ? `modest revenue growth of ${f.revenue_growth.toFixed(1)}%` : `declining revenues (${f.revenue_growth.toFixed(1)}%)`);
-            if (f.eps_growth     != null) gParts.push(f.eps_growth > 0 ? `EPS grew ${f.eps_growth.toFixed(1)}%` : `EPS contracted ${Math.abs(f.eps_growth).toFixed(1)}%`);
-            if (f.earnings_streak >= 2)  gParts.push(`${f.earnings_streak} consecutive earnings beats`);
-            if (f.last_eps_surprise != null) gParts.push(f.last_eps_surprise > 0 ? `the last quarter beat estimates by ${f.last_eps_surprise.toFixed(1)}%` : `the last quarter missed by ${Math.abs(f.last_eps_surprise).toFixed(1)}%`);
-            if (gParts.length > 0) parts.push("Earnings & growth: " + gParts.join("; ") + ".");
-          }
-
-          // Sentiment & macro context
-          if (data.sentiment) {
-            const s = data.sentiment;
-            const scoreDesc = s.score > 0.3 ? "clearly positive" : s.score > 0.05 ? "mildly positive" : s.score < -0.3 ? "clearly negative" : s.score < -0.05 ? "mildly negative" : "roughly neutral";
-            const momStr = s.momentum > 0.1 ? " and improving" : s.momentum < -0.1 ? " and softening" : "";
-            parts.push(`Market sentiment scanning ${s.articles} recent news articles is ${scoreDesc}${momStr} — a useful gauge of short-term narrative risk around ${data.symbol}.`);
-          }
-
-          // Technical context (brief — not the lead)
-          if (data.technical) {
-            const ta = data.technical;
-            const maStr = ta.above_ma50 && ta.above_ma200
-              ? `Price is above both the 50- and 200-day moving averages, consistent with a constructive technical backdrop.`
-              : !ta.above_ma50 && !ta.above_ma200
-              ? `Price is below both key moving averages, suggesting near-term technical headwinds that often accompany fundamental re-rating.`
-              : ta.above_ma50
-              ? `Price sits above the short-term 50-day MA but below the long-term 200-day — a mixed chart signal.`
-              : `Price is above the long-term 200-day MA but struggling below the 50-day — a temporary soft patch in an otherwise intact trend.`;
-            const rsi = ta.rsi;
-            const rsiStr = rsi != null ? (rsi > 70 ? ` RSI at ${rsi.toFixed(0)} is stretched (overbought).` : rsi < 30 ? ` RSI at ${rsi.toFixed(0)} is depressed (oversold) — potential mean reversion candidate.` : "") : "";
-            parts.push(maStr + rsiStr);
-          }
-
-          if (parts.length === 0) return null;
-          return (
-            <div style={{borderRadius:12,border:`1px solid ${C.pur}30`,background:C.pur+"08",padding:"14px 18px"}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-                <Cpu size={13} style={{color:C.pur}}/>
-                <span style={mono(9,C.pur,700)}>FULL ANALYSIS · {data.symbol}</span>
+        {/* ── 6. RISK DASHBOARD ── */}
+        <Section accent={C.red}>
+          <SectionTitle sub="Clearly surface downside risks">RISK DASHBOARD</SectionTitle>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {risks.map((r,i) => (
+              <div key={i} style={{display:"flex",alignItems:"center",gap:10}}>
+                <Tag color={r.col}>{r.severity}</Tag>
+                <span style={mono(10, C.txt)}>{r.text}</span>
               </div>
-              <div style={{display:"flex",flexDirection:"column",gap:10}}>
-                {parts.map((p,i)=>(
-                  <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
-                    <span style={{...mono(9,C.pur),marginTop:3,flexShrink:0}}>›</span>
-                    <span style={{...mono(10,C.txt),lineHeight:1.8}}>{p}</span>
+            ))}
+          </div>
+        </Section>
+
+        {/* ── 7. EXTERNAL VALIDATION ── */}
+        <Section accent={C.amb}>
+          <SectionTitle sub="Market, analysts, and narratives — supporting evidence">EXTERNAL VALIDATION</SectionTitle>
+
+          {/* Analyst Positioning */}
+          <div style={{marginBottom:16}}>
+            <div style={{...mono(9, C.mut, 700), letterSpacing:"0.1em", marginBottom:8}}>ANALYST POSITIONING</div>
+            <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap",marginBottom:10}}>
+              <div>
+                <span style={mono(9, C.mut)}>Consensus: </span>
+                <span style={{...mono(13, al.col, 700), padding:"2px 10px", borderRadius:20, background:al.col+"15", border:`1px solid ${al.col}30`}}>{al.label}</span>
+              </div>
+              {f.analyst_count && <span style={mono(9, C.mut)}>({f.analyst_count} analysts)</span>}
+            </div>
+            {/* Rating scale bar */}
+            {f.recommend_mean != null && (
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+                <span style={mono(8, C.grn, 600)}>Buy</span>
+                <div style={{flex:1,height:6,borderRadius:3,background:C.bdr,position:"relative"}}>
+                  <div style={{position:"absolute",left:`${((f.recommend_mean - 1) / 4) * 100}%`,top:-3,width:12,height:12,borderRadius:6,background:al.col,border:`2px solid ${C.surf}`}}/>
+                </div>
+                <span style={mono(8, C.red, 600)}>Sell</span>
+              </div>
+            )}
+            {/* Upgrades / Downgrades */}
+            {f.analyst_activity && f.analyst_activity.length > 0 && (
+              <div style={{marginTop:8}}>
+                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em", marginBottom:6}}>RECENT ACTIVITY</div>
+                {f.analyst_activity.slice(0, 4).map((a, i) => (
+                  <div key={i} style={{display:"flex",gap:8,alignItems:"center",padding:"4px 0",borderBottom:`1px solid ${C.bdr}`}}>
+                    <span style={mono(8, C.mut)}>{a.date}</span>
+                    <span style={mono(9, C.headingTxt, 600)}>{a.firm}</span>
+                    <Tag color={a.action === "up" ? C.grn : a.action === "down" ? C.red : C.amb}>
+                      {a.action === "up" ? "Upgrade" : a.action === "down" ? "Downgrade" : a.action === "init" ? "Initiate" : "Maintain"}
+                    </Tag>
+                    <span style={mono(8, C.mut)}>{a.from} → {a.to}</span>
                   </div>
                 ))}
               </div>
-            </div>
-          );
-        })()}
-
-        {/* ══════════════════════════════════════════════════════════════════
-            1b. COMPANY IDENTITY + ANALYST ACTIVITY + MACRO CONTEXT
-           ══════════════════════════════════════════════════════════════════ */}
-        {(()=>{
-          const f = data.fundamentals;
-          const ch = data.catalysts_headwinds;
-          const mc = data.macro_context;
-          if (!f && !ch && !mc) return null;
-          return (
-            <div style={{display:"flex",flexDirection:"column",gap:10}}>
-
-              {/* Company description + sector + events row */}
-              {f && (f.sector || f.description || f.next_earnings_date) && (
-                <div style={{display:"grid",gridTemplateColumns:f.description?"2fr 1fr":"1fr",gap:10}}>
-                  {f.description && (
-                    <div style={{padding:"12px 14px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
-                      <div style={{...mono(8,C.mut,700),marginBottom:6,letterSpacing:"0.08em"}}>ABOUT {f.company_name||data.symbol}</div>
-                      {f.sector && <div style={{...mono(9,C.sky),marginBottom:6}}>{f.sector}{f.industry?` · ${f.industry}`:""}{f.country?` · ${f.country}`:""}</div>}
-                      <div style={{...mono(9,C.txt),lineHeight:1.7,opacity:0.85}}>{f.description}</div>
-                      {f.employees && <div style={{...mono(8,C.mut),marginTop:6}}>{Number(f.employees).toLocaleString()} employees</div>}
-                    </div>
-                  )}
-                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                    {f.next_earnings_date && (
-                      <div style={{padding:"10px 14px",borderRadius:8,background:`${C.amb}12`,border:`1px solid ${C.amb}40`}}>
-                        <div style={{...mono(8,C.amb,700),marginBottom:4,letterSpacing:"0.08em"}}>NEXT EARNINGS</div>
-                        <div style={{...mono(14,C.headingTxt,700)}}>{f.next_earnings_date}</div>
-                        <div style={{...mono(8,C.mut),marginTop:2}}>
-                          {(()=>{
-                            const d = new Date(f.next_earnings_date);
-                            const diff = Math.round((d - new Date()) / 86400000);
-                            return diff > 0 ? `in ${diff} days` : diff === 0 ? "today" : `${Math.abs(diff)} days ago`;
-                          })()}
-                        </div>
-                      </div>
-                    )}
-                    {f.revenue_ttm && (
-                      <div style={{padding:"10px 14px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
-                        <div style={{...mono(8,C.mut,700),marginBottom:4,letterSpacing:"0.08em"}}>REVENUE (TTM)</div>
-                        <div style={{...mono(14,C.headingTxt,700)}}>
-                          {f.revenue_ttm>=1e12?"$"+(f.revenue_ttm/1e12).toFixed(2)+"T":f.revenue_ttm>=1e9?"$"+(f.revenue_ttm/1e9).toFixed(1)+"B":"$"+(f.revenue_ttm/1e6).toFixed(0)+"M"}
-                        </div>
-                        {f.revenue_growth != null && (
-                          <div style={{...mono(9,f.revenue_growth>=0?C.grn:C.red),marginTop:2}}>
-                            {f.revenue_growth>=0?"+":""}{f.revenue_growth.toFixed(1)}% YoY
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Analyst upgrades/downgrades */}
-              {f?.analyst_activity?.length > 0 && (
-                <div style={{padding:"12px 14px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
-                  <div style={{...mono(8,C.mut,700),marginBottom:8,letterSpacing:"0.08em"}}>RECENT ANALYST ACTIVITY</div>
-                  <div style={{display:"flex",flexDirection:"column",gap:5}}>
-                    {f.analyst_activity.map((a,i)=>{
-                      const isUp = ["upgrade","initiated","reiterated","raised"].some(k=>(a.action||"").toLowerCase().includes(k)||(a.to||"").toLowerCase().includes("buy")||(a.to||"").toLowerCase().includes("outperform"));
-                      const isDn = ["downgrade","cut","lowered"].some(k=>(a.action||"").toLowerCase().includes(k)||(a.to||"").toLowerCase().includes("sell")||(a.to||"").toLowerCase().includes("underperform"));
-                      const col = isUp ? C.grn : isDn ? C.red : C.amb;
-                      return (
-                        <div key={i} style={{display:"flex",gap:10,alignItems:"center",padding:"5px 8px",borderRadius:6,background:`${col}08`}}>
-                          <span style={{...mono(8,col,700),minWidth:70}}>{a.date}</span>
-                          <span style={{...mono(9,C.headingTxt,600),flex:1}}>{a.firm}</span>
-                          <span style={{...mono(8,col,700),padding:"2px 8px",borderRadius:10,background:`${col}18`,border:`1px solid ${col}40`}}>
-                            {a.action || (a.from && a.to ? `${a.from} → ${a.to}` : a.to || "—")}
-                          </span>
-                          {a.from && a.to && a.from !== a.to && (
-                            <span style={mono(8,C.mut)}>{a.from} → {a.to}</span>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Catalysts & Headwinds */}
-              {ch && (ch.catalysts?.length > 0 || ch.headwinds?.length > 0) && (
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-                  {ch.catalysts?.length > 0 && (
-                    <div style={{padding:"12px 14px",borderRadius:8,background:`${C.grn}08`,border:`1px solid ${C.grn}30`}}>
-                      <div style={{...mono(8,C.grn,700),marginBottom:8,letterSpacing:"0.08em"}}>▲ CATALYSTS</div>
-                      {ch.catalysts.map((h,i)=>(
-                        <div key={i} style={{display:"flex",gap:6,alignItems:"flex-start",marginBottom:5}}>
-                          <span style={{...mono(9,C.grn),marginTop:2,flexShrink:0}}>›</span>
-                          <span style={{...mono(9,C.txt),lineHeight:1.6}}>{h}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {ch.headwinds?.length > 0 && (
-                    <div style={{padding:"12px 14px",borderRadius:8,background:`${C.red}08`,border:`1px solid ${C.red}30`}}>
-                      <div style={{...mono(8,C.red,700),marginBottom:8,letterSpacing:"0.08em"}}>▼ HEADWINDS & RISKS</div>
-                      {ch.headwinds.map((h,i)=>(
-                        <div key={i} style={{display:"flex",gap:6,alignItems:"flex-start",marginBottom:5}}>
-                          <span style={{...mono(9,C.red),marginTop:2,flexShrink:0}}>›</span>
-                          <span style={{...mono(9,C.txt),lineHeight:1.6}}>{h}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Macro Context */}
-              {mc && Object.keys(mc).length > 0 && (
-                <div style={{padding:"12px 14px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
-                  <div style={{...mono(8,C.mut,700),marginBottom:8,letterSpacing:"0.08em"}}>MACRO CONTEXT</div>
-                  <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
-                    {mc.us10y && (
-                      <div>
-                        <div style={mono(8,C.mut)}>10Y Yield</div>
-                        <div style={{...mono(13,mc.us10y.change_pct>0?C.red:C.grn,700)}}>{mc.us10y.price?.toFixed(2)}%</div>
-                        {mc.us10y.change_pct!=null && <div style={mono(8,mc.us10y.change_pct>0?C.red:C.grn)}>{mc.us10y.change_pct>0?"+":""}{mc.us10y.change_pct?.toFixed(2)}%</div>}
-                      </div>
-                    )}
-                    {mc.vix && (
-                      <div>
-                        <div style={mono(8,C.mut)}>VIX</div>
-                        <div style={{...mono(13,mc.vix.price>25?C.red:mc.vix.price<15?C.grn:C.amb,700)}}>{mc.vix.price?.toFixed(1)}</div>
-                        <div style={mono(8,C.mut)}>{mc.vix.price>30?"fear":mc.vix.price>20?"elevated":mc.vix.price<15?"complacent":"normal"}</div>
-                      </div>
-                    )}
-                    {mc.dxy && (
-                      <div>
-                        <div style={mono(8,C.mut)}>DXY (Dollar)</div>
-                        <div style={{...mono(13,C.txt,700)}}>{mc.dxy.price?.toFixed(1)}</div>
-                        {mc.dxy.change_pct!=null && <div style={mono(8,mc.dxy.change_pct>0?C.red:C.grn)}>{mc.dxy.change_pct>0?"+":""}{mc.dxy.change_pct?.toFixed(2)}%</div>}
-                      </div>
-                    )}
-                    {mc.gld && (
-                      <div>
-                        <div style={mono(8,C.mut)}>Gold (GLD)</div>
-                        <div style={{...mono(13,C.txt,700)}}>${mc.gld.price?.toFixed(0)}</div>
-                        {mc.gld.change_pct!=null && <div style={mono(8,mc.gld.change_pct>0?C.grn:C.red)}>{mc.gld.change_pct>0?"+":""}{mc.gld.change_pct?.toFixed(2)}%</div>}
-                      </div>
-                    )}
-                    {mc.tlt && (
-                      <div>
-                        <div style={mono(8,C.mut)}>TLT (Long Bond)</div>
-                        <div style={{...mono(13,C.txt,700)}}>${mc.tlt.price?.toFixed(1)}</div>
-                        {mc.tlt.change_pct!=null && <div style={mono(8,mc.tlt.change_pct>0?C.grn:C.red)}>{mc.tlt.change_pct>0?"+":""}{mc.tlt.change_pct?.toFixed(2)}%</div>}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })()}
-
-        {/* ══════════════════════════════════════════════════════════════════
-            3. BOTTOM LINE
-           ══════════════════════════════════════════════════════════════════ */}
-        {data.composite && (()=>{
-          const score = data.composite.score;
-          const overall = data.composite.overall || "Neutral";
-          const conviction = (data.composite.conviction||"").toLowerCase();
-          const sc = sCol(score);
-          const taDir = data.technical?.ta_bias;
-          const sentDir = data.sentiment?.direction;
-          const fundBull = data.fundamentals?.target_upside > 10 || data.fundamentals?.earnings_streak >= 2;
-          const fundBear = data.fundamentals?.target_upside < -5 || data.fundamentals?.debt_to_equity > 2;
-          const signalParts = [];
-          if (fundBull) signalParts.push("fundamentals constructive");
-          else if (fundBear) signalParts.push("fundamentals cautious");
-          if (taDir) signalParts.push(`technicals ${taDir==="neutral"?"neutral":"lean "+taDir}`);
-          if (sentDir) signalParts.push(`news ${sentDir}`);
-          const convLine = conviction==="high"
-            ? "Signals are well-aligned — higher-confidence view."
-            : conviction==="moderate"
-            ? "Some mixed signals — moderate confidence."
-            : "Mixed signals — low-conviction environment.";
-          return (
-            <div style={{borderRadius:12,border:`2px solid ${sc}`,background:sc+"12",padding:"14px 18px"}}>
-              <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:6,flexWrap:"wrap"}}>
-                <span style={mono(9,C.mut,500)}>BOTTOM LINE</span>
-                <span style={mono(16,sc,800)}>{overall.toUpperCase()}</span>
-                <Tag color={C.sky} style={{marginLeft:"auto"}}>{conviction.toUpperCase()} CONVICTION</Tag>
-              </div>
-              <div style={{...mono(11,C.txt),lineHeight:1.7}}>
-                {signalParts.join(" · ")}{signalParts.length?". ":""}{convLine}
-              </div>
-            </div>
-          );
-        })()}
-
-        {/* ══════════════════════════════════════════════════════════════════
-            4. STRATEGY RECOMMENDATIONS (moved up — directly below bottom line)
-           ══════════════════════════════════════════════════════════════════ */}
-        <Card>
-          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
-            <Shield size={13} style={{color:C.sky}}/><span style={mono(9,C.sky,700)}>STRATEGY RECOMMENDATIONS</span>
-            {data.strategy_recommendations?.length>0 && (
-              <span style={mono(8,C.mut)}>— top {Math.min(data.strategy_recommendations.length,3)} strategies ranked by fit</span>
             )}
           </div>
-          {data.strategy_recommendations?.length > 0 ? (
-            <div style={{display:"flex",flexDirection:"column",gap:10}}>
-              {data.strategy_recommendations.slice(0,3).map((r,i)=>{
-                const isCredit = r.net_premium!=null && r.net_premium<0;
-                const isDebit  = r.net_premium!=null && r.net_premium>0;
-                return (
-                  <div key={i} style={{borderRadius:10,border:`1px solid ${C.bdr}`,overflow:"hidden"}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
-                      padding:"8px 12px",background:C.dim,borderBottom:`1px solid ${C.bdr}`}}>
-                      <div style={{display:"flex",alignItems:"center",gap:8}}>
-                        <span style={{...mono(12,C.headingTxt,700)}}>#{r.rank}</span>
-                        <span style={mono(11,C.txt,600)}>{r.name}</span>
-                      </div>
-                      <div style={{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"flex-end"}}>
-                        <Tag color={C.mut}>{r.category}</Tag>
-                        <Tag color={r.risk_level==="low"?C.grn:r.risk_level==="high"?C.red:C.amb}>{r.risk_level} risk</Tag>
-                        <Tag color={C.sky}>{(r.fit_score*100).toFixed(0)}% fit</Tag>
-                      </div>
-                    </div>
-                    <div style={{padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
-                      {r.contract_details?.length>0 && (
-                        <div>
-                          <div style={{...mono(8,C.mut,700),marginBottom:4}}>CONTRACT DETAILS</div>
-                          <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                            {r.contract_details.map((cd,j)=>(
-                              <div key={j} style={{display:"flex",alignItems:"center",gap:6,
-                                padding:"5px 8px",borderRadius:6,
-                                background:cd.action==="BUY"?C.grn+"11":C.red+"11",
-                                border:`1px solid ${cd.action==="BUY"?C.grn:C.red}22`}}>
-                                <span style={{...mono(9,cd.action==="BUY"?C.grn:C.red,700),minWidth:32}}>{cd.action}</span>
-                                <span style={mono(9,C.txt,600)}>{cd.option_type.toUpperCase()}</span>
-                                <span style={{...mono(10,C.headingTxt,700),minWidth:50}}>${cd.strike}</span>
-                                <span style={{...mono(8,C.mut),flex:1}}>exp {cd.expiry_label} (~{cd.expiry_days}d)</span>
-                                {cd.est_premium!=null && <span style={mono(9,C.sky,600)}>${cd.est_premium.toFixed(2)}/sh</span>}
-                                {cd.delta!=null && <span style={mono(8,C.mut)}>Δ {cd.delta>0?"+":""}{cd.delta.toFixed(2)}</span>}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      <div style={{display:"flex",gap:16,flexWrap:"wrap",alignItems:"center",
-                        padding:"6px 8px",borderRadius:6,background:C.bg,border:`1px solid ${C.bdr}33`}}>
-                        {r.net_premium!=null && <KV k={isCredit?"Net Credit":"Net Debit"} v={"$"+Math.abs(r.net_premium).toFixed(2)+"/sh"} vc={isCredit?C.grn:C.red}/>}
-                        {r.breakeven_price!=null && <KV k="Breakeven" v={"$"+r.breakeven_price.toFixed(2)}/>}
-                        <KV k="Max Profit" v={r.max_profit}/>
-                        <KV k="Max Loss" v={r.max_loss}/>
-                      </div>
-                      <div style={{...mono(8,C.mut),lineHeight:1.6}}>
-                        {r.rationale?.split(". ").slice(0,2).join(". ")+(r.rationale?.includes(".")?".":" ")}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div style={mono(10,C.mut)}>Fetch options data and re-analyze to generate strategy recommendations.</div>
-          )}
-        </Card>
 
-        {/* ══════════════════════════════════════════════════════════════════
-            5. COMPOSITE SCORE + SIGNAL BREAKDOWN (de-emphasized)
-           ══════════════════════════════════════════════════════════════════ */}
-        {data.composite && (
-          <div style={{borderRadius:14,border:`2px solid ${sCol(data.composite.score)}50`,
-            background:sCol(data.composite.score)+"0a",padding:"16px 22px",display:"flex",gap:20,alignItems:"center",flexWrap:"wrap"}}>
-            <div style={{textAlign:"center",minWidth:80}}>
-              <div style={{...mono(40,sCol(data.composite.score),800),lineHeight:1}}>
-                {data.composite.score>=0?"+":""}{(data.composite.score*100).toFixed(0)}
+          {/* Market Narrative */}
+          <div style={{marginBottom:16}}>
+            <div style={{...mono(9, C.mut, 700), letterSpacing:"0.1em", marginBottom:8}}>MARKET NARRATIVE</div>
+            <div style={{display:"flex",gap:16,alignItems:"center",flexWrap:"wrap",marginBottom:8}}>
+              <div>
+                <span style={mono(9, C.mut)}>News tone: </span>
+                <span style={mono(10, dCol(sent.direction), 700)}>{sent.direction || "neutral"}</span>
               </div>
-              <div style={mono(8,C.mut)}>COMPOSITE</div>
+              <div>
+                <span style={mono(9, C.mut)}>Momentum: </span>
+                <span style={mono(10, (sent.momentum||0) > 0 ? C.grn : (sent.momentum||0) < 0 ? C.red : C.amb, 700)}>
+                  {(sent.momentum||0) > 0 ? "improving" : (sent.momentum||0) < 0 ? "softening" : "neutral"}
+                </span>
+              </div>
+              {sent.articles && <span style={mono(9, C.mut)}>({sent.articles} articles)</span>}
             </div>
-            <div style={{flex:1,minWidth:200}}>
-              <div style={{...mono(22,sCol(data.composite.score),700),marginBottom:10}}>
-                {data.composite.overall}
-              </div>
-              {/* Mini signal bars */}
-              <div style={{display:"flex",flexDirection:"column",gap:5,marginBottom:8}}>
-                {Object.entries(data.composite.components||{}).map(([k,v])=>{
-                  const col = sCol(v);
-                  const pct = Math.min(Math.abs(v)*100,100);
-                  const label = k.replace(/_/g," ").replace(/\b\w/g,c=>c.toUpperCase());
-                  return (
-                    <div key={k} style={{display:"flex",alignItems:"center",gap:8}}>
-                      <span style={{...mono(8,C.mut),minWidth:90,textTransform:"capitalize"}}>{label}</span>
-                      <div style={{flex:1,height:4,borderRadius:2,background:C.dim,overflow:"hidden"}}>
-                        <div style={{height:"100%",width:pct+"%",background:col,borderRadius:2,transition:"width .4s"}}/>
-                      </div>
-                      <span style={{...mono(8,col,600),minWidth:28,textAlign:"right"}}>
-                        {v>=0?"+":""}{(v*100).toFixed(0)}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-              <div style={mono(9,C.mut)}>
-                Conviction: <span style={{color:C.sky,fontWeight:700}}>{data.composite.conviction?.toUpperCase()}</span>
-                {" · "}{data.symbol} · {new Date().toLocaleDateString()}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ── 3-column analysis grid ────────────────────────────────────── */}
-        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"repeat(3,1fr)",gap:10}}>
-          {/* ML Signal */}
-          <Card>
-            <div style={{marginBottom:10}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
-                <Cpu size={13} style={{color:C.pur}}/><span style={mono(9,C.pur,700)}>ML SIGNAL</span>
-              </div>
-              <div style={mono(9,C.mut)}>What our model predicts</div>
-            </div>
-            {data.ml_signal ? (<>
-              <div style={{...mono(28,dCol(data.ml_signal.direction),700),marginBottom:2}}>
-                {dIco(data.ml_signal.direction)} {(data.ml_signal.p_up*100).toFixed(0)}%
-              </div>
-              <div style={mono(9,C.mut)}>chance of price rise · next 5 days</div>
-              <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:3}}>
-                <KV k="Direction"  v={data.ml_signal.direction}/>
-                <KV k="Confidence" v={(data.ml_signal.confidence*100).toFixed(0)+"%"}/>
-                <KV k="OOS Acc."   v={(data.ml_signal.accuracy*100).toFixed(1)+"%"}/>
-                <KV k="Top Feature" v={data.ml_signal.top_feature||"—"}/>
-              </div>
-              <div style={{...mono(8,C.mut),marginTop:8,lineHeight:1.6,borderTop:`1px solid ${C.bdr}`,paddingTop:8}}>
-                {data.ml_signal.blurb}
-              </div>
-            </>) : <div style={mono(10,C.mut)}>No ML data — compute project features first</div>}
-          </Card>
-
-          {/* Sentiment */}
-          <Card>
-            <div style={{marginBottom:10}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
-                <Network size={13} style={{color:C.sky}}/><span style={mono(9,C.sky,700)}>NEWS SENTIMENT</span>
-              </div>
-              <div style={mono(9,C.mut)}>How the market is talking about this</div>
-            </div>
-            {data.sentiment ? (<>
-              <div style={{...mono(28,dCol(data.sentiment.direction),700),marginBottom:2}}>
-                {data.sentiment.score>=0?"+":""}{(data.sentiment.score*100).toFixed(0)}
-              </div>
-              <div style={mono(9,C.mut)}>{data.sentiment.articles} articles · last 24h</div>
-              <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:3}}>
-                <KV k="Direction" v={data.sentiment.direction}/>
-                <KV k="Momentum" v={data.sentiment.momentum>=0?"+"+data.sentiment.momentum?.toFixed(2):data.sentiment.momentum?.toFixed(2)}/>
-                <KV k="Strength"  v={(data.sentiment.strength||1)+"/5"}/>
-              </div>
-              {data.sentiment.headlines?.slice(0,2).map((h,i)=>(
-                <div key={i} style={{...mono(8,C.mut),marginTop:6,padding:"4px 8px",
-                  borderRadius:6,background:C.dim,lineHeight:1.5}}>{h}</div>
-              ))}
-            </>) : <div style={mono(10,C.mut)}>Fetching sentiment…</div>}
-          </Card>
-
-          {/* Technical */}
-          <Card>
-            <div style={{marginBottom:10}}>
-              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:3}}>
-                <TrendingUp size={13} style={{color:C.grn}}/><span style={mono(9,C.grn,700)}>TECHNICAL</span>
-              </div>
-              <div style={mono(9,C.mut)}>What the price chart is saying</div>
-            </div>
-            {data.technical ? (<>
-              <div style={{...mono(26,dCol(data.technical.ta_bias),700),marginBottom:2}}>
-                {dIco(data.technical.ta_bias)} {data.technical.ta_bias?.toUpperCase()}
-              </div>
-              <div style={mono(9,C.mut)}>{data.technical.bull_signals} bull · {data.technical.bear_signals} bear signals</div>
-              <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:4}}>
-                <KV k="Close"
-                    v={data.technical.latest_close ? "$"+Number(data.technical.latest_close).toFixed(2) : "—"}
-                    vc={data.technical.change_pct > 0 ? C.grn : data.technical.change_pct < 0 ? C.red : C.txt}/>
-                {data.technical.change_pct != null && (
-                  <KV k="Change"
-                      v={(data.technical.change_pct >= 0 ? "+" : "") + Number(data.technical.change_pct).toFixed(2) + "%"}
-                      vc={data.technical.change_pct >= 0 ? C.grn : C.red}/>
-                )}
-                <KV k="RSI (14)" v={data.technical.rsi != null ? Number(data.technical.rsi).toFixed(1) : "—"}
-                    vc={data.technical.rsi > 70 ? C.red : data.technical.rsi < 30 ? C.grn : C.txt}/>
-                <KV k="HV 20D"   v={data.technical.hv20 != null ? (data.technical.hv20*100).toFixed(1)+"%" : "—"}/>
-                {data.technical.sma20 && <KV k="SMA 20"  v={"$"+Number(data.technical.sma20).toFixed(2)}/>}
-                {data.technical.sma50 && <KV k="SMA 50"  v={"$"+Number(data.technical.sma50).toFixed(2)}/>}
-                <KV k="Signals"  v={data.technical.triggered_count + " triggered"}/>
-              </div>
-              <div style={{marginTop:8,display:"flex",gap:4,flexWrap:"wrap"}}>
-                {data.technical.top_signals?.slice(0,4).map((s,i)=>(
-                  <Tag key={i} color={s.direction==="bullish"?C.grn:C.red}>
-                    {s.name?.split(" ").slice(0,2).join(" ")}
-                  </Tag>
+            {sent.headlines && sent.headlines.length > 0 && (
+              <div style={{padding:"8px 12px",borderRadius:8,background:C.dim}}>
+                {sent.headlines.slice(0,3).map((h,i) => (
+                  <div key={i} style={{...mono(9, C.txt), padding:"3px 0", borderBottom: i < 2 ? `1px solid ${C.bdr}` : "none"}}>{typeof h === "string" ? h : h.title || h}</div>
                 ))}
               </div>
-            </>) : <div style={mono(10,C.mut)}>Technical data unavailable</div>}
-          </Card>
-        </div>
-
-        {/* ── Options Context (collapsed by default) ────────────────────── */}
-        <Card>
-          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",
-            marginBottom:optExpanded?10:0}}>
-            <Layers size={13} style={{color:C.amb}}/>
-            <span style={mono(9,C.amb,700)}>OPTIONS CONTEXT</span>
-            {!optExpanded && data.options && (()=>{
-              const opt = data.options;
-              const ivRankPct = opt.iv_rank!=null ? opt.iv_rank*100 : null;
-              const ivLabel = ivRankPct==null?null:ivRankPct>70?"Vol rich":ivRankPct<30?"Vol cheap":"Vol fair";
-              const ivCol   = ivRankPct==null?C.mut:ivRankPct>70?C.red:ivRankPct<30?C.grn:C.amb;
-              const pcLabel = opt.put_call_ratio!=null
-                ? opt.put_call_ratio>1.2?"Bearish skew":opt.put_call_ratio<0.8?"Bullish skew":"Neutral skew"
-                : null;
-              const pcCol = opt.put_call_ratio!=null
-                ? opt.put_call_ratio>1.2?C.red:opt.put_call_ratio<0.8?C.grn:C.txt : C.txt;
-              return (
-                <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
-                  {ivLabel && <Tag color={ivCol}>{ivLabel}</Tag>}
-                  {pcLabel && <Tag color={pcCol}>{pcLabel}</Tag>}
-                  {opt.max_pain && <Tag color={C.mut}>Max pain ${Number(opt.max_pain).toFixed(0)}</Tag>}
-                </div>
-              );
-            })()}
-            <button onClick={()=>setOptExpanded(x=>!x)}
-              style={{marginLeft:"auto",background:"none",border:`1px solid ${C.bdr}`,
-                borderRadius:6,padding:"2px 8px",cursor:"pointer",...mono(9,C.mut)}}>
-              {optExpanded?"Hide ↑":"Expand ↓"}
-            </button>
+            )}
           </div>
-          {optExpanded && (data.options ? (()=>{
-            const opt = data.options;
-            const ivRankPct  = opt.iv_rank!=null ? opt.iv_rank*100 : null;
-            const ivRegime   = ivRankPct==null?"—":ivRankPct>70?"RICH (sell premium)":ivRankPct<30?"CHEAP (buy premium)":"FAIR";
-            const ivRegimeC  = ivRankPct==null?C.mut:ivRankPct>70?C.red:ivRankPct<30?C.grn:C.amb;
-            const spreadPct  = opt.iv_hv_spread!=null ? opt.iv_hv_spread*100 : null;
-            const spreadLabel= spreadPct==null?"—":spreadPct>5?"Expensive (IV >> HV)":spreadPct<-2?"Cheap (IV << HV)":"Fair";
-            const spreadC    = spreadPct==null?C.txt:spreadPct>5?C.red:spreadPct<-2?C.grn:C.txt;
-            const totalOI    = (opt.total_call_oi||0) + (opt.total_put_oi||0);
-            const callOIPct  = totalOI>0 ? Math.round(opt.total_call_oi/totalOI*100) : null;
-            const putOIPct   = totalOI>0 ? Math.round(opt.total_put_oi/totalOI*100) : null;
-            const snapshotAge= opt.snapshot_at ? (()=>{
-              const h = Math.round((Date.now()-new Date(opt.snapshot_at+"Z").getTime())/3600000);
-              return h<1?"<1h ago":h<24?h+"h ago":Math.floor(h/24)+"d ago";
-            })() : null;
-            const mpDiff     = opt.max_pain && data.technical?.latest_close
-              ? ((opt.max_pain - data.technical.latest_close)/data.technical.latest_close*100).toFixed(1)
-              : null;
-            return (
-              <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:8}}>
-                <Stat label="HV 20D" value={opt.hv20!=null?(opt.hv20*100).toFixed(1)+"%":"—"} sub="Realized volatility" color={C.sky}/>
-                <Stat label="Avg IV" value={opt.avg_iv!=null?(opt.avg_iv*100).toFixed(1)+"%":"—"} sub="Implied volatility" color={C.txt}/>
-                <Stat label="IV Rank" value={ivRankPct!=null?ivRankPct.toFixed(0)+"th pct":"—"} sub={ivRegime} color={ivRegimeC}/>
-                <Stat label="IV−HV Spread" value={spreadPct!=null?(spreadPct>0?"+":"")+spreadPct.toFixed(1)+"%":"—"} sub={spreadLabel} color={spreadC}/>
-                <Stat label="Max Pain" value={opt.max_pain?"$"+Number(opt.max_pain).toFixed(0):"—"}
-                  sub={mpDiff!=null?(mpDiff>0?"+":"")+mpDiff+"% vs spot":"OI-weighted pinning level"}
-                  color={mpDiff!=null&&Math.abs(mpDiff)<1?C.grn:C.txt}/>
-                <Stat label="P/C Ratio" value={opt.put_call_ratio!=null?Number(opt.put_call_ratio).toFixed(2):"—"}
-                  sub={opt.put_call_ratio>1.3?"Bearish skew":opt.put_call_ratio<0.7?"Bullish skew":"Neutral"}
-                  color={opt.put_call_ratio>1.3?C.red:opt.put_call_ratio<0.7?C.grn:C.txt}/>
-                <Stat label="Max Γ Strike" value={opt.max_gamma_strike?"$"+Number(opt.max_gamma_strike).toFixed(0):"—"} sub="Dealer hedge magnet"/>
-                <Stat label="Snapshot" value={snapshotAge||"—"}
-                  sub={opt.snapshot_at?opt.snapshot_at.slice(0,10):"No options data fetched"}
-                  color={snapshotAge&&snapshotAge.includes("d")?C.red:C.mut}/>
-                {totalOI>0 && (
-                  <div style={{gridColumn:"1/-1",marginTop:2}}>
-                    <div style={{...mono(8,C.mut),marginBottom:4}}>
-                      OPEN INTEREST — Call: {(opt.total_call_oi/1000).toFixed(0)}K ({callOIPct}%) · Put: {(opt.total_put_oi/1000).toFixed(0)}K ({putOIPct}%) · Total: {(totalOI/1000).toFixed(0)}K contracts
-                    </div>
-                    <div style={{height:6,borderRadius:3,background:C.bdr,overflow:"hidden",display:"flex"}}>
-                      <div style={{width:callOIPct+"%",background:C.grn+"99",transition:"width 0.4s"}}/>
-                      <div style={{width:putOIPct+"%",background:C.red+"99",transition:"width 0.4s"}}/>
-                    </div>
-                    <div style={{display:"flex",gap:10,marginTop:3}}>
-                      <span style={mono(7,C.grn)}>▌ Calls</span>
-                      <span style={mono(7,C.red)}>▌ Puts</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })() : (
-            <div style={{...mono(10,C.mut),padding:"12px 0"}}>No options or price data available.</div>
-          ))}
-        </Card>
 
-        {data.warnings?.filter(w=>w).length > 0 && (
-          <Card>
-            <div style={{...mono(9,C.amb,700),marginBottom:6}}>⚠ ANALYSIS NOTES</div>
-            {data.warnings.filter(w=>w).map((w,i)=>(
-              <div key={i} style={{...mono(9,C.mut),marginTop:3}}>· {w}</div>
+          {/* Bull vs Bear */}
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : "1fr 1fr", gap:12, marginBottom:14}}>
+            <div style={{padding:"10px 14px",borderRadius:10,background:C.grn+"08",border:`1px solid ${C.grn}25`}}>
+              <div style={{...mono(9, C.grn, 700), letterSpacing:"0.1em", marginBottom:6}}>SUPPORTS THESIS</div>
+              {(cats.catalysts||[]).length > 0
+                ? cats.catalysts.slice(0,4).map((c,i) => <div key={i} style={{...mono(9, C.txt), padding:"3px 0"}}>+ {c}</div>)
+                : <div style={mono(9, C.mut)}>No catalysts identified</div>}
+            </div>
+            <div style={{padding:"10px 14px",borderRadius:10,background:C.red+"08",border:`1px solid ${C.red}25`}}>
+              <div style={{...mono(9, C.red, 700), letterSpacing:"0.1em", marginBottom:6}}>CHALLENGES THESIS</div>
+              {(cats.headwinds||[]).length > 0
+                ? cats.headwinds.slice(0,4).map((h,i) => <div key={i} style={{...mono(9, C.txt), padding:"3px 0"}}>- {h}</div>)
+                : <div style={mono(9, C.mut)}>No headwinds identified</div>}
+            </div>
+          </div>
+
+          {/* Market Alignment */}
+          <div style={{display:"flex",justifyContent:"center",padding:"10px 0"}}>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <span style={mono(10, C.mut, 600)}>Market Alignment:</span>
+              <span style={{...mono(12, alignment.col, 700), padding:"3px 14px", borderRadius:20, background:alignment.col+"15", border:`1px solid ${alignment.col}40`}}>{alignment.label}</span>
+            </div>
+          </div>
+        </Section>
+
+        {/* ── 8. EARNINGS QUALITY SCORE ── */}
+        <Section accent={eq.score >= 7 ? C.grn : eq.score >= 4 ? C.amb : C.red}>
+          <SectionTitle sub="Evaluate reliability of earnings">EARNINGS QUALITY</SectionTitle>
+          <div style={{display:"flex",gap:20,alignItems: C.isMobile ? "flex-start" : "center",flexDirection: C.isMobile ? "column" : "row"}}>
+            <div style={{width:72,height:72,borderRadius:36,border:`3px solid ${eq.score >= 7 ? C.grn : eq.score >= 4 ? C.amb : C.red}`,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
+              <span style={mono(28, eq.score >= 7 ? C.grn : eq.score >= 4 ? C.amb : C.red, 800)}>{eq.score || "—"}</span>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:4,flex:1}}>
+              <div style={mono(10, C.mut)}>Score out of 10 — based on cash vs accounting earnings, consistency, and revenue quality</div>
+              {eq.factors.map((fac,i) => (
+                <div key={i} style={{display:"flex",alignItems:"center",gap:6}}>
+                  <div style={{width:5,height:5,borderRadius:3,background:fac.col,flexShrink:0}}/>
+                  <span style={mono(9, fac.col)}>{fac.text}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </Section>
+
+        {/* ── 9. INVESTOR FIT ── */}
+        <Section accent={C.sky}>
+          <SectionTitle sub="Does this fit your strategy?">INVESTOR FIT</SectionTitle>
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : "repeat(5,1fr)", gap:10}}>
+            {fits.map((fit,i) => (
+              <div key={i} style={{padding:"10px 12px",borderRadius:10,background:C.dim,border:`1px solid ${fit.fit ? C.grn : C.bdr}30`,textAlign:"center"}}>
+                <div style={mono(16, fit.fit ? C.grn : C.mut, 700)}>{fit.fit ? "✔" : "✖"}</div>
+                <div style={{...mono(9, fit.fit ? C.headingTxt : C.mut, 600), marginTop:4}}>{fit.label}</div>
+              </div>
             ))}
-          </Card>
-        )}
+          </div>
+        </Section>
+
+        {/* ── 10. FINAL VERDICT ── */}
+        <Section accent={C.pur}>
+          <SectionTitle>VERDICT</SectionTitle>
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : "repeat(3,1fr)", gap:14}}>
+            <div style={{padding:"12px 16px", borderRadius:10, background:C.dim}}>
+              <div style={{...mono(8, C.mut, 600), letterSpacing:"0.1em", marginBottom:6}}>FUNDAMENTAL VERDICT</div>
+              <div style={mono(13, C.headingTxt, 700)}>{verdict.verdict}</div>
+            </div>
+            <div style={{padding:"12px 16px", borderRadius:10, background:C.dim}}>
+              <div style={{...mono(8, C.mut, 600), letterSpacing:"0.1em", marginBottom:6}}>CONFIDENCE</div>
+              <div style={mono(13, verdict.confidence === "High" ? C.grn : verdict.confidence === "Moderate" ? C.amb : C.red, 700)}>{verdict.confidence}</div>
+            </div>
+            <div style={{padding:"12px 16px", borderRadius:10, background:C.dim}}>
+              <div style={{...mono(8, C.mut, 600), letterSpacing:"0.1em", marginBottom:6}}>SUGGESTED ACTION</div>
+              <div style={mono(13, C.sky, 700)}>{verdict.action}</div>
+            </div>
+          </div>
+        </Section>
+
+        </div>); })()}
+
       </>)}
 
       {!data && !loading && !err && (
         <Card>
           <div style={{...mono(11,C.mut),textAlign:"center",padding:"48px 0",lineHeight:2}}>
             Enter any equity, ETF, or crypto ticker above and click <span style={{color:C.sky,fontWeight:700}}>Analyze</span><br/>
-            to get a full fundamental breakdown — valuation, analyst consensus, earnings quality,<br/>
-            intrinsic value, and macro/sentiment context.
+            to get a full fundamental breakdown — valuation, business quality, risk assessment,<br/>
+            earnings quality, investor fit, and market alignment.
           </div>
         </Card>
       )}
 
-      <div style={mono(8,C.mut)}>⚠ Not financial advice. All analysis is for educational/research purposes only.</div>
+      <div style={mono(8,C.mut)}>Not financial advice. All analysis is for educational/research purposes only.</div>
     </div>
   );
 }
+
 
 // ── PairsView ─────────────────────────────────────────────────────────────────
 // ── PairsCompareChart ──────────────────────────────────────────────────────────
