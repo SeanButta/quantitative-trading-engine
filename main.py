@@ -1387,6 +1387,188 @@ def options_advanced(symbol: str):
     })
 
 
+@app.post("/options/{symbol}/signal")
+def options_signal(symbol: str):
+    """Compute normalized options domain signal for Alpha engine consumption."""
+    import polars as pl
+    from options_feed import OptionsStore, compute_analytics
+    from alpha_engine import score_to_bias, score_to_posture
+
+    sym = symbol.upper()
+    df = _get_options_df(sym)
+    if df.is_empty():
+        raise HTTPException(status_code=404, detail=f"No options data for {sym}.")
+
+    spot_col = df["spot"].drop_nulls().to_list()
+    spot = float(spot_col[0]) if spot_col else 0.0
+
+    # Compute analytics
+    analytics = None
+    try:
+        price_history = []
+        try:
+            import yfinance as yf
+            hist = yf.Ticker(sym).history(period="3mo")
+            if not hist.empty:
+                price_history = [{"close": float(row["Close"]), "date": str(idx.date())} for idx, row in hist.iterrows()]
+        except Exception:
+            pass
+        analytics = compute_analytics(sym, df, pl.DataFrame(), spot, price_history)
+    except Exception:
+        pass
+
+    # Compute regime from chain
+    rows = df.to_dicts()
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"No rows for {sym}.")
+
+    avg_iv = sum(r.get("implied_vol", 0) or 0 for r in rows) / len(rows)
+    hv20 = analytics.get("hv20", 0) if analytics else 0
+    iv_hv_ratio = avg_iv / hv20 if hv20 > 0 else 1.0
+    vol_regime = "Expensive" if iv_hv_ratio > 1.3 else ("Cheap" if iv_hv_ratio < 0.9 else "Fair")
+
+    calls_iv = [r["implied_vol"] for r in rows if r.get("option_type") == "call" and (r.get("implied_vol") or 0) > 0]
+    puts_iv = [r["implied_vol"] for r in rows if r.get("option_type") == "put" and (r.get("implied_vol") or 0) > 0]
+    avg_call_iv = sum(calls_iv) / len(calls_iv) if calls_iv else 0
+    avg_put_iv = sum(puts_iv) / len(puts_iv) if puts_iv else 0
+    skew_regime = "Put-rich" if avg_put_iv > avg_call_iv * 1.1 else ("Call-rich" if avg_call_iv > avg_put_iv * 1.1 else "Flat")
+
+    liquid = [r for r in rows if (r.get("open_interest") or 0) >= 500 and (r.get("bid") or 0) > 0]
+    liq_ratio = len(liquid) / max(len(rows), 1)
+    liq_regime = "Strong" if liq_ratio > 0.4 else ("Mixed" if liq_ratio > 0.2 else "Weak")
+
+    iv_rank = analytics.get("iv_rank", 0.5) if analytics else 0.5
+    if isinstance(iv_rank, (int, float)) and iv_rank <= 1:
+        iv_rank_pct = iv_rank * 100
+    else:
+        iv_rank_pct = iv_rank
+
+    iv_hv_spread = (analytics.get("iv_hv_spread") or 0) if analytics else (avg_iv - hv20)
+    max_pain = analytics.get("max_pain") if analytics else None
+    max_pain_dist = (max_pain - spot) / spot if max_pain and spot > 0 else None
+
+    # Compute score
+    score = 0.0
+    if iv_hv_spread:
+        score += max(-0.3, min(0.3, iv_hv_spread * 2))
+    if skew_regime == "Put-rich":
+        score -= 0.05
+    elif skew_regime == "Call-rich":
+        score += 0.05
+    if iv_rank_pct > 70:
+        score -= 0.10
+    elif iv_rank_pct < 30:
+        score += 0.05
+    if max_pain_dist is not None:
+        score += max(0, min(0.15, max_pain_dist * 0.5))
+    score = max(-1, min(1, score))
+
+    # Confidence
+    confidence = 40.0
+    if analytics and analytics.get("iv_rank") is not None:
+        confidence += 15
+    if iv_hv_spread and abs(iv_hv_spread) > 0.05:
+        confidence += 15
+    if liq_regime == "Strong":
+        confidence += 10
+    elif liq_regime == "Weak":
+        confidence -= 5
+    if max_pain_dist is not None:
+        confidence += 10
+    confidence = max(0, min(100, confidence))
+
+    bias = score_to_bias(score)
+    posture = score_to_posture(score, confidence)
+
+    # Environment label
+    if vol_regime == "Expensive" and liq_regime != "Weak":
+        env_label = "Premium Selling with Downside Risk"
+    elif vol_regime == "Expensive":
+        env_label = "Elevated Vol / Thin Liquidity"
+    elif vol_regime == "Cheap" and iv_rank_pct < 30:
+        env_label = "Cheap Vol Opportunity"
+    elif vol_regime == "Cheap":
+        env_label = "Long Volatility Setup"
+    elif skew_regime != "Flat":
+        env_label = "Directional Setup"
+    else:
+        env_label = "Range-Bound / Neutral"
+
+    structure_bias = "Premium Selling" if vol_regime == "Expensive" else ("Long Volatility" if vol_regime == "Cheap" else "Neutral Structures")
+
+    drivers = []
+    if iv_hv_spread and iv_hv_spread > 0.03:
+        drivers.append("IV is materially above recent realized volatility")
+    if iv_hv_spread and iv_hv_spread < -0.03:
+        drivers.append("IV is below realized — options are statistically cheap")
+    if skew_regime == "Put-rich":
+        drivers.append("Put skew indicates downside hedging demand")
+    if iv_rank_pct > 70:
+        drivers.append(f"IV Rank at {iv_rank_pct:.0f}% — historically elevated")
+    if iv_rank_pct < 30:
+        drivers.append(f"IV Rank at {iv_rank_pct:.0f}% — historically depressed")
+
+    risks = []
+    if liq_regime == "Weak":
+        risks.append("Liquidity is weak outside core strikes")
+    if vol_regime == "Expensive":
+        risks.append("Sharp downside move could overwhelm premium-selling structures")
+    if skew_regime == "Put-rich":
+        risks.append("Elevated put skew implies market pricing tail risk")
+
+    result = {
+        "domain": "options",
+        "symbol": sym,
+        "score": round(score, 3),
+        "confidence": round(confidence, 1),
+        "bias": bias,
+        "posture": posture,
+        "regime": vol_regime,
+        "setup": env_label,
+        "structureBias": structure_bias,
+        "drivers": drivers,
+        "risks": risks,
+        "regimeDetail": {
+            "volRegime": vol_regime,
+            "skewRegime": skew_regime,
+            "liquidityRegime": liq_regime,
+        },
+    }
+
+    # Persist to domain_outputs
+    try:
+        import uuid
+        from datetime import datetime, timezone
+        from models import DomainOutput
+        persist_db = SessionLocal()
+        try:
+            entry = DomainOutput(
+                id=str(uuid.uuid4()),
+                symbol=sym,
+                domain="options",
+                score=round(score, 4),
+                confidence=round(confidence, 1),
+                bias=bias,
+                regime=vol_regime,
+                setup=env_label,
+                posture=posture,
+                drivers_json=drivers,
+                risks_json=risks,
+                timestamp=datetime.now(timezone.utc),
+            )
+            persist_db.add(entry)
+            persist_db.commit()
+        except Exception as e:
+            logger.warning(f"Options signal persist failed for {sym}: {e}")
+            persist_db.rollback()
+        finally:
+            persist_db.close()
+    except Exception as e:
+        logger.warning(f"Options signal setup failed for {sym}: {e}")
+
+    return _sanitize(result)
+
+
 @app.get("/options/{symbol}/{expiration}")
 def options_chain_by_expiry(symbol: str, expiration: str, option_type: Optional[str] = None):
     """Options chain for a specific expiration. option_type: 'call' | 'put' | None (both)."""
@@ -2942,6 +3124,30 @@ def alpha_opportunities():
                     "drivers": [f"Sentiment: {sent.get('direction','neutral')}"],
                     "risks": [],
                 })
+        except Exception:
+            pass
+
+        # Options domain signal (read from most recent domain_output)
+        try:
+            from models import DomainOutput as DO
+            opt_db = SessionLocal()
+            try:
+                latest_opt = opt_db.query(DO).filter(
+                    DO.symbol == sym,
+                    DO.domain == "options",
+                ).order_by(DO.timestamp.desc()).first()
+                if latest_opt and latest_opt.score is not None:
+                    domain_outputs.append({
+                        "domain": "options",
+                        "score": latest_opt.score,
+                        "confidence": latest_opt.confidence or 50,
+                        "bias": latest_opt.bias or "Neutral",
+                        "setup": latest_opt.setup or "",
+                        "drivers": latest_opt.drivers_json or [],
+                        "risks": latest_opt.risks_json or [],
+                    })
+            finally:
+                opt_db.close()
         except Exception:
             pass
 

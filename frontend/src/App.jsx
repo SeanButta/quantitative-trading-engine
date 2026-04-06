@@ -300,6 +300,229 @@ function MacroTile({sym, name, price, chg, unit="$", onClick}) {
   );
 }
 
+// ── Markets Decision Logic ───────────────────────────
+function deriveSuggestedPositioning(scores, mkt) {
+  if (!scores) return null;
+  const { regime, composite, credit, equities } = scores;
+  const sectors = mkt?.sectors || [];
+  const adv = sectors.filter(s => (s.change_pct || 0) >= 0).length;
+  const breadthHealthy = adv >= 7;
+
+  const MAP = {
+    "Risk-On": {
+      overweight: ["QQQ", "IWM", "Cyclicals (XLI, XLB)"],
+      neutral: ["SPY"],
+      underweight: ["Gold", "Defensives (XLU, XLP)"],
+      notes: [
+        "Broad participation supports full risk exposure",
+        "Credit is calm and does not challenge the tape",
+        "Favour growth and small-cap tilts"
+      ]
+    },
+    "Constructive": {
+      overweight: ["QQQ", "Broad Equity"],
+      neutral: ["SPY", "IWM"],
+      underweight: ["Gold", "Defensive sectors"],
+      notes: [
+        "Positive but measured — participation is healthy",
+        "Lean into quality growth over speculative risk",
+        "Credit calm supports the constructive read"
+      ]
+    },
+    "Neutral": {
+      overweight: [],
+      neutral: ["SPY", "Broad equity", "Cash"],
+      underweight: ["Leveraged exposure", "Speculative longs"],
+      notes: [
+        "Mixed signals — no strong edge for directional bets",
+        "Stay balanced and reduce concentration risk",
+        "Wait for regime clarity before adding exposure"
+      ]
+    },
+    "Cautious": {
+      overweight: ["Defensives (XLU, XLP)", "Gold"],
+      neutral: ["SPY"],
+      underweight: ["Small Caps (IWM)", "Cyclicals"],
+      notes: [
+        "Defensive posture warranted — reduce risk exposure",
+        "Favour quality and low-beta over growth",
+        "Credit or rates stress may intensify"
+      ]
+    },
+    "Risk-Off": {
+      overweight: ["Gold", "Treasuries", "Cash"],
+      neutral: [],
+      underweight: ["Equity", "Credit (HYG)", "Cyclicals"],
+      notes: [
+        "Maximum caution — capital preservation priority",
+        "Stress signals across multiple pillars",
+        "Avoid adding risk until regime shifts"
+      ]
+    },
+  };
+
+  const base = MAP[regime] || MAP["Neutral"];
+
+  // Posture (same thresholds as alpha_engine)
+  let posture;
+  if (composite >= 0.5) posture = "Aggressive Long";
+  else if (composite >= 0.2) posture = "Tactical Long";
+  else if (composite >= -0.2) posture = "Neutral / Wait";
+  else if (composite >= -0.5) posture = "Tactical Short";
+  else posture = "Aggressive Short";
+
+  // Refine notes based on live data
+  const notes = [...base.notes];
+  if (!breadthHealthy && regime !== "Risk-Off" && regime !== "Cautious") {
+    notes.push("Breadth is narrow — breadth deterioration is a risk");
+  }
+  if (credit <= -0.5) {
+    notes.push("Credit stress challenges the constructive thesis");
+  }
+
+  return { overweight: base.overweight, neutral: base.neutral, underweight: base.underweight, posture, notes };
+}
+
+function deriveLeadershipRanking(indices) {
+  if (!indices || !indices.length) return null;
+  const ranked = [...indices].sort((a, b) => (b.change_pct || 0) - (a.change_pct || 0));
+  const leaders = ranked.slice(0, 2).map(i => i.symbol);
+  const laggards = ranked.slice(-1).map(i => i.symbol);
+  const greens = indices.filter(i => (i.change_pct || 0) >= 0).length;
+  const participation = greens >= 4 ? "Broad" : greens >= 3 ? "Healthy" : greens >= 2 ? "Narrow" : "Weak";
+  return { ranked, leaders, laggards, participation };
+}
+
+function deriveSystemAlignment(scores) {
+  if (!scores) return null;
+  const pillars = [
+    { name: "Equities", score: scores.equities },
+    { name: "Rates", score: scores.rates },
+    { name: "Credit", score: scores.credit },
+    { name: "Volatility", score: scores.volatility },
+  ];
+
+  const positive = pillars.filter(p => p.score > 0.1);
+  const negative = pillars.filter(p => p.score < -0.1);
+  const neutral = pillars.filter(p => Math.abs(p.score) <= 0.1);
+
+  const majorDir = positive.length >= negative.length ? "positive" : "negative";
+  const aligned = majorDir === "positive" ? positive.length : negative.length;
+
+  let alignment, explanation;
+  if (aligned >= 4) { alignment = "High"; explanation = "All four pillars confirm the current regime"; }
+  else if (aligned >= 3) { alignment = "Moderate"; explanation = `${4 - aligned} pillar${4 - aligned > 1 ? "s" : ""} diverging from the dominant signal`; }
+  else if (aligned >= 2) { alignment = "Mixed"; explanation = "Pillars are split — regime conviction is low"; }
+  else { alignment = "Conflicted"; explanation = "No clear directional consensus across pillars"; }
+
+  const confirming = (majorDir === "positive" ? positive : negative).map(p =>
+    `${p.name}: ${p.score > 0 ? "supportive" : "defensive"} (${p.score > 0 ? "+" : ""}${p.score.toFixed(1)})`
+  );
+  const conflicting = (majorDir === "positive" ? negative : positive).map(p =>
+    `${p.name}: ${p.score > 0 ? "risk-on" : "cautious"} (${p.score > 0 ? "+" : ""}${p.score.toFixed(1)})`
+  );
+  if (neutral.length) {
+    conflicting.push(...neutral.map(p => `${p.name}: neutral (${p.score.toFixed(1)})`));
+  }
+
+  return { alignment, dominantRegime: scores.regime, explanation, confirming, conflicting };
+}
+
+function deriveCapitalFlowRead(mkt, scores) {
+  if (!mkt) return [];
+  const ca = mkt.cross_asset || [];
+  const gold = ca.find(a => a.symbol === "GLD");
+  const oil = ca.find(a => a.symbol === "USO");
+  const copper = ca.find(a => a.symbol === "COPX");
+  const dollar = ca.find(a => a.symbol === "UUP");
+  const bullets = [];
+
+  // Gold + equity interplay
+  if (gold && gold.change_pct < -0.2 && scores?.equities > 0) {
+    bullets.push("Money rotating out of safety into risk assets");
+  } else if (gold && gold.change_pct > 0.3) {
+    bullets.push("Gold bid active — safety demand or inflation hedge");
+  }
+
+  // Dollar
+  if (dollar && dollar.change_pct < -0.2) {
+    bullets.push("Dollar softness supports risk assets and commodities");
+  } else if (dollar && dollar.change_pct > 0.3) {
+    bullets.push("Dollar strength is a headwind for risk and EM assets");
+  }
+
+  // Copper
+  if (copper && copper.change_pct > 0.3) {
+    bullets.push("Copper strength confirms industrial demand and global growth");
+  } else if (copper && copper.change_pct < -0.3) {
+    bullets.push("Copper weakness signals slowing industrial activity");
+  }
+
+  // Oil
+  if (oil && oil.change_pct > 0.5) {
+    bullets.push("Oil rising — inflation-sensitive assets are bid");
+  } else if (oil && oil.change_pct < -0.5) {
+    bullets.push("Oil weakness suggests demand concerns or deflationary pressure");
+  }
+
+  // Sector rotation
+  const sectors = mkt.sectors || [];
+  const sorted = [...sectors].sort((a, b) => (b.change_pct || 0) - (a.change_pct || 0));
+  if (sorted.length >= 3) {
+    const topNames = sorted.slice(0, 2).map(s => s.name || s.symbol);
+    const cyclical = ["Technology", "Industrials", "Materials", "Consumer Discretionary", "Energy", "Financials"];
+    const topAreCyclical = topNames.some(n => cyclical.includes(n));
+    if (topAreCyclical && scores?.regime !== "Risk-Off") {
+      bullets.push(`Cyclical leadership (${topNames.join(", ")}) supports the risk-on read`);
+    }
+  }
+
+  if (!bullets.length) bullets.push("Capital flow signals are mixed — no strong directional read");
+  return bullets;
+}
+
+function deriveEmergingOpportunities(mkt, scores) {
+  if (!mkt || !scores) return [];
+  const items = [];
+  const indices = mkt.indices || [];
+  const sectors = mkt.sectors || [];
+  const sorted = [...sectors].sort((a, b) => (b.change_pct || 0) - (a.change_pct || 0));
+
+  // Strongest index
+  const topIdx = [...indices].sort((a, b) => (b.change_pct || 0) - (a.change_pct || 0))[0];
+  if (topIdx && topIdx.change_pct > 0) {
+    const theses = { QQQ: "Growth/momentum leadership intact", IWM: "Broadening participation — small caps leading", SPY: "Broad market strength", DIA: "Value/industrial leadership" };
+    items.push({ symbol: topIdx.symbol, thesis: theses[topIdx.symbol] || "Leading index today" });
+  }
+
+  // IWM broadening signal
+  const iwm = indices.find(i => i.symbol === "IWM");
+  if (iwm && iwm.change_pct > 0.5 && scores.regime !== "Risk-Off" && topIdx?.symbol !== "IWM") {
+    items.push({ symbol: "IWM", thesis: "Small-cap strength signals broadening risk appetite" });
+  }
+
+  // Top 2 sectors
+  if (sorted.length >= 2) {
+    sorted.slice(0, 2).forEach(s => {
+      if (s.change_pct > 0.3) {
+        items.push({ symbol: s.symbol, thesis: `${s.name || s.symbol} sector leadership` });
+      }
+    });
+  }
+
+  // Risk-off opportunities
+  if (scores.regime === "Cautious" || scores.regime === "Risk-Off") {
+    const gold = (mkt.cross_asset || []).find(a => a.symbol === "GLD");
+    if (gold && gold.change_pct > 0) {
+      items.push({ symbol: "GLD", thesis: "Safety bid active — defensive positioning" });
+    }
+  }
+
+  // Deduplicate and limit
+  const seen = new Set();
+  return items.filter(i => { if (seen.has(i.symbol)) return false; seen.add(i.symbol); return true; }).slice(0, 5);
+}
+
 function OverviewView({onNav, onDetail}) {
   const C = useC();
   const [mkt, setMkt]               = useState(null);
@@ -439,6 +662,17 @@ function OverviewView({onNav, onDetail}) {
     else if (gold && gold.change_pct < -0.3 && scores.equities > 0)
       bullets.push("Gold weakness confirms risk-on rotation");
 
+    // Positioning implication
+    const posImpl = { "Risk-On": "risk-on overweights", "Constructive": "measured equity tilts", "Neutral": "balanced positioning", "Cautious": "defensive tilts", "Risk-Off": "capital preservation" };
+    bullets.push(`Current tape supports ${posImpl[scores.regime] || "balanced positioning"}`);
+
+    // Risk caveat
+    if (fi.curve_regime === "inverted" && scores.credit <= 0) bullets.push("Key risk: inverted curve + soft credit could signal recession");
+    else if (scores.credit <= -0.5) bullets.push("Key risk: credit stress may spill over into equities");
+    else if (greens.length <= 1) bullets.push("Key risk: narrow breadth — rallies on thin leadership tend to fade");
+    else if (scores.volatility <= -0.5) bullets.push("Key risk: elevated volatility — size positions accordingly");
+    else bullets.push("Risk is contained — no immediate catalysts for regime deterioration");
+
     return { summary: bullets };
   }, [scores, mkt, fi, cr, ca]);
 
@@ -450,12 +684,20 @@ function OverviewView({onNav, onDetail}) {
     }
   }, [mkt]);
 
+  // ── Derived decision layers ──
+  const positioning = useMemo(() => deriveSuggestedPositioning(scores, mkt), [scores, mkt]);
+  const leadership = useMemo(() => deriveLeadershipRanking(mkt?.indices), [mkt]);
+  const localAlignment = useMemo(() => deriveSystemAlignment(scores), [scores]);
+  const capitalFlow = useMemo(() => deriveCapitalFlowRead(mkt, scores), [mkt, scores]);
+  const emergingOpps = useMemo(() => deriveEmergingOpportunities(mkt, scores), [mkt, scores]);
+
   // ── Helper components ──
   const regimeColor = r => ({
     "Risk-On": C.grn, "Constructive": "#66bb6a", "Neutral": C.amb, "Cautious": "#ff8a65", "Risk-Off": C.red
   })[r] || C.mut;
   const alignmentColor = a => ({
-    "Aligned": C.grn, "Partially Aligned": C.amb, "Diverging": "#ff8a65", "Conflicted": C.red
+    "Aligned": C.grn, "Partially Aligned": C.amb, "Diverging": "#ff8a65", "Conflicted": C.red,
+    "High": C.grn, "Moderate": C.amb, "Mixed": "#ff8a65",
   })[a] || C.mut;
 
   const pillarColor = s => s >= 0.5 ? C.grn : s <= -0.5 ? C.red : C.amb;
@@ -535,7 +777,7 @@ function OverviewView({onNav, onDetail}) {
           </div>
 
           {/* Pillar scores row */}
-          <div style={{display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:10, marginBottom:14}}>
+          <div style={{display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:10}}>
             {[["Volatility", scores.volatility], ["Equities", scores.equities], ["Rates", scores.rates], ["Credit", scores.credit]].map(([name, val]) => (
               <div key={name} style={{padding:"8px 12px", borderRadius:8, background:C.dim, textAlign:"center"}}>
                 <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>{name.toUpperCase()}</div>
@@ -546,7 +788,48 @@ function OverviewView({onNav, onDetail}) {
           </div>
         </Section>
 
-        {/* ═══════════ 2. TODAY'S MARKET READ ═══════════ */}
+        {/* ═══════════ 2. SUGGESTED POSITIONING ═══════════ */}
+        {positioning && (
+          <Section accent={regimeColor(scores.regime)}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:8}}>
+              <div>
+                <div style={{...mono(11, C.headingTxt, 700)}}>SUGGESTED POSITIONING</div>
+                <div style={mono(9, C.mut)}>Derived from regime, breadth, rates, credit, and cross-asset conditions</div>
+              </div>
+              <Tag color={regimeColor(scores.regime)}>{positioning.posture}</Tag>
+            </div>
+            <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : "repeat(3,1fr)", gap:10, marginBottom:14}}>
+              {/* Overweight */}
+              <div style={{padding:"12px 14px",borderRadius:10,background:C.grn+"08",border:`1px solid ${C.grn}22`}}>
+                <div style={{...mono(8, C.grn, 700), letterSpacing:"0.08em", marginBottom:8}}>OVERWEIGHT</div>
+                {positioning.overweight.length > 0 ? positioning.overweight.map((item,i) => (
+                  <div key={i} style={{...mono(10, C.txt), marginBottom:3}}>{item}</div>
+                )) : <div style={mono(9, C.mut)}>None currently</div>}
+              </div>
+              {/* Neutral */}
+              <div style={{padding:"12px 14px",borderRadius:10,background:C.amb+"08",border:`1px solid ${C.amb}22`}}>
+                <div style={{...mono(8, C.amb, 700), letterSpacing:"0.08em", marginBottom:8}}>NEUTRAL</div>
+                {positioning.neutral.length > 0 ? positioning.neutral.map((item,i) => (
+                  <div key={i} style={{...mono(10, C.txt), marginBottom:3}}>{item}</div>
+                )) : <div style={mono(9, C.mut)}>—</div>}
+              </div>
+              {/* Underweight */}
+              <div style={{padding:"12px 14px",borderRadius:10,background:C.red+"08",border:`1px solid ${C.red}22`}}>
+                <div style={{...mono(8, C.red, 700), letterSpacing:"0.08em", marginBottom:8}}>UNDERWEIGHT</div>
+                {positioning.underweight.length > 0 ? positioning.underweight.map((item,i) => (
+                  <div key={i} style={{...mono(10, C.txt), marginBottom:3}}>{item}</div>
+                )) : <div style={mono(9, C.mut)}>None currently</div>}
+              </div>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+              {positioning.notes.map((n,i) => (
+                <div key={i} style={{display:"flex",gap:6}}><span style={mono(9,C.mut)}>•</span><span style={mono(9,C.txt)}>{n}</span></div>
+              ))}
+            </div>
+          </Section>
+        )}
+
+        {/* ═══════════ 3. TODAY'S MARKET READ ═══════════ */}
         {narrative && (
           <Section accent={C.pur}>
             <div style={{...mono(11, C.headingTxt, 700), marginBottom:10}}>TODAY'S MARKET READ</div>
@@ -561,45 +844,92 @@ function OverviewView({onNav, onDetail}) {
           </Section>
         )}
 
-        {/* ═══════════ CROSS-TAB ALIGNMENT ═══════════ */}
-        {unifiedRegime && unifiedRegime.alignment && (
-          <div style={{padding:"12px 16px", borderRadius:12, background:C.dim, border:`1px solid ${alignmentColor(unifiedRegime.alignment.overall_alignment)}30`,
-            display:"flex", justifyContent:"space-between", alignItems:"center", flexWrap:"wrap", gap:10}}>
-            <div style={{display:"flex",gap:12,alignItems:"center"}}>
+        {/* ═══════════ 4. SYSTEM ALIGNMENT ═══════════ */}
+        {localAlignment && (
+          <Section accent={alignmentColor(localAlignment.alignment)}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10,marginBottom:12}}>
               <div>
-                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>SYSTEM ALIGNMENT</div>
-                <div style={mono(12, alignmentColor(unifiedRegime.alignment.overall_alignment), 700)}>{unifiedRegime.alignment.overall_alignment}</div>
+                <div style={{...mono(9, C.mut, 700), letterSpacing:"0.1em", marginBottom:4}}>SYSTEM ALIGNMENT</div>
+                <div style={{display:"flex",gap:12,alignItems:"center"}}>
+                  <span style={mono(18, alignmentColor(localAlignment.alignment), 800)}>{localAlignment.alignment}</span>
+                  <div style={{width:1,height:22,background:C.bdr}}/>
+                  <div>
+                    <div style={{...mono(8, C.mut, 600), letterSpacing:"0.06em"}}>DOMINANT</div>
+                    <div style={mono(12, regimeColor(localAlignment.dominantRegime), 700)}>{localAlignment.dominantRegime}</div>
+                  </div>
+                </div>
               </div>
-              <div style={{width:1,height:28,background:C.bdr}}/>
-              <div>
-                <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>DOMINANT</div>
-                <div style={mono(12, regimeColor(unifiedRegime.alignment.dominant_regime), 700)}>{unifiedRegime.alignment.dominant_regime}</div>
+              {/* Cross-tab badges if available */}
+              {unifiedRegime?.tabs && (
+                <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                  {Object.entries(unifiedRegime.tabs).map(([tab, data]) => (
+                    <span key={tab} style={{...mono(8, regimeColor(data.mapped_regime), 600),
+                      padding:"2px 8px", borderRadius:10, background:regimeColor(data.mapped_regime)+"15",
+                      border:`1px solid ${regimeColor(data.mapped_regime)}30`}}>
+                      {tab.charAt(0).toUpperCase()+tab.slice(1)}: {data.mapped_regime}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div style={mono(10, C.txt, 400)}>{localAlignment.explanation}</div>
+            {(localAlignment.confirming.length > 0 || localAlignment.conflicting.length > 0) && (
+              <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : "1fr 1fr", gap:10, marginTop:10}}>
+                {localAlignment.confirming.length > 0 && (
+                  <div style={{padding:"8px 12px",borderRadius:8,background:C.grn+"08",border:`1px solid ${C.grn}18`}}>
+                    <div style={{...mono(8, C.grn, 700), letterSpacing:"0.06em", marginBottom:4}}>CONFIRMING</div>
+                    {localAlignment.confirming.map((s,i) => <div key={i} style={mono(9, C.txt)}>{s}</div>)}
+                  </div>
+                )}
+                {localAlignment.conflicting.length > 0 && (
+                  <div style={{padding:"8px 12px",borderRadius:8,background:C.amb+"08",border:`1px solid ${C.amb}18`}}>
+                    <div style={{...mono(8, C.amb, 700), letterSpacing:"0.06em", marginBottom:4}}>DIVERGING</div>
+                    {localAlignment.conflicting.map((s,i) => <div key={i} style={mono(9, C.txt)}>{s}</div>)}
+                  </div>
+                )}
               </div>
-            </div>
-            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              {Object.entries(unifiedRegime.tabs || {}).map(([tab, data]) => (
-                <span key={tab} style={{...mono(8, regimeColor(data.mapped_regime), 600),
-                  padding:"2px 8px", borderRadius:10, background:regimeColor(data.mapped_regime)+"15",
-                  border:`1px solid ${regimeColor(data.mapped_regime)}30`}}>
-                  {tab.charAt(0).toUpperCase()+tab.slice(1)}: {data.mapped_regime}
-                </span>
-              ))}
-            </div>
-          </div>
+            )}
+          </Section>
         )}
 
-        {/* ═══════════ 3. EQUITY LEADERSHIP ═══════════ */}
+        {/* ═══════════ 5. EQUITY LEADERSHIP ═══════════ */}
         <div>
           <SectionSep label="Equity Leadership"/>
-          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10, marginTop:10}}>
-            {(mkt.indices || []).map(idx => {
+          {/* Leadership summary bar */}
+          {leadership && (
+            <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap",marginTop:6,marginBottom:10}}>
+              <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                <span style={{...mono(8, C.mut, 600), letterSpacing:"0.06em"}}>LEADERS:</span>
+                {leadership.leaders.map(s => <Tag key={s} color={C.grn}>{s}</Tag>)}
+              </div>
+              <div style={{width:1,height:14,background:C.bdr}}/>
+              <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                <span style={{...mono(8, C.mut, 600), letterSpacing:"0.06em"}}>LAGGING:</span>
+                {leadership.laggards.map(s => <Tag key={s} color={C.red}>{s}</Tag>)}
+              </div>
+              <div style={{width:1,height:14,background:C.bdr}}/>
+              <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                <span style={{...mono(8, C.mut, 600), letterSpacing:"0.06em"}}>PARTICIPATION:</span>
+                <Tag color={leadership.participation === "Broad" || leadership.participation === "Healthy" ? C.grn : leadership.participation === "Narrow" ? C.amb : C.red}>
+                  {leadership.participation}
+                </Tag>
+              </div>
+            </div>
+          )}
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10}}>
+            {(leadership?.ranked || mkt.indices || []).map((idx, rank) => {
               const names = {SPY:"S&P 500",QQQ:"Nasdaq 100",IWM:"Russell 2000",DIA:"Dow Jones"};
+              const rankBadge = ["1st","2nd","3rd","4th"][rank] || "";
               return (
                 <div key={idx.symbol} onClick={()=>onDetail?.(idx.symbol)}
-                  style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${chgColor(idx.change_pct)}25`,cursor:"pointer",transition:"border-color .15s"}}>
+                  style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${chgColor(idx.change_pct)}25`,cursor:"pointer",transition:"border-color .15s",
+                    ...(rank === 0 ? {borderLeft:`3px solid ${C.grn}`} : {})}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
                     <span style={mono(10, C.headingTxt, 700)}>{names[idx.symbol] || idx.symbol}</span>
-                    <Tag color={chgColor(idx.change_pct)}>{idx.symbol}</Tag>
+                    <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                      <span style={{...mono(7, rank === 0 ? C.grn : C.mut, 700), padding:"1px 5px", borderRadius:3, background:rank === 0 ? C.grn+"18" : "transparent"}}>{rankBadge}</span>
+                      <Tag color={chgColor(idx.change_pct)}>{idx.symbol}</Tag>
+                    </div>
                   </div>
                   <div style={mono(18, C.headingTxt, 800)}>${idx.price?.toFixed(2)}</div>
                   <div style={{...mono(11, chgColor(idx.change_pct), 700), marginTop:4}}>
@@ -611,27 +941,49 @@ function OverviewView({onNav, onDetail}) {
           </div>
         </div>
 
-        {/* ═══════════ 4. RATES & CREDIT CONFIRMATION ═══════════ */}
+        {/* ═══════════ 6. RATES & CREDIT CONFIRMATION ═══════════ */}
         <div>
           <SectionSep label="Rates & Credit Confirmation"/>
           <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10, marginTop:10}}>
             {/* 10Y Treasury */}
             <div style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${C.sky}25`}}>
-              <div style={{...mono(9,C.mut,700),letterSpacing:"0.08em",marginBottom:4}}>10Y TREASURY</div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                <span style={{...mono(9,C.mut,700),letterSpacing:"0.08em"}}>10Y TREASURY</span>
+                {fi.ten_year?.daily_chg_bp != null && (
+                  <span style={{...mono(7, chgColor(fi.ten_year.daily_chg_bp), 600), padding:"1px 5px", borderRadius:3,
+                    background:chgColor(fi.ten_year.daily_chg_bp)+"15"}}>
+                    {fi.ten_year.daily_chg_bp > 0.5 ? "Rising" : fi.ten_year.daily_chg_bp < -0.5 ? "Falling" : "Stable"}
+                  </span>
+                )}
+              </div>
               <div style={mono(18, C.sky, 800)}>{fi.ten_year?.value?.toFixed(2) || "—"}%</div>
               {fi.ten_year?.daily_chg_bp != null && <div style={mono(10, chgColor(fi.ten_year.daily_chg_bp), 600)}>{fi.ten_year.daily_chg_bp > 0 ? "+" : ""}{fi.ten_year.daily_chg_bp.toFixed(1)} bps</div>}
             </div>
             {/* 3M T-Bill */}
             <div style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${C.pur}25`}}>
-              <div style={{...mono(9,C.mut,700),letterSpacing:"0.08em",marginBottom:4}}>3M T-BILL</div>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                <span style={{...mono(9,C.mut,700),letterSpacing:"0.08em"}}>3M T-BILL</span>
+                {fi.three_month?.daily_chg_bp != null && (
+                  <span style={{...mono(7, chgColor(fi.three_month.daily_chg_bp), 600), padding:"1px 5px", borderRadius:3,
+                    background:chgColor(fi.three_month.daily_chg_bp)+"15"}}>
+                    {fi.three_month.daily_chg_bp > 0.5 ? "Rising" : fi.three_month.daily_chg_bp < -0.5 ? "Falling" : "Stable"}
+                  </span>
+                )}
+              </div>
               <div style={mono(18, C.pur, 800)}>{fi.three_month?.value?.toFixed(2) || "—"}%</div>
               {fi.three_month?.daily_chg_bp != null && <div style={mono(10, chgColor(fi.three_month.daily_chg_bp), 600)}>{fi.three_month.daily_chg_bp > 0 ? "+" : ""}{fi.three_month.daily_chg_bp.toFixed(1)} bps</div>}
             </div>
             {/* HYG */}
-            <div style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${stressCol(cr.stress)}25`}} onClick={()=>onDetail?.("HYG")}>
+            <div style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${stressCol(cr.stress)}25`,cursor:"pointer"}} onClick={()=>onDetail?.("HYG")}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                 <span style={{...mono(9,C.mut,700),letterSpacing:"0.08em"}}>HIGH YIELD</span>
-                {cr.stress && <Tag color={stressCol(cr.stress)}>{cr.stress}</Tag>}
+                <div style={{display:"flex",gap:4}}>
+                  {cr.stress && <Tag color={stressCol(cr.stress)}>{cr.stress}</Tag>}
+                  <span style={{...mono(7, chgColor(cr.hyg?.change_pct), 600), padding:"1px 5px", borderRadius:3,
+                    background:chgColor(cr.hyg?.change_pct)+"15"}}>
+                    {(cr.hyg?.change_pct||0) > 0.1 ? "Improving" : (cr.hyg?.change_pct||0) < -0.1 ? "Deteriorating" : "Stable"}
+                  </span>
+                </div>
               </div>
               <div style={mono(18, C.headingTxt, 800)}>${cr.hyg?.price?.toFixed(2) || "—"}</div>
               <div style={mono(10, chgColor(cr.hyg?.change_pct), 600)}>{cr.hyg?.change_pct >= 0 ? "+" : ""}{cr.hyg?.change_pct?.toFixed(2) || "—"}%</div>
@@ -640,10 +992,16 @@ function OverviewView({onNav, onDetail}) {
               </div>
             </div>
             {/* LQD */}
-            <div style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${C.bdr}`}} onClick={()=>onDetail?.("LQD")}>
+            <div style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${C.bdr}`,cursor:"pointer"}} onClick={()=>onDetail?.("LQD")}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                 <span style={{...mono(9,C.mut,700),letterSpacing:"0.08em"}}>INV. GRADE</span>
-                {cr.spread_change != null && <Tag color={chgColor(-cr.spread_change)}>{cr.spread_change > 0 ? "+" : ""}{cr.spread_change.toFixed(2)}%</Tag>}
+                <div style={{display:"flex",gap:4}}>
+                  {cr.spread_change != null && <Tag color={chgColor(-cr.spread_change)}>{cr.spread_change > 0 ? "+" : ""}{cr.spread_change.toFixed(2)}%</Tag>}
+                  <span style={{...mono(7, chgColor(cr.lqd?.change_pct), 600), padding:"1px 5px", borderRadius:3,
+                    background:chgColor(cr.lqd?.change_pct)+"15"}}>
+                    {(cr.lqd?.change_pct||0) > 0.1 ? "Improving" : (cr.lqd?.change_pct||0) < -0.1 ? "Weakening" : "Stable"}
+                  </span>
+                </div>
               </div>
               <div style={mono(18, C.headingTxt, 800)}>${cr.lqd?.price?.toFixed(2) || "—"}</div>
               <div style={mono(10, chgColor(cr.lqd?.change_pct), 600)}>{cr.lqd?.change_pct >= 0 ? "+" : ""}{cr.lqd?.change_pct?.toFixed(2) || "—"}%</div>
@@ -651,7 +1009,7 @@ function OverviewView({onNav, onDetail}) {
           </div>
         </div>
 
-        {/* ═══════════ 5. CROSS-ASSET CONFIRMATION ═══════════ */}
+        {/* ═══════════ 7. CROSS-ASSET CONFIRMATION ═══════════ */}
         <div>
           <SectionSep label="Cross-Asset Confirmation"/>
           <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10, marginTop:10}}>
@@ -662,12 +1020,16 @@ function OverviewView({onNav, onDetail}) {
                 COPX: a.change_pct > 0 ? "Global growth is healthy" : "Industrial demand weakening",
                 UUP: a.change_pct > 0 ? "Risk-off / headwind for risk assets" : "Dollar weakness supports risk assets",
               };
+              const trend = a.change_pct > 0.3 ? "Strengthening" : a.change_pct < -0.3 ? "Weakening" : "Stable";
               return (
-                <div key={a.symbol} style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${chgColor(a.change_pct)}25`}}
+                <div key={a.symbol} style={{padding:"14px 16px",borderRadius:12,background:C.surf,border:`1px solid ${chgColor(a.change_pct)}25`,cursor:"pointer"}}
                   onClick={()=>onDetail?.(a.symbol)}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
                     <span style={mono(10, C.headingTxt, 700)}>{a.name}</span>
-                    <Tag color={chgColor(a.change_pct)}>{a.symbol}</Tag>
+                    <div style={{display:"flex",gap:4}}>
+                      <span style={{...mono(7, chgColor(a.change_pct), 600), padding:"1px 5px", borderRadius:3, background:chgColor(a.change_pct)+"15"}}>{trend}</span>
+                      <Tag color={chgColor(a.change_pct)}>{a.symbol}</Tag>
+                    </div>
                   </div>
                   <div style={mono(18, C.headingTxt, 800)}>${a.price?.toFixed(2)}</div>
                   <div style={mono(10, chgColor(a.change_pct), 600)}>{a.change_pct >= 0 ? "+" : ""}{a.change_pct?.toFixed(2)}%</div>
@@ -678,19 +1040,51 @@ function OverviewView({onNav, onDetail}) {
           </div>
         </div>
 
-        {/* ═══════════ 6. BREADTH & SECTOR PARTICIPATION ═══════════ */}
-        {mkt.sectors && (
+        {/* ═══════════ 8. CAPITAL FLOW READ ═══════════ */}
+        {capitalFlow.length > 0 && (
+          <Section accent={C.pur}>
+            <div style={{...mono(11, C.headingTxt, 700), marginBottom:10}}>CAPITAL FLOW READ</div>
+            <div style={{display:"flex",flexDirection:"column",gap:5}}>
+              {capitalFlow.map((b,i) => (
+                <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                  <span style={mono(10, C.pur)}>•</span>
+                  <span style={mono(10, C.txt)}>{b}</span>
+                </div>
+              ))}
+            </div>
+          </Section>
+        )}
+
+        {/* ═══════════ 9. BREADTH & SECTOR PARTICIPATION ═══════════ */}
+        {mkt.sectors && (() => {
+          const sorted = [...mkt.sectors].sort((a,b) => (b.change_pct||0) - (a.change_pct||0));
+          const top3 = sorted.slice(0, 3);
+          const bot3 = sorted.slice(-3).reverse();
+          const adv = mkt.sectors.filter(s => (s.change_pct||0) >= 0).length;
+          const breadthLabel = adv >= 9 ? "Euphoric" : adv >= 7 ? "Healthy" : adv >= 5 ? "Mixed" : adv >= 3 ? "Narrow" : "Risk-off";
+          return (
           <div>
             <SectionSep label="Breadth & Sector Participation"/>
+            {/* Top/Bottom summary */}
+            <div style={{display:"flex",gap:14,alignItems:"center",flexWrap:"wrap",marginTop:6,marginBottom:10}}>
+              <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                <span style={{...mono(8, C.mut, 600), letterSpacing:"0.06em"}}>LEADERS:</span>
+                {top3.map(s => <span key={s.symbol} style={{...mono(8, C.grn, 600), padding:"1px 6px", borderRadius:3, background:C.grn+"12"}}>{s.name || s.symbol} {s.change_pct >= 0?"+":""}{s.change_pct?.toFixed(1)}%</span>)}
+              </div>
+              <div style={{width:1,height:14,background:C.bdr}}/>
+              <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                <span style={{...mono(8, C.mut, 600), letterSpacing:"0.06em"}}>LAGGARDS:</span>
+                {bot3.map(s => <span key={s.symbol} style={{...mono(8, C.red, 600), padding:"1px 6px", borderRadius:3, background:C.red+"12"}}>{s.name || s.symbol} {s.change_pct >= 0?"+":""}{s.change_pct?.toFixed(1)}%</span>)}
+              </div>
+              <div style={{width:1,height:14,background:C.bdr}}/>
+              <div style={{display:"flex",gap:4,alignItems:"center"}}>
+                <span style={{...mono(8, C.mut, 600), letterSpacing:"0.06em"}}>BREADTH:</span>
+                <Tag color={adv >= 7 ? C.grn : adv >= 5 ? C.amb : C.red}>{adv}/{mkt.sectors.length} advancing — {breadthLabel}</Tag>
+              </div>
+            </div>
             <Card>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                  <span style={mono(10, C.headingTxt, 700)}>Sector Heatmap</span>
-                  {(() => {
-                    const adv = mkt.sectors.filter(s => (s.change_pct||0) >= 0).length;
-                    return <Tag color={adv >= 8 ? C.grn : adv >= 5 ? C.amb : C.red}>{adv}/{mkt.sectors.length} advancing</Tag>;
-                  })()}
-                </div>
+                <span style={mono(10, C.headingTxt, 700)}>Sector Heatmap</span>
                 <button onClick={()=>setSectorsOpen(!sectorsOpen)}
                   style={{...mono(9,C.mut,600),background:"transparent",border:`1px solid ${C.bdr}`,borderRadius:6,padding:"3px 10px",cursor:"pointer"}}>
                   {sectorsOpen ? "Collapse" : "Expand"}
@@ -699,7 +1093,7 @@ function OverviewView({onNav, onDetail}) {
 
               {!sectorsOpen && (
                 <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-                  {[...mkt.sectors].sort((a,b) => (b.change_pct||0) - (a.change_pct||0)).map(s => (
+                  {sorted.map(s => (
                     <span key={s.symbol} style={{...mono(8, chgColor(s.change_pct), 600),
                       padding:"2px 6px",borderRadius:4,background:chgColor(s.change_pct)+"12",border:`1px solid ${chgColor(s.change_pct)}22`}}>
                       {s.symbol.replace("XL","")} {s.change_pct >= 0 ? "+" : ""}{s.change_pct?.toFixed(1)}%
@@ -710,7 +1104,7 @@ function OverviewView({onNav, onDetail}) {
 
               {sectorsOpen && (
                 <div style={{display:"grid",gridTemplateColumns:`repeat(auto-fill, minmax(125px, 1fr))`,gap:6}}>
-                  {[...mkt.sectors].sort((a,b) => (b.change_pct||0) - (a.change_pct||0)).map(s => {
+                  {sorted.map(s => {
                     const intensity = Math.min(1, Math.abs(s.change_pct || 0) / 2);
                     return (
                       <div key={s.symbol} style={{padding:"10px",borderRadius:8,textAlign:"center",
@@ -726,9 +1120,31 @@ function OverviewView({onNav, onDetail}) {
               )}
             </Card>
           </div>
+          );
+        })()}
+
+        {/* ═══════════ 10. EMERGING OPPORTUNITIES PREVIEW ═══════════ */}
+        {emergingOpps.length > 0 && (
+          <div>
+            <SectionSep label="Emerging Opportunities"/>
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:8}}>
+              {emergingOpps.map((opp, i) => (
+                <div key={opp.symbol} onClick={()=>onDetail?.(opp.symbol)}
+                  style={{flex:"1 1 140px",maxWidth:220,padding:"12px 14px",borderRadius:10,background:C.surf,
+                    border:`1px solid ${C.sky}25`,cursor:"pointer",transition:"border-color .15s",
+                    borderLeft: i === 0 ? `3px solid ${C.sky}` : `1px solid ${C.sky}25`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <Tag color={C.sky}>{opp.symbol}</Tag>
+                    {i === 0 && <span style={{...mono(7, C.sky, 700), padding:"1px 5px", borderRadius:3, background:C.sky+"18"}}>TOP</span>}
+                  </div>
+                  <div style={{...mono(9, C.txt), lineHeight:1.5}}>{opp.thesis}</div>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
 
-        {/* ═══════════ 7. GO DEEPER ═══════════ */}
+        {/* ═══════════ 11. GO DEEPER ═══════════ */}
         <div>
           <SectionSep label="Go Deeper"/>
           <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:8}}>
@@ -745,7 +1161,7 @@ function OverviewView({onNav, onDetail}) {
           </div>
         </div>
 
-        {/* ═══════════ 8. SYSTEM STATUS ═══════════ */}
+        {/* ═══════════ 12. SYSTEM STATUS ═══════════ */}
         <Card>
           <Lbl>System Status</Lbl>
           <div style={{display:"grid",gridTemplateColumns: C.isMobile?"repeat(2,1fr)":"repeat(4,1fr)",gap:8}}>
@@ -3957,6 +4373,246 @@ function getStrategyInsight(stratKey, opps, spot) {
   }
 }
 
+// ── Options Environment Classification ───────────────
+function classifyOptionsEnvironment({ volRegime, skewRegime, liquidityRegime, ivRank, pcRatio, ivHvRatio }) {
+  // Deterministic environment label from regime conditions
+  if (volRegime === "Expensive" && liquidityRegime !== "Weak") {
+    return {
+      label: "Premium Selling with Downside Risk",
+      color: "#ff8a65",
+      bias: "Neutral",
+      description: "Implied volatility is elevated relative to realized. Premium sellers have a statistical edge, but downside tail risk remains present."
+    };
+  }
+  if (volRegime === "Expensive" && liquidityRegime === "Weak") {
+    return {
+      label: "Elevated Vol / Thin Liquidity",
+      color: "#ff5252",
+      bias: "Neutral-to-Bearish",
+      description: "Volatility is rich but liquidity is poor. Execution risk is high — size down and use defined-risk structures only."
+    };
+  }
+  if (volRegime === "Cheap" && (ivRank || 50) < 30) {
+    return {
+      label: "Cheap Vol Opportunity",
+      color: "#00e676",
+      bias: "Neutral-to-Bullish",
+      description: "Options are historically cheap. Long volatility and debit structures offer favorable risk/reward."
+    };
+  }
+  if (volRegime === "Cheap") {
+    return {
+      label: "Long Volatility Setup",
+      color: "#40c4ff",
+      bias: "Neutral",
+      description: "Implied vol is below realized. Buying options is statistically cheap — favor gamma and convexity."
+    };
+  }
+  if (volRegime === "Fair" && skewRegime !== "Flat") {
+    const dirBias = skewRegime === "Put-rich" ? "Neutral-to-Bearish" : "Neutral-to-Bullish";
+    return {
+      label: skewRegime === "Put-rich" ? "Neutral Structures / Tail Risk Elevated" : "Directional Upside with Cheap Calls",
+      color: skewRegime === "Put-rich" ? "#ffb300" : "#00e676",
+      bias: dirBias,
+      description: skewRegime === "Put-rich"
+        ? "Fair-value vol with elevated put skew. Downside hedges are expensive — neutral structures or put credit spreads fit best."
+        : "Fair-value vol with cheap calls. Directional call spreads or risk reversals offer asymmetric upside."
+    };
+  }
+  // Fair vol + Flat skew
+  return {
+    label: "Range-Bound / Neutral",
+    color: "#b388ff",
+    bias: "Neutral",
+    description: "No strong vol edge for buyers or sellers. Iron condors and theta decay strategies fit a range-bound tape."
+  };
+}
+
+function deriveBestTradeTypes(envLabel, { volRegime, skewRegime, liquidityRegime, ivRank }) {
+  const liqDiscount = liquidityRegime === "Weak" ? 0.75 : liquidityRegime === "Mixed" ? 0.9 : 1.0;
+  const ivRankVal = ivRank || 50;
+
+  const TRADE_MAP = {
+    "Premium Selling with Downside Risk": [
+      { strategy: "Iron Condor", fitScore: Math.round(85 * liqDiscount), rationale: "Elevated IV + neutral bias = rich credit on both sides", riskNote: "Sharp trend move or event gap", strategyKey: "ironCondor" },
+      { strategy: "Put Credit Spread", fitScore: Math.round(80 * liqDiscount), rationale: "Puts overpriced from skew — sell premium into hedging demand", riskNote: "Downside acceleration past short strike", strategyKey: "bearPutSpread" },
+      { strategy: "Covered Call", fitScore: Math.round(78 * liqDiscount), rationale: "Enhanced yield on existing long position at elevated IV", riskNote: "Upside capped if stock rallies sharply", strategyKey: "coveredCall" },
+      { strategy: "Vega Harvesting", fitScore: Math.round(75 * liqDiscount), rationale: "Sell high IV — statistically mean-reverts after spikes", riskNote: "Sustained vol expansion if catalyst emerges", strategyKey: "vegaHarvesting" },
+    ],
+    "Elevated Vol / Thin Liquidity": [
+      { strategy: "Covered Call", fitScore: Math.round(65 * liqDiscount), rationale: "Only liquid strategy in thin markets — single leg, tight strikes", riskNote: "Poor fills on entry and exit", strategyKey: "coveredCall" },
+      { strategy: "Theta Decay", fitScore: Math.round(55 * liqDiscount), rationale: "Near-ATM options with decent OI — time decay is aggressive", riskNote: "Wide bid/ask erodes theoretical edge", strategyKey: "thetaDecay" },
+    ],
+    "Cheap Vol Opportunity": [
+      { strategy: "Long Straddle", fitScore: Math.round(88 * liqDiscount), rationale: "IV is historically depressed — buying vol is cheap", riskNote: "Time decay if no move materializes", strategyKey: "longStraddle" },
+      { strategy: "Gamma Scalping", fitScore: Math.round(82 * liqDiscount), rationale: "High gamma at ATM with cheap entry — scalp realized moves", riskNote: "Low realized vol means theta bleed", strategyKey: "gammaScalping" },
+      { strategy: "Bull Call Spread", fitScore: Math.round(75 * liqDiscount), rationale: "Cheap calls + directional thesis = efficient leverage", riskNote: "Needs directional conviction", strategyKey: "bullCallSpread" },
+    ],
+    "Long Volatility Setup": [
+      { strategy: "Long Straddle", fitScore: Math.round(85 * liqDiscount), rationale: "IV below HV — options are underpriced vs recent moves", riskNote: "Theta burn if realized vol fades", strategyKey: "longStraddle" },
+      { strategy: "Gamma Scalping", fitScore: Math.round(80 * liqDiscount), rationale: "Buy cheap gamma and hedge delta — profit from realized vol", riskNote: "Needs active management", strategyKey: "gammaScalping" },
+      { strategy: "Risk Reversal", fitScore: Math.round(70 * liqDiscount), rationale: "Skew financing — buy upside, sell downside at favorable pricing", riskNote: "Naked put leg has downside exposure", strategyKey: "riskReversal" },
+    ],
+    "Neutral Structures / Tail Risk Elevated": [
+      { strategy: "Iron Condor", fitScore: Math.round(78 * liqDiscount), rationale: "Neutral bias with rich put skew funding the trade", riskNote: "Tail event blows through the put wing", strategyKey: "ironCondor" },
+      { strategy: "Put Credit Spread", fitScore: Math.round(75 * liqDiscount), rationale: "Sell overpriced puts — hedge demand has inflated premiums", riskNote: "Downside gap through the spread", strategyKey: "bearPutSpread" },
+      { strategy: "Theta Decay", fitScore: Math.round(68 * liqDiscount), rationale: "Near-term decay is accelerated with elevated near-term vol", riskNote: "Event risk within the expiry window", strategyKey: "thetaDecay" },
+    ],
+    "Directional Upside with Cheap Calls": [
+      { strategy: "Bull Call Spread", fitScore: Math.round(85 * liqDiscount), rationale: "Calls are cheap relative to puts — efficient directional bet", riskNote: "Needs upside follow-through", strategyKey: "bullCallSpread" },
+      { strategy: "Risk Reversal", fitScore: Math.round(80 * liqDiscount), rationale: "Buy cheap calls, sell rich puts — net zero or credit entry", riskNote: "Downside exposure on the short put", strategyKey: "riskReversal" },
+      { strategy: "Delta Hedging", fitScore: Math.round(68 * liqDiscount), rationale: "Liquid ATM options for directional hedging", riskNote: "Transaction costs if frequently rebalanced", strategyKey: "deltaHedging" },
+    ],
+    "Range-Bound / Neutral": [
+      { strategy: "Iron Condor", fitScore: Math.round(75 * liqDiscount), rationale: "Flat skew + neutral tape = symmetric premium capture", riskNote: "Breakout in either direction", strategyKey: "ironCondor" },
+      { strategy: "Theta Decay", fitScore: Math.round(72 * liqDiscount), rationale: "Collect time decay in a low-vol, range-bound environment", riskNote: "Surprise catalyst or gap move", strategyKey: "thetaDecay" },
+      { strategy: "Covered Call", fitScore: Math.round(65 * liqDiscount), rationale: "Enhance yield while waiting for a directional catalyst", riskNote: "Opportunity cost if stock breaks out", strategyKey: "coveredCall" },
+    ],
+  };
+
+  return TRADE_MAP[envLabel] || TRADE_MAP["Range-Bound / Neutral"];
+}
+
+function deriveWhatToAvoid(envLabel, { volRegime, skewRegime, liquidityRegime, ivRank }) {
+  const items = [];
+
+  // Vol-based avoids
+  if (volRegime === "Expensive") {
+    items.push({ label: "Naked long options", reason: "IV is elevated — you overpay for vol and face IV crush risk", severity: "critical" });
+    items.push({ label: "Long straddles without catalyst", reason: "Expensive vol needs a realized move to justify the cost", severity: "caution" });
+  }
+  if (volRegime === "Cheap") {
+    items.push({ label: "Selling premium aggressively", reason: "Vol is historically low — limited edge and risk of expansion", severity: "critical" });
+  }
+
+  // Liquidity-based avoids
+  if (liquidityRegime === "Weak") {
+    items.push({ label: "Complex multi-leg structures", reason: "Wide bid/ask spreads destroy theoretical edge on entry/exit", severity: "critical" });
+    items.push({ label: "Illiquid far OTM strikes", reason: "Poor fill quality and no exit liquidity in stress", severity: "caution" });
+  }
+
+  // Skew-based avoids
+  if (skewRegime === "Put-rich") {
+    items.push({ label: "Buying puts for hedging", reason: "Put skew is rich — downside protection is overpriced", severity: "caution" });
+  }
+  if (skewRegime === "Call-rich") {
+    items.push({ label: "Buying OTM calls", reason: "Call skew is elevated — upside convexity is expensive", severity: "caution" });
+  }
+
+  // IV Rank avoids
+  if ((ivRank || 50) > 80) {
+    items.push({ label: "Buying straddles/strangles", reason: "IV Rank is extreme — IV crush post-event is highly probable", severity: "caution" });
+  }
+  if ((ivRank || 50) < 15) {
+    items.push({ label: "Iron condors and short strangles", reason: "Vol is near historic lows — expansion risk is asymmetric", severity: "caution" });
+  }
+
+  return items;
+}
+
+function buildOptionsSignalContract({ volRegime, skewRegime, liquidityRegime, ivRank, pcRatio, ivHvRatio, ivHvSpread, maxPainDist, envLabel, bestStrategies, avoidStrategies }) {
+  // Score: composite from multiple factors, range [-1, +1]
+  let score = 0;
+
+  // IV premium: positive spread = sell-side edge = slightly positive score
+  if (ivHvSpread != null) score += Math.max(-0.3, Math.min(0.3, ivHvSpread * 2));
+
+  // P/C ratio signal: high pcr = contrarian bullish
+  if (pcRatio != null) {
+    if (pcRatio > 1.3) score += 0.15;
+    else if (pcRatio > 1.1) score += 0.08;
+    else if (pcRatio < 0.7) score -= 0.10;
+  }
+
+  // Max pain distance: positive = bullish pull
+  if (maxPainDist != null) score += Math.max(0, Math.min(0.15, maxPainDist * 0.5));
+
+  // IV Rank: high = reversion risk (slight negative), low = cheap (slight positive)
+  const ivr = ivRank || 50;
+  if (ivr > 70) score -= 0.10;
+  else if (ivr < 30) score += 0.05;
+
+  // Skew: put-rich = bearish signal
+  if (skewRegime === "Put-rich") score -= 0.05;
+  else if (skewRegime === "Call-rich") score += 0.05;
+
+  score = Math.max(-1, Math.min(1, score));
+
+  // Confidence
+  let confidence = 40;
+  if (ivRank != null) confidence += 15;
+  if (ivHvSpread != null && Math.abs(ivHvSpread) > 0.05) confidence += 15;
+  if (liquidityRegime === "Strong") confidence += 10;
+  else if (liquidityRegime === "Weak") confidence -= 5;
+  if (pcRatio != null && Math.abs(pcRatio - 1.0) > 0.3) confidence += 10;
+  if (maxPainDist != null) confidence += 10;
+  confidence = Math.max(0, Math.min(100, confidence));
+
+  // Bias (same thresholds as alpha_engine.py)
+  const bias = score >= 0.40 ? "Bullish" : score >= 0.15 ? "Neutral-to-Bullish" : score > -0.15 ? "Neutral" : score > -0.40 ? "Neutral-to-Bearish" : "Bearish";
+
+  // Posture
+  let posture;
+  if (score >= 0.5 && confidence >= 65) posture = "Aggressive Long";
+  else if (score >= 0.2 && confidence >= 45) posture = "Tactical Long";
+  else if (score <= -0.5 && confidence >= 65) posture = "Aggressive Short";
+  else if (score <= -0.2 && confidence >= 45) posture = "Tactical Short";
+  else if (confidence < 25) posture = "No Trade";
+  else posture = "Neutral / Wait";
+
+  // Structure bias
+  const structureBias = volRegime === "Expensive" ? "Premium Selling" : volRegime === "Cheap" ? "Long Volatility"
+    : skewRegime === "Put-rich" ? "Neutral Structures" : skewRegime === "Call-rich" ? "Directional Calls" : "Neutral Structures";
+
+  // Opportunity type
+  const opportunityType = volRegime === "Expensive" ? (Math.abs(score) > 0.2 ? "Volatility Opportunity" : "Premium Harvest")
+    : volRegime === "Cheap" ? (score > 0.15 ? "Directional Opportunity" : "Volatility Opportunity")
+    : Math.abs(score) < 0.1 ? "Neutral Structure" : "Directional Opportunity";
+
+  // Drivers
+  const drivers = [];
+  if (ivHvSpread != null && ivHvSpread > 0.03) drivers.push("IV is materially above recent realized volatility");
+  if (ivHvSpread != null && ivHvSpread < -0.03) drivers.push("IV is below realized — options are statistically cheap");
+  if (skewRegime === "Put-rich") drivers.push("Put skew indicates downside hedging demand");
+  if (skewRegime === "Call-rich") drivers.push("Call skew suggests bullish positioning");
+  if (pcRatio != null && pcRatio > 1.3) drivers.push("Extreme put buying — contrarian bullish signal");
+  if (pcRatio != null && pcRatio < 0.7) drivers.push("Call-heavy flow — bullish positioning dominant");
+  if (ivr > 70) drivers.push(`IV Rank at ${ivr.toFixed(0)}% — historically elevated`);
+  if (ivr < 30) drivers.push(`IV Rank at ${ivr.toFixed(0)}% — historically depressed`);
+  if (maxPainDist != null && Math.abs(maxPainDist) > 0.01) drivers.push(`Max pain pull ${maxPainDist > 0 ? "above" : "below"} spot`);
+
+  // Risks
+  const risks = [];
+  if (liquidityRegime === "Weak") risks.push("Liquidity is weak outside core strikes");
+  if (volRegime === "Expensive") risks.push("Sharp downside move could overwhelm premium-selling structures");
+  if (volRegime === "Cheap") risks.push("Vol may stay cheap longer — theta drag on long positions");
+  if (skewRegime === "Put-rich") risks.push("Elevated put skew implies market pricing tail risk");
+  if (ivr > 80) risks.push("IV crush risk post-event is elevated");
+
+  // Summary
+  const summary = [];
+  if (envLabel) summary.push(`Environment: ${envLabel}`);
+  if (volRegime === "Expensive") summary.push("Market is overpaying for optionality — sellers have edge");
+  if (volRegime === "Cheap") summary.push("Options are underpriced relative to realized moves");
+  summary.push(`Best use: ${(bestStrategies || []).slice(0, 3).join(", ") || structureBias}`);
+
+  return {
+    domain: "options",
+    score: Math.round(score * 100) / 100,
+    confidence: Math.round(confidence),
+    bias,
+    posture,
+    structureBias,
+    opportunityType,
+    regime: { volRegime, skewRegime, liquidityRegime },
+    bestStrategies: bestStrategies || [],
+    avoidStrategies: avoidStrategies || [],
+    drivers,
+    risks,
+    summary,
+  };
+}
+
 // ── Action Brief helpers ──────────────────────────────
 function generateBrief(symbol, spot, summary, analytics, mktOverview) {
   const lines = [];
@@ -3967,14 +4623,18 @@ function generateBrief(symbol, spot, summary, analytics, mktOverview) {
   if (ivr != null) {
     const pct = (ivr * 100).toFixed(0);
     const [posture, strats] =
-      ivr > 0.70 ? ["historically elevated — premium-selling conditions", "Iron Condor, Vega Harvesting, Covered Call"]
-    : ivr > 0.45 ? ["moderate — no strong edge to buyers or sellers",      "Balanced spreads, Risk Reversal, Theta Decay"]
-    :              ["historically depressed — buying vol is cheap",         "Long Straddle, Gamma Scalping"];
+      ivr > 0.70 ? ["Elevated / Rich", "Premium selling"]
+    : ivr > 0.45 ? ["Moderate / Fair", "Balanced spreads"]
+    :              ["Depressed / Cheap", "Long vol"];
     lines.push({ icon:"📊", color:"#ffb300",
-      text:`IV Rank ${pct}%: implied vol is ${posture}. Best-fit strategy classes right now: ${strats}.` });
+      category: "Vol Regime", headline: `${posture}`, detail: `IV Rank ${pct}% — best use: ${strats}`,
+      metric: `IVR ${pct}%`,
+      text:`IV Rank ${pct}%: implied vol is ${posture.toLowerCase()}. Best use: ${strats}.` });
   } else if (avgIV != null) {
     lines.push({ icon:"📊", color:"#ffb300",
-      text:`Average call IV is ${(avgIV*100).toFixed(1)}%. Fetch analytics to compute IV Rank for richer context.` });
+      category: "Vol Regime", headline: "Data incomplete", detail: `Avg call IV ${(avgIV*100).toFixed(1)}% — load analytics for IV Rank`,
+      metric: `IV ${(avgIV*100).toFixed(0)}%`,
+      text:`Average call IV is ${(avgIV*100).toFixed(1)}%. Fetch analytics for IV Rank.` });
   }
 
   // ── 2. Max Pain gravity ──────────────────────────────
@@ -3983,11 +4643,14 @@ function generateBrief(symbol, spot, summary, analytics, mktOverview) {
     const distPct = ((mp - spot) / spot * 100);
     const dir = distPct >= 0 ? "above" : "below";
     const abs = Math.abs(distPct).toFixed(1);
-    const gravity = Math.abs(distPct) < 0.8
-      ? "nearly at spot — minimal pin-risk pull; stock may stay pinned near current levels"
-      : `${abs}% ${dir} spot — ${dir === "below" ? "bearish" : "bullish"} gravitational pull as expiry approaches; option writers will defend $${mp.toFixed(0)}`;
+    const pinRisk = Math.abs(distPct) < 0.8 ? "Minimal" : dir === "above" ? "Bullish" : "Bearish";
     lines.push({ icon:"📍", color:"#b388ff",
-      text:`Max Pain at $${mp.toFixed(0)} is ${gravity}.` });
+      category: "Max Pain", headline: `$${mp.toFixed(0)} — ${pinRisk} gravity`,
+      detail: Math.abs(distPct) < 0.8
+        ? "Near spot — stock may pin near current levels into expiry"
+        : `${abs}% ${dir} spot — option writers will defend $${mp.toFixed(0)}`,
+      metric: `$${mp.toFixed(0)}`,
+      text:`Max Pain at $${mp.toFixed(0)} is ${abs}% ${dir} spot.` });
   }
 
   // ── 3. Macro regime ──────────────────────────────────
@@ -3997,27 +4660,28 @@ function generateBrief(symbol, spot, summary, analytics, mktOverview) {
     const sent  = mktOverview.sentiment;
     const adv   = mktOverview.sectors?.filter(s => s.change_pct > 0).length ?? 0;
     const tot   = mktOverview.sectors?.length ?? 11;
-    const breadth = adv <= 3 ? "broadly risk-off" : adv >= 8 ? "broadly risk-on" : "mixed sector participation";
-    const advice  = vix > 25 ? "Elevated vol: widen strikes, reduce size, favour short-premium."
-                  : vix < 15 ? "Low-vol: options are cheap — prefer long-gamma and debit spreads."
-                  :            "Moderate vol: standard sizing; both buyers and sellers can find edge.";
+    const breadth = adv <= 3 ? "Risk-off" : adv >= 8 ? "Risk-on" : "Mixed";
+    const advice  = vix > 25 ? "Widen strikes, reduce size, favour short-premium"
+                  : vix < 15 ? "Options are cheap — prefer long-gamma and debit spreads"
+                  :            "Standard sizing — both buyers and sellers can find edge";
     const mktColor = vix > 25 ? "#ff5252" : vix > 18 ? "#ffb300" : "#00e676";
     lines.push({ icon:"🌍", color: mktColor,
-      text:`Macro: VIX ${vix.toFixed(1)} (${regime}), Fear & Greed ${sent?.score} (${sent?.label}), ${adv}/${tot} sectors advancing (${breadth}). ${advice}` });
+      category: "Macro Regime", headline: `VIX ${vix.toFixed(1)} · ${breadth}`,
+      detail: `${regime} regime, F&G ${sent?.score ?? "—"} (${sent?.label ?? "—"}), ${adv}/${tot} sectors up. ${advice}.`,
+      metric: `VIX ${vix.toFixed(1)}`,
+      text:`Macro: VIX ${vix.toFixed(1)} (${regime}), ${breadth}. ${advice}.` });
   }
 
   // ── 4. Options flow signal (Put/Call ratio) ──────────
   if (summary?.put_call_ratio != null) {
     const pcr = summary.put_call_ratio;
-    const signal = pcr > 1.5 ? "extreme put buying — contrarian bullish signal or heavy hedging underway"
-                 : pcr > 1.1 ? "elevated put interest — participants are hedging downside risk"
-                 : pcr > 0.8 ? "neutral flow — no strong directional options bias"
-                 :              "call-heavy flow — bullish positioning is dominant";
-    const action = pcr > 1.3 ? " Selling puts into this demand can offer favourable entry premiums."
-                 : pcr < 0.7 ? " Elevated complacency; consider protective puts or short calls above resistance."
-                 : "";
+    const flowLabel = pcr > 1.5 ? "Extreme put buying" : pcr > 1.1 ? "Elevated put interest" : pcr > 0.8 ? "Neutral flow" : "Call-heavy flow";
+    const flowBias = pcr > 1.3 ? "Contrarian bullish" : pcr < 0.7 ? "Complacent — consider hedges" : "Balanced";
     lines.push({ icon:"📈", color:"#40c4ff",
-      text:`P/C Ratio ${pcr.toFixed(2)}: ${signal}.${action}` });
+      category: "Options Flow", headline: `${flowLabel}`,
+      detail: `P/C Ratio ${pcr.toFixed(2)} — ${flowBias}`,
+      metric: `P/C ${pcr.toFixed(2)}`,
+      text:`P/C Ratio ${pcr.toFixed(2)}: ${flowLabel.toLowerCase()}. ${flowBias}.` });
   }
 
   // ── 5. Volatility risk premium (IV vs HV) ────────────
@@ -4027,10 +4691,13 @@ function generateBrief(symbol, spot, summary, analytics, mktOverview) {
     const curIV   = analytics.current_iv ? (analytics.current_iv * 100).toFixed(1) : "—";
     const positive = analytics.iv_hv_spread > 0;
     const spreadStr = Math.abs(spread).toFixed(1);
-    const txt = positive
-      ? `IV (${curIV}%) is ${spreadStr}pp above HV30 (${hv30}%) — a positive vol premium exists. Statistically, option sellers have historically captured this edge over time.`
-      : `IV (${curIV}%) is ${spreadStr}pp below HV30 (${hv30}%) — rare: options are cheap relative to recent realised moves. Favour long-vol strategies.`;
-    lines.push({ icon:"⚡", color: positive ? "#00e676" : "#ff5252", text: txt });
+    const vrpLabel = positive ? "Positive vol premium" : "Negative vol premium";
+    const vrpAdvice = positive ? "Sellers have statistical edge" : "Options are cheap — favour long-vol";
+    lines.push({ icon:"⚡", color: positive ? "#00e676" : "#ff5252",
+      category: "Vol Premium", headline: `${vrpLabel}`,
+      detail: `IV ${curIV}% vs HV30 ${hv30}% (${positive?"+":""}${spreadStr}pp) — ${vrpAdvice}`,
+      metric: `${positive?"+":""}${spreadStr}pp`,
+      text:`IV ${curIV}% vs HV30 ${hv30}% — ${spreadStr}pp ${positive?"above":"below"}. ${vrpAdvice}.` });
   }
 
   return lines;
@@ -4078,7 +4745,7 @@ function ActionBriefPanel({ symbol, summary, spot }) {
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
         <div>
           <Lbl color={C.grn}>Action Brief · {symbol}</Lbl>
-          <div style={mono(9,C.mut)}>Synthesised from IV rank · max pain · macro regime · options flow · vol premium</div>
+          <div style={mono(9,C.mut)}>IV rank · max pain · macro regime · options flow · vol premium</div>
         </div>
         <Tag color={C.mut}>Not financial advice</Tag>
       </div>
@@ -4091,9 +4758,157 @@ function ActionBriefPanel({ symbol, summary, spot }) {
             borderLeft: `3px solid ${s.color}`,
           }}>
             <span style={{flexShrink:0, fontSize:13, marginTop:1}}>{s.icon}</span>
-            <span style={{...mono(11,C.txt), lineHeight:1.75}}>{s.text}</span>
+            <div style={{flex:1, display:"flex", flexDirection:"column", gap:2}}>
+              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:8}}>
+                <div>
+                  {s.category && <span style={{...mono(8, C.mut, 600), letterSpacing:"0.06em", marginRight:8}}>{s.category.toUpperCase()}</span>}
+                  <span style={{...mono(11, C.txt, 700)}}>{s.headline || s.text}</span>
+                </div>
+                {s.metric && <span style={{...mono(9, s.color, 700), padding:"1px 8px", borderRadius:4, background:s.color+"15", flexShrink:0}}>{s.metric}</span>}
+              </div>
+              {s.detail && <span style={{...mono(10, C.mut), lineHeight:1.6}}>{s.detail}</span>}
+            </div>
           </div>
         ))}
+      </div>
+    </Card>
+  );
+}
+
+// ── Options Environment Card ─────────────────────────
+function OptionsEnvironmentCard({ env, signalContract, regimeData }) {
+  const C = useC();
+  if (!env) return null;
+  const sc = signalContract || {};
+  const biasCol = ({Bullish:C.grn, "Neutral-to-Bullish":"#66bb6a", Neutral:C.amb, "Neutral-to-Bearish":"#ff8a65", Bearish:C.red})[env.bias] || C.mut;
+  const scoreCol = (sc.score||0) > 0.15 ? C.grn : (sc.score||0) < -0.15 ? C.red : C.amb;
+  const postureCol = (sc.posture||"").includes("Long") ? C.grn : (sc.posture||"").includes("Short") ? C.red : C.amb;
+
+  return (
+    <div style={{borderRadius:14, border:`2px solid ${env.color}40`, background:env.color+"08", padding:"20px 24px"}}>
+      {/* Row 1: Environment label + bias */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:10,marginBottom:10}}>
+        <div>
+          <div style={{...mono(8, C.mut, 600), letterSpacing:"0.1em", marginBottom:4}}>OPTIONS ENVIRONMENT</div>
+          <div style={{...mono(18, env.color, 800), lineHeight:1.2}}>{env.label}</div>
+        </div>
+        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
+          <Tag color={biasCol}>{env.bias}</Tag>
+          {sc.posture && <Tag color={postureCol}>{sc.posture}</Tag>}
+        </div>
+      </div>
+
+      {/* Row 2: Description */}
+      <div style={{...mono(11, C.txt), lineHeight:1.7, marginBottom:14}}>{env.description}</div>
+
+      {/* Row 3: Signal contract summary */}
+      {sc.score != null && (
+        <div style={{display:"flex",gap:14,alignItems:"center",flexWrap:"wrap",padding:"10px 14px",borderRadius:10,background:C.dim,border:`1px solid ${C.bdr}`}}>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <span style={{...mono(8, C.mut, 600), letterSpacing:"0.06em"}}>SCORE</span>
+            <span style={{...mono(14, scoreCol, 800)}}>{sc.score > 0 ? "+" : ""}{sc.score.toFixed(2)}</span>
+          </div>
+          <div style={{width:1,height:18,background:C.bdr}}/>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <span style={{...mono(8, C.mut, 600), letterSpacing:"0.06em"}}>CONFIDENCE</span>
+            <div style={{width:60,height:5,background:C.dim,borderRadius:3,overflow:"hidden",border:`1px solid ${C.bdr}`}}>
+              <div style={{width:`${sc.confidence||0}%`,height:"100%",background:scoreCol,borderRadius:3}}/>
+            </div>
+            <span style={{...mono(10, scoreCol, 700)}}>{sc.confidence || 0}%</span>
+          </div>
+          <div style={{width:1,height:18,background:C.bdr}}/>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <span style={{...mono(8, C.mut, 600), letterSpacing:"0.06em"}}>TYPE</span>
+            <span style={mono(10, C.txt)}>{sc.opportunityType || sc.structureBias || "—"}</span>
+          </div>
+          <div style={{marginLeft:"auto"}}>
+            <span style={{...mono(8, C.sky, 600), padding:"2px 8px", borderRadius:4, background:C.sky+"12", border:`1px solid ${C.sky}30`}}>Alpha Signal Active</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Best Trade Types Panel ───────────────────────────
+function BestTradeTypesPanel({ bestTrades, onSelectStrategy }) {
+  const C = useC();
+  if (!bestTrades || !bestTrades.length) return null;
+
+  return (
+    <Card accent={C.grn}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,flexWrap:"wrap",gap:8}}>
+        <div>
+          <Lbl color={C.grn}>Best Trade Types Right Now</Lbl>
+          <div style={mono(9,C.mut)}>Ranked by environment fit — click to explore in chain</div>
+        </div>
+        <Tag color={C.grn}>{bestTrades.length} strategies</Tag>
+      </div>
+      <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : `repeat(${Math.min(bestTrades.length, 4)}, 1fr)`, gap:10}}>
+        {bestTrades.map((t, i) => {
+          const fitCol = t.fitScore >= 80 ? C.grn : t.fitScore >= 60 ? C.amb : C.mut;
+          return (
+            <div key={t.strategy} style={{
+              padding:"14px 16px", borderRadius:10, background:C.dim, border:`1px solid ${C.bdr}`,
+              borderLeft: i === 0 ? `3px solid ${C.grn}` : `1px solid ${C.bdr}`,
+            }}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                <span style={{...mono(12, C.headingTxt, 700)}}>{t.strategy}</span>
+                {i === 0 && <span style={{...mono(7, C.grn, 700), padding:"1px 6px", borderRadius:3, background:`${C.grn}18`}}>TOP FIT</span>}
+              </div>
+              <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                <span style={{...mono(8, C.mut, 600)}}>Fit</span>
+                <div style={{flex:1,height:4,background:C.surf,borderRadius:2,overflow:"hidden"}}>
+                  <div style={{width:`${t.fitScore}%`,height:"100%",background:fitCol,borderRadius:2}}/>
+                </div>
+                <span style={{...mono(10, fitCol, 700), minWidth:28, textAlign:"right"}}>{t.fitScore}</span>
+              </div>
+              <div style={{...mono(10, C.txt), lineHeight:1.6, marginBottom:6}}>{t.rationale}</div>
+              <div style={{...mono(9, C.red+"cc"), lineHeight:1.5}}>Risk: {t.riskNote}</div>
+              {onSelectStrategy && t.strategyKey && (
+                <button onClick={() => onSelectStrategy(t.strategyKey)}
+                  style={{...mono(8, C.sky, 700), marginTop:8, padding:"3px 10px", borderRadius:6,
+                    border:`1px solid ${C.sky}40`, background:C.sky+"10", cursor:"pointer"}}>
+                  Show in Chain
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+// ── Avoid Right Now Panel ────────────────────────────
+function AvoidRightNowPanel({ avoidItems }) {
+  const C = useC();
+  if (!avoidItems || !avoidItems.length) return null;
+
+  return (
+    <Card accent={C.red}>
+      <div style={{marginBottom:12}}>
+        <Lbl color={C.red}>Avoid Right Now</Lbl>
+        <div style={mono(9,C.mut)}>Strategies and structures that are poorly suited to this environment</div>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        {avoidItems.map((item, i) => {
+          const col = item.severity === "critical" ? C.red : C.amb;
+          return (
+            <div key={i} style={{
+              display:"flex", gap:10, alignItems:"flex-start",
+              padding:"8px 12px", borderRadius:8,
+              background: col + "08",
+              borderLeft: `3px solid ${col}`,
+            }}>
+              <span style={{flexShrink:0, ...mono(11, col), marginTop:1}}>{item.severity === "critical" ? "✗" : "!"}</span>
+              <div>
+                <span style={{...mono(11, C.txt, 700)}}>{item.label}</span>
+                <span style={{...mono(10, C.mut), marginLeft:8}}>{item.reason}</span>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </Card>
   );
@@ -4318,8 +5133,8 @@ function OptionsAdvancedPanel({ symbol, snapshotKey }) {
 
       {/* ── Section header ── */}
       <div style={{display:"flex",alignItems:"center",gap:10,paddingBottom:2,borderBottom:`1px solid ${C.bdr}`}}>
-        <Lbl color={C.sky}>Advanced Signal Panel · {symbol}</Lbl>
-        <div style={{...mono(9,C.mut)}}>Term Structure · Skew · HV Trend · Liquidity · Catalysts</div>
+        <Lbl color={C.sky}>Volatility Structure · {symbol}</Lbl>
+        <div style={{...mono(9,C.mut)}}>Why this environment exists — Term Structure · Skew · HV Trend · Liquidity · Catalysts</div>
       </div>
 
       {/* ── Row 1: Term Structure chart + Skew / Shape cards ── */}
@@ -4768,13 +5583,15 @@ function OptionsView() {
       // Load summary
       const sr = await fetch(`/api/options/${sym}/greeks/summary${exp?`?expiration=${exp}`:""}`);
       if (sr.ok) setSummary(await sr.json());
-      // Load ML strategy recommendations in parallel
+      // Load ML strategy recommendations + persist signal in parallel
       setMlRecs(null); setMlRecLoad(true);
       fetch(`/api/options/${sym}/recommend`)
         .then(rr => rr.ok ? rr.json() : null)
         .then(d => { if(d) setMlRecs(d); })
         .catch(()=>{})
         .finally(()=>setMlRecLoad(false));
+      // Fire-and-forget: persist options signal to Alpha engine
+      fetch(`/api/options/${sym}/signal`, { method: "POST" }).catch(() => {});
     } catch(e) { setError(e.message); }
     setLoading(false);
   };
@@ -4844,6 +5661,118 @@ function OptionsView() {
   const topOpps     = activeStrategy && visibleChain.length ? getTopOpportunities(activeStrategy, visibleChain) : [];
   const stratInsight = activeStrategy && topOpps.length ? getStrategyInsight(activeStrategy, topOpps, spot) : null;
 
+  // ── Options Environment Engine (extracted from inline IIFE) ──
+  const optionsEnv = useMemo(() => {
+    if (!chain || !chain.length || !summary) return null;
+    const hv20 = summary?.hv20 || 0;
+    const ivRankVal = summary?.iv_rank || 50;
+    const spot0 = chain[0]?.spot || 0;
+
+    // Vol Regime
+    const avgIV = chain.reduce((s,c) => s + (c.implied_vol||0), 0) / chain.length;
+    const ivHvRatio = hv20 > 0 ? avgIV / hv20 : 1;
+    const volRegime = ivHvRatio > 1.3 ? "Expensive" : ivHvRatio < 0.9 ? "Cheap" : "Fair";
+
+    // Skew Regime
+    const callsAll = chain.filter(c => c.option_type === "call" && c.implied_vol > 0);
+    const putsAll = chain.filter(c => c.option_type === "put" && c.implied_vol > 0);
+    const avgCallIV = callsAll.length ? callsAll.reduce((s,c)=>s+c.implied_vol,0)/callsAll.length : 0;
+    const avgPutIV = putsAll.length ? putsAll.reduce((s,c)=>s+c.implied_vol,0)/putsAll.length : 0;
+    const skewRegime = avgPutIV > avgCallIV * 1.1 ? "Put-rich" : avgCallIV > avgPutIV * 1.1 ? "Call-rich" : "Flat";
+
+    // Liquidity Regime
+    const liquidContracts = chain.filter(c => (c.open_interest||0) >= 500 && (c.bid||0) > 0);
+    const liqRatio = liquidContracts.length / Math.max(chain.length, 1);
+    const liquidityRegime = liqRatio > 0.4 ? "Strong" : liqRatio > 0.2 ? "Mixed" : "Weak";
+
+    // Strategy Bias (kept for backward-compat with regime tiles)
+    const strategyBias = volRegime === "Expensive" ? "Sell Premium" : volRegime === "Cheap" ? "Buy Vol" : (skewRegime === "Put-rich" ? "Neutral Structures" : "Sell Premium");
+
+    const pcRatio = summary?.put_call_ratio || null;
+    const ivHvSpread = summary?.iv_hv_spread != null ? summary.iv_hv_spread : (avgIV - hv20);
+    const maxPainDist = summary?.max_pain && spot0 ? (summary.max_pain - spot0) / spot0 : null;
+
+    const regimeData = { volRegime, skewRegime, liquidityRegime, ivRank: ivRankVal, pcRatio, ivHvRatio, ivHvSpread, maxPainDist };
+
+    // Environment classification
+    const env = classifyOptionsEnvironment(regimeData);
+
+    // Best trade types
+    const bestTrades = deriveBestTradeTypes(env.label, regimeData);
+
+    // What to avoid
+    const avoidItems = deriveWhatToAvoid(env.label, regimeData);
+
+    // Signal contract
+    const signalContract = buildOptionsSignalContract({
+      ...regimeData,
+      envLabel: env.label,
+      bestStrategies: bestTrades.map(t => t.strategy),
+      avoidStrategies: avoidItems.map(a => a.label),
+    });
+
+    // Contract scoring (same logic as before, for top opportunities)
+    const scoreContract = (c) => {
+      let liq = 0, vol = 50, struc = 50, strat = 50, cat = 50;
+      const mid = (c.bid > 0 && c.ask > 0) ? (c.bid + c.ask) / 2 : 0;
+      if (mid > 0) liq += 20;
+      const oi = c.open_interest || 0;
+      if (oi >= 5000) liq += 30; else if (oi >= 1000) liq += 22; else if (oi >= 250) liq += 14; else if (oi >= 50) liq += 6;
+      const v = c.volume || 0;
+      if (v >= 1000) liq += 25; else if (v >= 250) liq += 18; else if (v >= 50) liq += 10;
+      const spread = mid > 0 ? Math.abs((c.ask||0) - (c.bid||0)) / mid : 1;
+      if (spread <= 0.02) liq += 25; else if (spread <= 0.05) liq += 18; else if (spread <= 0.10) liq += 8; else liq -= 10;
+      liq = Math.max(0, Math.min(100, liq));
+
+      const iv = c.implied_vol || 0;
+      if (hv20 > 0) {
+        const ratio = iv / hv20;
+        if (ratio < 0.9) vol += 20; else if (ratio < 1.1) vol += 10; else if (ratio > 1.4) vol -= 15;
+      }
+      if (ivRankVal < 30) vol += 15; else if (ivRankVal > 70) vol -= 15;
+      vol = Math.max(0, Math.min(100, vol));
+
+      const delta = Math.abs(c.delta || 0);
+      const dte = c.expiration ? Math.round((new Date(c.expiration) - new Date()) / 86400000) : 30;
+      if (delta >= 0.2 && delta <= 0.5) struc += 15;
+      if (dte >= 14 && dte <= 60) struc += 10;
+      struc = Math.max(0, Math.min(100, struc));
+
+      if (liquidityRegime === "Strong") strat += 10; else if (liquidityRegime === "Weak") strat -= 20;
+      strat = Math.max(0, Math.min(100, strat));
+
+      const composite = Math.round(0.25 * liq + 0.25 * vol + 0.20 * struc + 0.20 * strat + 0.10 * cat);
+      return { liq, vol, struc, strat, cat, composite };
+    };
+
+    // Score and rank
+    const scored = chain
+      .filter(c => (c.bid||0) > 0 || (c.open_interest||0) >= 50)
+      .map(c => ({...c, score: scoreContract(c)}))
+      .sort((a,b) => b.score.composite - a.score.composite);
+
+    // Top opportunities by category
+    const topCall = scored.find(c => c.option_type === "call" && Math.abs(c.delta||0) >= 0.3 && Math.abs(c.delta||0) <= 0.6);
+    const topPut = scored.find(c => c.option_type === "put" && Math.abs(c.delta||0) >= 0.2 && Math.abs(c.delta||0) <= 0.5);
+    const topHedge = scored.filter(c => c.option_type === "put" && Math.abs(c.delta||0) >= 0.15 && Math.abs(c.delta||0) <= 0.35).sort((a,b) => b.score.composite - a.score.composite)[0];
+    const topPremium = scored.filter(c => Math.abs(c.theta||0) > 0 && (c.open_interest||0) >= 500).sort((a,b) => Math.abs(b.theta||0) - Math.abs(a.theta||0))[0];
+    const topLongVol = scored.filter(c => (c.gamma||0) > 0.005).sort((a,b) => (b.gamma||0) - (a.gamma||0))[0];
+
+    const opps = [
+      topCall && {cat:"Directional Call", c:topCall, thesis:`Efficient upside at ${String.fromCharCode(916)}${Math.abs(topCall.delta||0).toFixed(2)} with strong liquidity`, risk:"Needs directional follow-through; time decay if range-bound"},
+      topPut && {cat:"Directional Put", c:topPut, thesis:`Downside exposure at ${String.fromCharCode(916)}${Math.abs(topPut.delta||0).toFixed(2)}, composite ${topPut.score.composite}`, risk:"Skew may be rich — check cost vs hedge value"},
+      topHedge && {cat:"Hedge Put", c:topHedge, thesis:`Efficient downside hedge at ${String.fromCharCode(916)}${Math.abs(topHedge.delta||0).toFixed(2)}`, risk:"Skew is expensive — convexity comes at a premium"},
+      topPremium && {cat:"Premium Sale", c:topPremium, thesis:`Elevated IV and neutral backdrop support premium collection`, risk:"Upside breakout or gap invalidates the thesis"},
+      topLongVol && {cat:"Long Vol", c:topLongVol, thesis:`High gamma for event convexity`, risk:"Theta bleed if no move materializes"},
+    ].filter(Boolean);
+
+    return {
+      env, bestTrades, avoidItems, signalContract,
+      regimeData, volRegime, skewRegime, liquidityRegime, strategyBias,
+      ivHvRatio, avgCallIV, avgPutIV, liquidContracts, opps, scored,
+    };
+  }, [chain, summary]);
+
   // Apply strategy color border to a table cell: edge = "L" | "M" | "R"
   const scs = (base, score, edge) => {
     if (!score || !SCORE_COLORS[score]) return base;
@@ -4905,178 +5834,92 @@ function OptionsView() {
         {error && <div style={{...mono(10,C.red),marginTop:8,padding:"6px 10px",borderRadius:6,background:C.red+"10",border:`1px solid ${C.red}30`}}>✗ {error}</div>}
       </Card>
 
-      {/* ═══════════ OPTIONS REGIME SNAPSHOT + TOP OPPORTUNITIES ═══════════ */}
-      {chain && chain.length > 0 && summary && (()=>{
-        // ── Contract Scoring Engine ──
-        const hv20 = summary?.hv20 || 0;
-        const ivRank = summary?.iv_rank || 50;
-        const spot0 = chain[0]?.spot || 0;
+      {/* ═══════════ 1. OPTIONS ENVIRONMENT (conclusion-first) ═══════════ */}
+      {optionsEnv && (
+        <OptionsEnvironmentCard env={optionsEnv.env} signalContract={optionsEnv.signalContract} regimeData={optionsEnv.regimeData}/>
+      )}
 
-        // Vol Regime
-        const avgIV = chain.reduce((s,c) => s + (c.implied_vol||0), 0) / chain.length;
-        const ivHvRatio = hv20 > 0 ? avgIV / hv20 : 1;
-        const volRegime = ivHvRatio > 1.3 ? "Expensive" : ivHvRatio < 0.9 ? "Cheap" : "Fair";
+      {/* ═══════════ 2. BEST TRADE TYPES ═══════════ */}
+      {optionsEnv && (
+        <BestTradeTypesPanel bestTrades={optionsEnv.bestTrades} onSelectStrategy={setActiveStrategy}/>
+      )}
 
-        // Skew Regime (put vs call IV)
-        const calls = chain.filter(c => c.option_type === "call" && c.implied_vol > 0);
-        const puts = chain.filter(c => c.option_type === "put" && c.implied_vol > 0);
-        const avgCallIV = calls.length ? calls.reduce((s,c)=>s+c.implied_vol,0)/calls.length : 0;
-        const avgPutIV = puts.length ? puts.reduce((s,c)=>s+c.implied_vol,0)/puts.length : 0;
-        const skewRegime = avgPutIV > avgCallIV * 1.1 ? "Put-rich" : avgCallIV > avgPutIV * 1.1 ? "Call-rich" : "Flat";
+      {/* ═══════════ 3. AVOID RIGHT NOW ═══════════ */}
+      {optionsEnv && (
+        <AvoidRightNowPanel avoidItems={optionsEnv.avoidItems}/>
+      )}
 
-        // Liquidity Regime
-        const liquidContracts = chain.filter(c => (c.open_interest||0) >= 500 && (c.bid||0) > 0);
-        const liqRatio = liquidContracts.length / Math.max(chain.length, 1);
-        const liquidityRegime = liqRatio > 0.4 ? "Strong" : liqRatio > 0.2 ? "Mixed" : "Weak";
-
-        // Strategy Bias
-        const strategyBias = volRegime === "Expensive" ? "Sell Premium" : volRegime === "Cheap" ? "Buy Vol" : (skewRegime === "Put-rich" ? "Neutral Structures" : "Sell Premium");
-
-        // Contract scoring
-        const scoreContract = (c) => {
-          let liq = 0, vol = 50, struc = 50, strat = 50, cat = 50;
-          // Liquidity
-          const mid = (c.bid > 0 && c.ask > 0) ? (c.bid + c.ask) / 2 : 0;
-          if (mid > 0) liq += 20;
-          const oi = c.open_interest || 0;
-          if (oi >= 5000) liq += 30; else if (oi >= 1000) liq += 22; else if (oi >= 250) liq += 14; else if (oi >= 50) liq += 6;
-          const v = c.volume || 0;
-          if (v >= 1000) liq += 25; else if (v >= 250) liq += 18; else if (v >= 50) liq += 10;
-          const spread = mid > 0 ? Math.abs((c.ask||0) - (c.bid||0)) / mid : 1;
-          if (spread <= 0.02) liq += 25; else if (spread <= 0.05) liq += 18; else if (spread <= 0.10) liq += 8; else liq -= 10;
-          liq = Math.max(0, Math.min(100, liq));
-
-          // Vol value
-          const iv = c.implied_vol || 0;
-          if (hv20 > 0) {
-            const ratio = iv / hv20;
-            if (ratio < 0.9) vol += 20; else if (ratio < 1.1) vol += 10; else if (ratio > 1.4) vol -= 15;
-          }
-          if (ivRank < 30) vol += 15; else if (ivRank > 70) vol -= 15;
-          vol = Math.max(0, Math.min(100, vol));
-
-          // Structure
-          const delta = Math.abs(c.delta || 0);
-          const dte = c.expiration ? Math.round((new Date(c.expiration) - new Date()) / 86400000) : 30;
-          if (delta >= 0.2 && delta <= 0.5) struc += 15;
-          if (dte >= 14 && dte <= 60) struc += 10;
-          struc = Math.max(0, Math.min(100, struc));
-
-          // Strategy fit
-          if (liquidityRegime === "Strong") strat += 10; else if (liquidityRegime === "Weak") strat -= 20;
-          strat = Math.max(0, Math.min(100, strat));
-
-          const composite = Math.round(0.25 * liq + 0.25 * vol + 0.20 * struc + 0.20 * strat + 0.10 * cat);
-          return { liq, vol, struc, strat, cat, composite };
-        };
-
-        // Score and rank
-        const scored = chain
-          .filter(c => (c.bid||0) > 0 || (c.open_interest||0) >= 50)
-          .map(c => ({...c, score: scoreContract(c)}))
-          .sort((a,b) => b.score.composite - a.score.composite);
-
-        // Top opportunities by category
-        const topCall = scored.find(c => c.option_type === "call" && Math.abs(c.delta||0) >= 0.3 && Math.abs(c.delta||0) <= 0.6);
-        const topPut = scored.find(c => c.option_type === "put" && Math.abs(c.delta||0) >= 0.2 && Math.abs(c.delta||0) <= 0.5);
-        const topHedge = scored.filter(c => c.option_type === "put" && Math.abs(c.delta||0) >= 0.15 && Math.abs(c.delta||0) <= 0.35).sort((a,b) => b.score.composite - a.score.composite)[0];
-        const topPremium = scored.filter(c => Math.abs(c.theta||0) > 0 && (c.open_interest||0) >= 500).sort((a,b) => Math.abs(b.theta||0) - Math.abs(a.theta||0))[0];
-        const topLongVol = scored.filter(c => (c.gamma||0) > 0.005).sort((a,b) => (b.gamma||0) - (a.gamma||0))[0];
-
-        const opps = [
-          topCall && {cat:"Directional Call", c:topCall, reason:`Δ${Math.abs(topCall.delta||0).toFixed(2)}, strong liquidity (OI ${topCall.open_interest})`},
-          topPut && {cat:"Directional Put", c:topPut, reason:`Δ${Math.abs(topPut.delta||0).toFixed(2)}, composite score ${topPut.score.composite}`},
-          topHedge && {cat:"Hedge Put", c:topHedge, reason:`Efficient downside at Δ${Math.abs(topHedge.delta||0).toFixed(2)}`},
-          topPremium && {cat:"Premium Sale", c:topPremium, reason:`Θ ${topPremium.theta?.toFixed(3)}/day, OI ${topPremium.open_interest}`},
-          topLongVol && {cat:"Long Vol", c:topLongVol, reason:`Γ ${topLongVol.gamma?.toFixed(4)}, event convexity`},
-        ].filter(Boolean);
-
-        const regCol = ({Expensive:C.red, Fair:C.amb, Cheap:C.grn})[volRegime] || C.mut;
-        const skewCol = ({["Put-rich"]:C.red, Flat:C.amb, ["Call-rich"]:C.grn})[skewRegime] || C.mut;
-        const liqCol = ({Strong:C.grn, Mixed:C.amb, Weak:C.red})[liquidityRegime] || C.mut;
-        const biasCol = ({["Buy Vol"]:C.grn, ["Sell Premium"]:"#ff8a65", ["Neutral Structures"]:C.amb, Hedge:C.red, Avoid:C.red})[strategyBias] || C.mut;
-
-        // Regime bullets
-        const bullets = [];
-        if (volRegime === "Expensive") bullets.push("IV is elevated relative to realized — favor premium-selling strategies");
-        else if (volRegime === "Cheap") bullets.push("IV is cheap relative to realized — long vol structures may be attractive");
-        else bullets.push("IV is fairly priced — focus on structure and liquidity");
-        if (skewRegime === "Put-rich") bullets.push("Downside hedges are relatively expensive — put skew is elevated");
-        if (liquidityRegime === "Strong") bullets.push("Liquidity is strong across the chain — execution should be efficient");
-        else if (liquidityRegime === "Weak") bullets.push("Liquidity is thin — widen expected fill ranges and reduce size");
-        if (summary?.iv_rank != null) bullets.push(`IV Rank at ${summary.iv_rank.toFixed(0)}% — ${summary.iv_rank > 70 ? "historically elevated" : summary.iv_rank < 30 ? "historically low" : "mid-range"}`);
-
-        return (<>
-          {/* Options Regime Snapshot */}
-          <div style={{borderRadius:14, border:`1.5px solid ${regCol}30`, background:regCol+"07", padding:"18px 20px"}}>
-            <div style={{...mono(11, C.headingTxt, 700), marginBottom:12}}>OPTIONS REGIME</div>
-            <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10, marginBottom:14}}>
-              <div style={{padding:"10px 12px",borderRadius:10,background:C.dim,textAlign:"center"}}>
-                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>VOL REGIME</div>
-                <div style={mono(16, regCol, 800)}>{volRegime}</div>
-                <div style={mono(8, C.mut)}>IV/HV: {ivHvRatio.toFixed(2)}x</div>
-              </div>
-              <div style={{padding:"10px 12px",borderRadius:10,background:C.dim,textAlign:"center"}}>
-                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>SKEW</div>
-                <div style={mono(16, skewCol, 800)}>{skewRegime}</div>
-                <div style={mono(8, C.mut)}>P:{(avgPutIV*100).toFixed(0)}% C:{(avgCallIV*100).toFixed(0)}%</div>
-              </div>
-              <div style={{padding:"10px 12px",borderRadius:10,background:C.dim,textAlign:"center"}}>
-                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>LIQUIDITY</div>
-                <div style={mono(16, liqCol, 800)}>{liquidityRegime}</div>
-                <div style={mono(8, C.mut)}>{liquidContracts.length} tradable</div>
-              </div>
-              <div style={{padding:"10px 12px",borderRadius:10,background:C.dim,textAlign:"center"}}>
-                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>STRATEGY BIAS</div>
-                <div style={mono(14, biasCol, 800)}>{strategyBias}</div>
-              </div>
-            </div>
-            <div style={{display:"flex",flexDirection:"column",gap:4}}>
-              {bullets.map((b,i) => <div key={i} style={{display:"flex",gap:6}}><span style={mono(9,C.mut)}>•</span><span style={mono(9,C.txt)}>{b}</span></div>)}
-            </div>
+      {/* ═══════════ 4. TOP OPPORTUNITIES (revised) ═══════════ */}
+      {optionsEnv && optionsEnv.opps.length > 0 && (
+        <div style={{borderRadius:14, border:`1.5px solid ${C.pur}30`, background:C.pur+"07", padding:"18px 20px"}}>
+          <div style={{...mono(11, C.headingTxt, 700), marginBottom:12}}>TOP OPPORTUNITIES</div>
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : `repeat(${Math.min(optionsEnv.opps.length, 3)},1fr)`, gap:10}}>
+            {optionsEnv.opps.slice(0,5).map((opp,i) => {
+              const c = opp.c;
+              const dte = c.expiration ? Math.round((new Date(c.expiration) - new Date()) / 86400000) : 0;
+              return (
+                <div key={i} style={{padding:"12px 14px",borderRadius:10,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <Tag color={C.pur}>{opp.cat}</Tag>
+                    <span style={mono(14, c.score.composite >= 70 ? C.grn : c.score.composite >= 50 ? C.amb : C.red, 800)}>{c.score.composite}</span>
+                  </div>
+                  <div style={mono(12, C.headingTxt, 700)}>${c.strike} {c.option_type.toUpperCase()}</div>
+                  <div style={mono(9, C.mut)}>Exp: {c.expiration} · {dte}d · {String.fromCharCode(916)}{Math.abs(c.delta||0).toFixed(2)}</div>
+                  <div style={{display:"flex",justifyContent:"space-between",marginTop:6}}>
+                    <span style={mono(9, C.mut)}>Bid: ${(c.bid||0).toFixed(2)}</span>
+                    <span style={mono(9, C.mut)}>Ask: ${(c.ask||0).toFixed(2)}</span>
+                    <span style={mono(9, C.mut)}>IV: {((c.implied_vol||0)*100).toFixed(0)}%</span>
+                  </div>
+                  {/* Thesis + Risk */}
+                  <div style={{...mono(9, C.txt), marginTop:6, lineHeight:1.5}}>{opp.thesis}</div>
+                  <div style={{...mono(8, C.red+"cc"), marginTop:3, lineHeight:1.4}}>Risk: {opp.risk}</div>
+                  {/* Sub-scores */}
+                  <div style={{display:"flex",gap:4,marginTop:6,flexWrap:"wrap"}}>
+                    {[["Liq",c.score.liq],["Vol",c.score.vol],["Str",c.score.struc],["Fit",c.score.strat]].map(([label,val]) => (
+                      <span key={label} style={{...mono(7, val >= 60 ? C.grn : val >= 40 ? C.amb : C.red, 600),
+                        padding:"1px 5px",borderRadius:4,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                        {label}:{val}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
+        </div>
+      )}
 
-          {/* Top Opportunities */}
-          {opps.length > 0 && (
-            <div style={{borderRadius:14, border:`1.5px solid ${C.pur}30`, background:C.pur+"07", padding:"18px 20px"}}>
-              <div style={{...mono(11, C.headingTxt, 700), marginBottom:12}}>TOP OPPORTUNITIES</div>
-              <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : `repeat(${Math.min(opps.length, 3)},1fr)`, gap:10}}>
-                {opps.slice(0,5).map((opp,i) => {
-                  const c = opp.c;
-                  const dte = c.expiration ? Math.round((new Date(c.expiration) - new Date()) / 86400000) : 0;
-                  return (
-                    <div key={i} style={{padding:"12px 14px",borderRadius:10,background:C.dim,border:`1px solid ${C.bdr}`}}>
-                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                        <Tag color={C.pur}>{opp.cat}</Tag>
-                        <span style={mono(14, c.score.composite >= 70 ? C.grn : c.score.composite >= 50 ? C.amb : C.red, 800)}>{c.score.composite}</span>
-                      </div>
-                      <div style={mono(12, C.headingTxt, 700)}>${c.strike} {c.option_type.toUpperCase()}</div>
-                      <div style={mono(9, C.mut)}>Exp: {c.expiration} · {dte}d · Δ{Math.abs(c.delta||0).toFixed(2)}</div>
-                      <div style={{display:"flex",justifyContent:"space-between",marginTop:6}}>
-                        <span style={mono(9, C.mut)}>Bid: ${(c.bid||0).toFixed(2)}</span>
-                        <span style={mono(9, C.mut)}>Ask: ${(c.ask||0).toFixed(2)}</span>
-                        <span style={mono(9, C.mut)}>IV: {((c.implied_vol||0)*100).toFixed(0)}%</span>
-                      </div>
-                      <div style={{...mono(8, C.txt), marginTop:6, lineHeight:1.4}}>{opp.reason}</div>
-                      {/* Sub-scores */}
-                      <div style={{display:"flex",gap:4,marginTop:6,flexWrap:"wrap"}}>
-                        {[["Liq",c.score.liq],["Vol",c.score.vol],["Str",c.score.struc],["Fit",c.score.strat]].map(([label,val]) => (
-                          <span key={label} style={{...mono(7, val >= 60 ? C.grn : val >= 40 ? C.amb : C.red, 600),
-                            padding:"1px 5px",borderRadius:4,background:C.dim,border:`1px solid ${C.bdr}`}}>
-                            {label}:{val}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </>);
-      })()}
+      {/* ═══════════ 5. ACTION BRIEF ═══════════ */}
+      {summary && (
+        <ActionBriefPanel symbol={symbol} summary={summary} spot={spot}/>
+      )}
 
-      {/* ── Price Chart ── */}
+      {/* ═══════════ 6. EXPIRATION SELECTOR ═══════════ */}
+      {expirations.length > 0 && (
+        <Card>
+          <Lbl>Expiration</Lbl>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+            {expirations.map(exp=>(
+              <Pill key={exp} label={exp} active={selExp===exp} onClick={()=>setSelExp(exp)}/>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      {/* ═══════════ 7. KEY METRICS ROW ═══════════ */}
+      {summary && (
+        <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:12}}>
+          {[
+            {l:"Call OI",   v:summary.total_call_oi?.toLocaleString()||"—",  c:C.grn},
+            {l:"Put OI",    v:summary.total_put_oi?.toLocaleString()||"—",   c:C.red},
+            {l:"P/C Ratio", v:summary.put_call_ratio!=null?summary.put_call_ratio.toFixed(3):"—", c:summary.put_call_ratio>1?C.red:C.grn},
+            {l:"Max Γ Strike",v:summary.max_gamma_strike!=null?`$${summary.max_gamma_strike}`:"—", c:C.sky},
+            {l:"Avg Call IV",v:summary.avg_iv_call!=null?`${(summary.avg_iv_call*100).toFixed(1)}%`:"—", c:C.amb},
+          ].map(({l,v,c})=><Stat key={l} label={l} value={v} color={c}/>)}
+        </div>
+      )}
+
+      {/* ═══════════ 8. PRICE CHART ═══════════ */}
       {priceHistory.length > 0 && (
         <Card>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}}>
@@ -5307,37 +6150,50 @@ function OptionsView() {
         })()}
       </Card>
 
-      {/* Expirations */}
-      {expirations.length > 0 && (
-        <Card>
-          <Lbl>Expiration</Lbl>
-          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-            {expirations.map(exp=>(
-              <Pill key={exp} label={exp} active={selExp===exp} onClick={()=>setSelExp(exp)}/>
-            ))}
+      {/* ═══════════ OPTIONS REGIME TILES (supporting) ═══════════ */}
+      {optionsEnv && (() => {
+        const { volRegime, skewRegime, liquidityRegime, strategyBias, ivHvRatio, avgCallIV, avgPutIV, liquidContracts } = optionsEnv;
+        const regCol = ({Expensive:C.red, Fair:C.amb, Cheap:C.grn})[volRegime] || C.mut;
+        const skewCol = ({["Put-rich"]:C.red, Flat:C.amb, ["Call-rich"]:C.grn})[skewRegime] || C.mut;
+        const liqCol = ({Strong:C.grn, Mixed:C.amb, Weak:C.red})[liquidityRegime] || C.mut;
+        const biasCol = ({["Buy Vol"]:C.grn, ["Sell Premium"]:"#ff8a65", ["Neutral Structures"]:C.amb})[strategyBias] || C.mut;
+        return (
+          <div style={{borderRadius:14, border:`1.5px solid ${regCol}30`, background:regCol+"07", padding:"18px 20px"}}>
+            <div style={{...mono(11, C.headingTxt, 700), marginBottom:12}}>OPTIONS REGIME</div>
+            <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "repeat(2,1fr)" : "repeat(4,1fr)", gap:10}}>
+              <div style={{padding:"10px 12px",borderRadius:10,background:C.dim,textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>VOL REGIME</div>
+                <div style={mono(16, regCol, 800)}>{volRegime}</div>
+                <div style={mono(8, C.mut)}>IV/HV: {ivHvRatio.toFixed(2)}x</div>
+              </div>
+              <div style={{padding:"10px 12px",borderRadius:10,background:C.dim,textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>SKEW</div>
+                <div style={mono(16, skewCol, 800)}>{skewRegime}</div>
+                <div style={mono(8, C.mut)}>P:{(avgPutIV*100).toFixed(0)}% C:{(avgCallIV*100).toFixed(0)}%</div>
+              </div>
+              <div style={{padding:"10px 12px",borderRadius:10,background:C.dim,textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>LIQUIDITY</div>
+                <div style={mono(16, liqCol, 800)}>{liquidityRegime}</div>
+                <div style={mono(8, C.mut)}>{liquidContracts.length} tradable</div>
+              </div>
+              <div style={{padding:"10px 12px",borderRadius:10,background:C.dim,textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>STRATEGY BIAS</div>
+                <div style={mono(14, biasCol, 800)}>{strategyBias}</div>
+              </div>
+            </div>
           </div>
-        </Card>
-      )}
+        );
+      })()}
 
-      {/* Greeks Summary */}
-      {summary && (
-        <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:12}}>
-          {[
-            {l:"Call OI",   v:summary.total_call_oi?.toLocaleString()||"—",  c:C.grn},
-            {l:"Put OI",    v:summary.total_put_oi?.toLocaleString()||"—",   c:C.red},
-            {l:"P/C Ratio", v:summary.put_call_ratio!=null?summary.put_call_ratio.toFixed(3):"—", c:summary.put_call_ratio>1?C.red:C.grn},
-            {l:"Max Γ Strike",v:summary.max_gamma_strike!=null?`$${summary.max_gamma_strike}`:"—", c:C.sky},
-            {l:"Avg Call IV",v:summary.avg_iv_call!=null?`${(summary.avg_iv_call*100).toFixed(1)}%`:"—", c:C.amb},
-          ].map(({l,v,c})=><Stat key={l} label={l} value={v} color={c}/>)}
+      {/* ═══════════ SUPPORTING DIAGNOSTICS DIVIDER ═══════════ */}
+      {chain && symbol && (
+        <div style={{padding:"12px 0 4px",borderBottom:`1px solid ${C.bdr}`}}>
+          <div style={{...mono(11, C.headingTxt, 700), letterSpacing:"0.08em"}}>SUPPORTING DIAGNOSTICS</div>
+          <div style={mono(9, C.mut)}>Evidence supporting the environment classification above</div>
         </div>
       )}
 
-      {/* ── Action Brief ── */}
-      {summary && (
-        <ActionBriefPanel symbol={symbol} summary={summary} spot={spot}/>
-      )}
-
-      {/* ── Advanced Signal Panel (Term Structure · Skew · HV Trend · Liquidity · Catalysts) ── */}
+      {/* ── Term Structure · Skew · HV Trend · Liquidity · Catalysts ── */}
       {chain && symbol && (
         <OptionsAdvancedPanel symbol={symbol} snapshotKey={snapshotAt}/>
       )}
@@ -5401,7 +6257,7 @@ function OptionsView() {
         </Card>
       )}
 
-      {/* ── Advanced Analytics Panel ── */}
+      {/* ── IV Rank · GEX · Max Pain ── */}
       {chain && symbol && (
         <OptionsAnalyticsPanel symbol={symbol} expiration={selExp}/>
       )}
@@ -9730,149 +10586,471 @@ function PortfolioHubView() {
 }
 
 // Lab = Backtest runner + Results browser + Stochastic finance tools
+// ── Alpha Decision Logic ─────────────────────────────
+function classifyAlphaRegime(opps, data) {
+  const activeCount = opps.filter(o => o.status === "Active Trade").length;
+  const preEntryCount = opps.filter(o => o.status === "Pre-Entry").length;
+  const watchlistCount = opps.filter(o => o.status === "Watchlist").length;
+  const weakCount = opps.filter(o => o.status === "Weak" || o.status === "No Trade").length;
+  const avgScore = opps.length ? opps.reduce((s, o) => s + (o.alpha_score || 0), 0) / opps.length : 0;
+  const avgConf = opps.length ? opps.reduce((s, o) => s + (o.confidence || 0), 0) / opps.length : 0;
+
+  // Regime
+  let regime, regimeLabel;
+  if (activeCount >= 5) { regime = "High"; regimeLabel = "High Opportunity Environment"; }
+  else if (activeCount >= 2) { regime = "Moderate"; regimeLabel = "Moderate Opportunity Environment"; }
+  else if (preEntryCount >= 3) { regime = "Moderate"; regimeLabel = "Selective Opportunity Environment"; }
+  else { regime = "Low"; regimeLabel = "Low Opportunity Environment"; }
+
+  // Bias
+  const bias = avgScore >= 0.15 ? "Bullish" : avgScore <= -0.15 ? "Bearish" : "Neutral";
+
+  // Alignment — check domain agreement across opps
+  const agreements = opps.map(o => o.domain_agreement).filter(Boolean);
+  const highAgree = agreements.filter(a => a === "High Agreement").length;
+  const alignment = highAgree >= opps.length * 0.5 ? "High" : highAgree >= opps.length * 0.25 ? "Moderate" : agreements.length < 2 ? "Insufficient" : "Mixed";
+
+  // Explanation bullets
+  const explanation = [];
+  if (activeCount > 0) explanation.push(`${activeCount} active trade${activeCount > 1 ? "s" : ""} with high confidence and multi-domain confirmation`);
+  if (preEntryCount > 0) explanation.push(`${preEntryCount} pre-entry setup${preEntryCount > 1 ? "s" : ""} approaching actionable thresholds`);
+  if (watchlistCount > 0) explanation.push(`${watchlistCount} watchlist name${watchlistCount > 1 ? "s" : ""} with developing signals`);
+
+  // Opportunity type distribution
+  const typeMap = {};
+  opps.forEach(o => { if (o.opportunity_type) typeMap[o.opportunity_type] = (typeMap[o.opportunity_type] || 0) + 1; });
+  const topType = Object.entries(typeMap).sort((a, b) => b[1] - a[1])[0];
+  if (topType) explanation.push(`Dominant setup type: ${topType[0]} (${topType[1]} names)`);
+
+  if (avgConf < 40) explanation.push("Overall confidence is low — signals lack conviction");
+  else if (avgConf >= 65) explanation.push("Confidence is elevated — signals are well-confirmed");
+
+  // Constraints
+  const constraints = [];
+  if (activeCount === 0 && opps.length > 0) constraints.push("No opportunities meet multi-domain agreement + confidence threshold for active trading");
+  if (avgConf < 35) constraints.push("Domain confidence is weak across the universe");
+  const avgDomains = opps.length ? opps.reduce((s, o) => s + (o.domain_breakdown?.length || 0), 0) / opps.length : 0;
+  if (avgDomains < 2) constraints.push("Limited domain coverage — most names evaluated by fewer than 2 signal engines");
+  if (alignment === "Mixed" || alignment === "Insufficient") constraints.push("Weak cross-domain alignment — signals are not confirming each other");
+
+  // Domains active
+  const domainSet = new Set();
+  opps.forEach(o => (o.domain_breakdown || []).forEach(d => domainSet.add(d.domain)));
+  const domainsActive = [...domainSet];
+
+  return {
+    regime, regimeLabel, bias, confidence: Math.round(avgConf), alignment,
+    activeCount, preEntryCount, watchlistCount, weakCount,
+    universeSize: data?.universe_size || 0, evaluatedCount: data?.scored || 0,
+    explanation, constraints, domainsActive,
+  };
+}
+
+function deriveWhyNoActiveTrades(opps) {
+  const bullets = [];
+  if (!opps.length) {
+    bullets.push("No opportunities have been evaluated — the engine may still be computing");
+    return bullets;
+  }
+  const maxScore = Math.max(...opps.map(o => Math.abs(o.alpha_score || 0)));
+  const maxConf = Math.max(...opps.map(o => o.confidence || 0));
+  const avgDomains = opps.reduce((s, o) => s + (o.domain_breakdown?.length || 0), 0) / opps.length;
+
+  if (maxScore < 0.35) bullets.push(`Strongest signal is only ${(maxScore * 100).toFixed(0)} — below the 35-point active threshold`);
+  if (maxConf < 65) bullets.push(`Highest confidence is ${maxConf.toFixed(0)}% — below the 65% active threshold`);
+  if (avgDomains < 2) bullets.push("Most names are evaluated by only 1–2 domains — full coverage would improve scores");
+  if (maxScore >= 0.2 && maxConf >= 50) bullets.push("Pre-entry setups exist — these may upgrade to active with additional confirmation");
+
+  if (!bullets.length) bullets.push("Setups are developing but not yet actionable — environment favors patience");
+  return bullets;
+}
+
+function deriveBestNextTab(opp) {
+  const breakdown = opp?.domain_breakdown || [];
+  if (!breakdown.length) return "technical";
+  const best = [...breakdown].sort((a, b) => Math.abs(b.score || 0) - Math.abs(a.score || 0))[0];
+  const map = { technicals: "technical", quant: "signals", options: "options", pairs: "pairs", fundamentals: "advisor", macro: "macro", markets: "markets", sectors: "sectors" };
+  return map[best.domain] || "technical";
+}
+
 // ── AlphaView ─────────────────────────────────────────────────────────────────
-function AlphaView() {
+function AlphaView({onNav}) {
   const C = useC();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [filter, setFilter] = useState("all"); // all, active, preentry, watchlist
+  const [error, setError] = useState(null);
+  const [bucket, setBucket] = useState("all");
+  const [expanded, setExpanded] = useState(null);
 
-  useEffect(() => {
-    setLoading(true);
-    fetch("/api/alpha/opportunities")
+  const doFetch = (bust = false) => {
+    setLoading(true); setError(null);
+    const url = bust ? `/api/alpha/opportunities?bust=${Date.now()}` : "/api/alpha/opportunities";
+    fetch(url)
       .then(r => r.ok ? r.json() : Promise.reject("Alpha engine error"))
       .then(d => { setData(d); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, []);
+      .catch(e => { setError(String(e)); setLoading(false); });
+  };
+  useEffect(() => { doFetch(); }, []);
 
   const opps = data?.opportunities || [];
-  const filtered = filter === "all" ? opps : opps.filter(o => {
-    if (filter === "active") return o.status === "Active Trade";
-    if (filter === "preentry") return o.status === "Pre-Entry";
-    if (filter === "watchlist") return o.status === "Watchlist";
+  const filtered = bucket === "all" ? opps : opps.filter(o => {
+    if (bucket === "active") return o.status === "Active Trade";
+    if (bucket === "preentry") return o.status === "Pre-Entry";
+    if (bucket === "watchlist") return o.status === "Watchlist";
+    if (bucket === "weak") return o.status === "Weak" || o.status === "No Trade";
     return true;
   });
+
+  const regime = useMemo(() => classifyAlphaRegime(opps, data), [opps, data]);
+  const noActiveReasons = useMemo(() => regime?.activeCount === 0 ? deriveWhyNoActiveTrades(opps) : [], [opps, regime]);
 
   const biasCol = s => s >= 0.15 ? C.grn : s <= -0.15 ? C.red : C.amb;
   const statusCol = s => ({"Active Trade":C.grn,"Pre-Entry":C.sky,"Watchlist":C.amb,"Weak":C.red,"No Trade":C.mut})[s] || C.mut;
   const confCol = c => c >= 60 ? C.grn : c >= 35 ? C.amb : C.red;
+  const regimeCol = r => r === "High" ? C.grn : r === "Moderate" ? "#66bb6a" : C.amb;
+  const domainCol = d => ({technicals:C.sky, quant:"#b388ff", options:"#ff8a65", fundamentals:C.grn, pairs:C.amb, macro:C.mut, markets:C.mut, sectors:C.mut})[d] || C.mut;
 
-  // Regime snapshot
-  const activeCount = opps.filter(o => o.status === "Active Trade").length;
-  const preEntryCount = opps.filter(o => o.status === "Pre-Entry").length;
-  const avgScore = opps.length ? opps.reduce((s,o) => s + o.alpha_score, 0) / opps.length : 0;
-  const avgConf = opps.length ? opps.reduce((s,o) => s + o.confidence, 0) / opps.length : 0;
-  const regimeLabel = activeCount >= 5 ? "High Opportunity Environment" : activeCount >= 2 ? "Moderate Opportunity Environment" : preEntryCount >= 3 ? "Selective Opportunity Environment" : "Low Opportunity Environment";
-  const regCol = activeCount >= 5 ? C.grn : activeCount >= 2 ? "#66bb6a" : C.amb;
-
-  const bullets = [];
-  if (activeCount > 0) bullets.push(`${activeCount} active trade opportunities identified`);
-  if (preEntryCount > 0) bullets.push(`${preEntryCount} pre-entry setups approaching trigger`);
-  const topType = opps.length ? opps.reduce((acc, o) => { acc[o.opportunity_type] = (acc[o.opportunity_type]||0)+1; return acc; }, {}) : {};
-  const dominantType = Object.entries(topType).sort((a,b) => b[1]-a[1])[0];
-  if (dominantType) bullets.push(`Most common setup: ${dominantType[0]} (${dominantType[1]} tickers)`);
-  if (avgConf > 50) bullets.push("Overall confidence is moderate-to-high");
-  else bullets.push("Overall confidence is mixed — selective positioning warranted");
+  const regCol = regime ? regimeCol(regime.regime) : C.amb;
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:16}}>
-      <div>
-        <Lbl>Alpha</Lbl>
-        <div style={mono(10,C.mut)}>Unified opportunity engine — cross-domain ranking across the full universe</div>
+
+      {/* ── Header ── */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+        <div>
+          <Lbl>Alpha</Lbl>
+          <div style={mono(10,C.mut)}>Unified opportunity engine — cross-domain ranking across the full universe</div>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {data?.timestamp && <Tag color={C.mut}>Updated {data.timestamp.slice(11,16)} UTC</Tag>}
+          <button onClick={()=>doFetch(true)} disabled={loading}
+            style={{display:"flex",alignItems:"center",gap:5,...mono(9,loading?C.grn:C.mut),
+              padding:"5px 12px",borderRadius:8,border:`1px solid ${loading?C.grn+"55":C.bdr}`,
+              background:loading?C.grnBg:"transparent",cursor:loading?"not-allowed":"pointer"}}>
+            <RefreshCw size={11} style={{animation:loading?"spin 0.8s linear infinite":undefined}}/>
+            {loading ? "Scanning..." : "Refresh"}
+          </button>
+        </div>
       </div>
 
-      {loading && <Card><div style={{...mono(11,C.mut),textAlign:"center",padding:"40px 0"}}>Scanning universe and computing Alpha scores...</div></Card>}
+      {loading && !data && <Card><div style={{...mono(11,C.mut),textAlign:"center",padding:"40px 0"}}>Scanning universe and computing Alpha scores...</div></Card>}
+      {error && !loading && <Card><div style={{...mono(10,C.red),padding:"6px 0"}}>⚠ {error}</div></Card>}
 
-      {data && (<>
-        {/* ── ALPHA REGIME SNAPSHOT ── */}
+      {data && regime && (<>
+
+        {/* ═══════════ 1. ALPHA REGIME CARD (expanded) ═══════════ */}
         <div style={{borderRadius:14,border:`1.5px solid ${regCol}30`,background:regCol+"07",padding:"18px 20px"}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:12,marginBottom:14}}>
             <div>
               <div style={{...mono(9,C.mut,700),letterSpacing:"0.1em",marginBottom:4}}>ALPHA REGIME</div>
-              <div style={mono(18, regCol, 800)}>{regimeLabel}</div>
+              <div style={mono(20, regCol, 800)}>{regime.regimeLabel}</div>
             </div>
             <div style={{display:"flex",gap:16,flexWrap:"wrap"}}>
               <div style={{textAlign:"center"}}>
                 <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>NET BIAS</div>
-                <div style={mono(14, biasCol(avgScore), 700)}>{avgScore >= 0.15 ? "Bullish" : avgScore <= -0.15 ? "Bearish" : "Neutral"}</div>
+                <div style={mono(14, biasCol(regime.bias === "Bullish" ? 0.3 : regime.bias === "Bearish" ? -0.3 : 0), 700)}>{regime.bias}</div>
               </div>
               <div style={{textAlign:"center"}}>
                 <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>CONFIDENCE</div>
-                <div style={mono(14, confCol(avgConf), 700)}>{avgConf.toFixed(0)}%</div>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <div style={{width:40,height:5,background:C.dim,borderRadius:3,overflow:"hidden"}}>
+                    <div style={{width:`${regime.confidence}%`,height:"100%",background:confCol(regime.confidence),borderRadius:3}}/>
+                  </div>
+                  <span style={mono(14, confCol(regime.confidence), 700)}>{regime.confidence}%</span>
+                </div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>ALIGNMENT</div>
+                <div style={mono(12, regime.alignment === "High" ? C.grn : regime.alignment === "Moderate" ? C.amb : C.red, 700)}>{regime.alignment}</div>
               </div>
               <div style={{textAlign:"center"}}>
                 <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>ACTIVE</div>
-                <div style={mono(14, activeCount > 0 ? C.grn : C.mut, 700)}>{activeCount}</div>
+                <div style={mono(14, regime.activeCount > 0 ? C.grn : C.mut, 700)}>{regime.activeCount}</div>
               </div>
               <div style={{textAlign:"center"}}>
                 <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>PRE-ENTRY</div>
-                <div style={mono(14, preEntryCount > 0 ? C.sky : C.mut, 700)}>{preEntryCount}</div>
+                <div style={mono(14, regime.preEntryCount > 0 ? C.sky : C.mut, 700)}>{regime.preEntryCount}</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>WATCHLIST</div>
+                <div style={mono(14, regime.watchlistCount > 0 ? C.amb : C.mut, 700)}>{regime.watchlistCount}</div>
               </div>
               <div style={{textAlign:"center"}}>
                 <div style={{...mono(8,C.mut,600),letterSpacing:"0.08em"}}>UNIVERSE</div>
-                <div style={mono(14, C.headingTxt, 700)}>{data.scored}/{data.universe_size}</div>
+                <div style={mono(14, C.headingTxt, 700)}>{regime.evaluatedCount}/{regime.universeSize}</div>
               </div>
             </div>
           </div>
+
+          {/* Domains active */}
+          {regime.domainsActive.length > 0 && (
+            <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:10,flexWrap:"wrap"}}>
+              <span style={{...mono(8, C.mut, 600), letterSpacing:"0.06em"}}>DOMAINS:</span>
+              {regime.domainsActive.map(d => (
+                <span key={d} style={{...mono(8, domainCol(d), 600), padding:"1px 7px", borderRadius:4, background:domainCol(d)+"15", border:`1px solid ${domainCol(d)}25`}}>
+                  {d.charAt(0).toUpperCase()+d.slice(1)}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {/* Explanation bullets */}
           <div style={{display:"flex",flexDirection:"column",gap:4}}>
-            {bullets.map((b,i) => <div key={i} style={{display:"flex",gap:6}}><span style={mono(9,C.mut)}>•</span><span style={mono(9,C.txt)}>{b}</span></div>)}
+            {regime.explanation.map((b,i) => <div key={i} style={{display:"flex",gap:6}}><span style={mono(9,C.mut)}>•</span><span style={mono(9,C.txt)}>{b}</span></div>)}
           </div>
+
+          {/* Main constraint */}
+          {regime.constraints.length > 0 && (
+            <div style={{marginTop:10,padding:"8px 12px",borderRadius:8,background:C.amb+"08",border:`1px solid ${C.amb}20`}}>
+              <div style={{...mono(8, C.amb, 700), letterSpacing:"0.06em", marginBottom:3}}>MAIN CONSTRAINT</div>
+              <div style={mono(9, C.txt)}>{regime.constraints[0]}</div>
+            </div>
+          )}
         </div>
 
-        {/* ── FILTERS ── */}
-        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-          {[["all","All"],["active","Active Trade"],["preentry","Pre-Entry"],["watchlist","Watchlist"]].map(([k,l]) => (
-            <Pill key={k} label={l} active={filter===k} onClick={()=>setFilter(k)}/>
+        {/* ═══════════ 2. WHY NO ACTIVE TRADES? ═══════════ */}
+        {regime.activeCount === 0 && noActiveReasons.length > 0 && (
+          <div style={{borderRadius:12,border:`1px solid ${C.amb}25`,background:C.amb+"06",padding:"14px 18px"}}>
+            <div style={{...mono(10, C.amb, 700), marginBottom:8}}>WHY NO ACTIVE TRADES?</div>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+              {noActiveReasons.map((r,i) => <div key={i} style={{display:"flex",gap:6}}><span style={mono(9,C.amb)}>•</span><span style={mono(9,C.txt)}>{r}</span></div>)}
+            </div>
+          </div>
+        )}
+
+        {/* ═══════════ 3. BUCKET TABS ═══════════ */}
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+          {[
+            ["all","All",opps.length],
+            ["active","Active",regime.activeCount],
+            ["preentry","Pre-Entry",regime.preEntryCount],
+            ["watchlist","Watchlist",regime.watchlistCount],
+            ["weak","Weak",regime.weakCount],
+          ].map(([k,l,count]) => (
+            <button key={k} onClick={()=>{setBucket(k);setExpanded(null);}}
+              style={{...mono(10, bucket===k?"#000":C.mut, bucket===k?700:400),
+                padding:"5px 14px",borderRadius:20,cursor:"pointer",transition:"all .15s",
+                border:`1px solid ${bucket===k?regCol:C.bdr}`,
+                background:bucket===k?regCol:C.dim}}>
+              {l} <span style={{...mono(8, bucket===k?"#000":C.mut), marginLeft:3}}>{count}</span>
+            </button>
           ))}
         </div>
 
-        {/* ── OPPORTUNITY FEED ── */}
+        {/* ═══════════ 4. RANKED OPPORTUNITIES TABLE ═══════════ */}
         <Card>
-          <Lbl>RANKED OPPORTUNITIES</Lbl>
-          <div style={{display:"flex",flexDirection:"column",gap:8}}>
-            {filtered.length === 0 && <div style={mono(10,C.mut)}>No opportunities match current filter.</div>}
-            {filtered.map((opp,i) => (
-              <div key={opp.symbol} style={{display:"grid",gridTemplateColumns: C.isMobile ? "1fr" : "60px 1fr 80px 80px 100px 120px",gap:8,alignItems:"center",padding:"10px 14px",borderRadius:10,background:C.dim,border:`1px solid ${statusCol(opp.status)}20`}}>
-                {/* Rank */}
-                <div style={mono(14, C.mut, 700)}>#{i+1}</div>
-                {/* Symbol + Name */}
-                <div>
-                  <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    <span style={mono(12, C.headingTxt, 700)}>{opp.symbol}</span>
-                    <span style={mono(9, C.mut)}>{opp.display_name}</span>
-                    <Tag color={statusCol(opp.status)}>{opp.status}</Tag>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <Lbl>RANKED OPPORTUNITIES</Lbl>
+            <Tag color={C.mut}>{filtered.length} results</Tag>
+          </div>
+
+          {/* Empty state with fallback */}
+          {filtered.length === 0 && (
+            <div style={{padding:"12px 0"}}>
+              <div style={mono(10, C.amb)}>No opportunities match the "{bucket}" filter.</div>
+              {opps.length > 0 && (
+                <div style={{marginTop:8}}>
+                  <div style={{...mono(9, C.mut), marginBottom:6}}>Best available across all buckets:</div>
+                  {opps.slice(0, 3).map(o => (
+                    <div key={o.symbol} style={{...mono(9, C.txt), marginBottom:2}}>{o.symbol} — {o.opportunity_type} (score: {(o.alpha_score*100).toFixed(0)}, conf: {o.confidence.toFixed(0)}%)</div>
+                  ))}
+                  <button onClick={()=>setBucket("all")} style={{...mono(9, C.sky, 700), marginTop:6, padding:"3px 10px", borderRadius:6, border:`1px solid ${C.sky}40`, background:C.sky+"10", cursor:"pointer"}}>Show All</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{display:"flex",flexDirection:"column",gap:6}}>
+            {filtered.map((opp,i) => {
+              const isExpanded = expanded === opp.symbol;
+              const bestTab = deriveBestNextTab(opp);
+              const breakdown = opp.domain_breakdown || [];
+              return (
+                <div key={opp.symbol}>
+                  {/* ── Main Row ── */}
+                  <div onClick={()=>setExpanded(isExpanded ? null : opp.symbol)}
+                    style={{display:"grid",gridTemplateColumns: C.isMobile ? "1fr" : "40px 1fr 200px 70px 70px 90px",gap:8,alignItems:"center",
+                      padding:"10px 14px",borderRadius:isExpanded?"10px 10px 0 0":10,background:C.dim,
+                      border:`1px solid ${statusCol(opp.status)}${isExpanded?"40":"20"}`,cursor:"pointer",transition:"border-color .15s"}}>
+                    {/* Rank */}
+                    <div style={mono(13, C.mut, 700)}>#{i+1}</div>
+                    {/* Symbol + details */}
+                    <div>
+                      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+                        <span style={mono(12, C.headingTxt, 700)}>{opp.symbol}</span>
+                        <span style={mono(9, C.mut)}>{opp.display_name}</span>
+                        <Tag color={statusCol(opp.status)}>{opp.status}</Tag>
+                        <span style={mono(8, C.sky)}>{opp.opportunity_type}</span>
+                      </div>
+                      <div style={{...mono(8, C.mut), marginTop:3, lineHeight:1.5}}>
+                        {opp.top_drivers?.slice(0,1).map((d,j) => <span key={j}>{d}</span>)}
+                      </div>
+                    </div>
+                    {/* Domain breakdown mini bars */}
+                    <div style={{display:"flex",gap:3,alignItems:"center",flexWrap:"wrap"}}>
+                      {breakdown.map(d => {
+                        const pct = Math.min(100, Math.abs(d.score || 0) * 100);
+                        return (
+                          <div key={d.domain} style={{display:"flex",alignItems:"center",gap:3}} title={`${d.domain}: ${d.score > 0 ? "+" : ""}${(d.score*100).toFixed(0)}`}>
+                            <span style={{...mono(7, domainCol(d.domain), 600)}}>{d.domain.slice(0,4).toUpperCase()}</span>
+                            <div style={{width:30,height:4,background:C.dim,borderRadius:2,overflow:"hidden",border:`1px solid ${C.bdr}`}}>
+                              <div style={{width:`${pct}%`,height:"100%",background:d.score >= 0 ? C.grn : C.red,borderRadius:2}}/>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {breakdown.length === 0 && <span style={mono(7, C.mut)}>No domain data</span>}
+                    </div>
+                    {/* Score */}
+                    <div style={{textAlign:"center"}}>
+                      <div style={{...mono(7,C.mut,600),letterSpacing:"0.06em"}}>SCORE</div>
+                      <div style={mono(14, biasCol(opp.alpha_score), 800)}>{opp.alpha_score > 0 ? "+" : ""}{(opp.alpha_score*100).toFixed(0)}</div>
+                    </div>
+                    {/* Confidence */}
+                    <div style={{textAlign:"center"}}>
+                      <div style={{...mono(7,C.mut,600),letterSpacing:"0.06em"}}>CONF</div>
+                      <div style={mono(14, confCol(opp.confidence), 700)}>{opp.confidence.toFixed(0)}%</div>
+                    </div>
+                    {/* Posture */}
+                    <div style={{textAlign:"center"}}>
+                      <div style={{...mono(7,C.mut,600),letterSpacing:"0.06em"}}>POSTURE</div>
+                      <div style={mono(10, opp.posture?.includes("Long")?C.grn:opp.posture?.includes("Short")?C.red:C.amb, 600)}>{opp.posture}</div>
+                    </div>
                   </div>
-                  <div style={{display:"flex",gap:6,marginTop:3}}>
-                    <span style={mono(8, C.sky)}>{opp.opportunity_type}</span>
-                    {opp.top_drivers?.slice(0,1).map((d,j) => <span key={j} style={mono(8, C.mut)}>· {d}</span>)}
-                  </div>
+
+                  {/* ── Expandable Detail Drawer ── */}
+                  {isExpanded && (
+                    <div style={{padding:"14px 18px",borderRadius:"0 0 10px 10px",background:C.dim,
+                      border:`1px solid ${statusCol(opp.status)}40`,borderTop:"none"}}>
+                      <div style={{display:"grid",gridTemplateColumns: C.isMobile ? "1fr" : "1fr 1fr",gap:14}}>
+
+                        {/* Left: Signal Breakdown */}
+                        <div>
+                          <div style={{...mono(9, C.headingTxt, 700), marginBottom:8}}>SIGNAL BREAKDOWN</div>
+                          {breakdown.length > 0 ? breakdown.map(d => (
+                            <div key={d.domain} style={{display:"flex",alignItems:"center",gap:8,marginBottom:5}}>
+                              <span style={{...mono(9, domainCol(d.domain), 600), width:80}}>{d.domain.charAt(0).toUpperCase()+d.domain.slice(1)}</span>
+                              <div style={{flex:1,height:6,background:C.surf,borderRadius:3,overflow:"hidden"}}>
+                                <div style={{width:`${Math.min(100, Math.abs(d.score||0)*100)}%`,height:"100%",
+                                  background:d.score >= 0 ? C.grn : C.red,borderRadius:3,
+                                  marginLeft:d.score < 0 ? "auto" : 0}}/>
+                              </div>
+                              <span style={mono(10, d.score >= 0 ? C.grn : C.red, 700)}>{d.score > 0 ? "+" : ""}{(d.score*100).toFixed(0)}</span>
+                              {d.confidence != null && <span style={mono(8, C.mut)}>({d.confidence.toFixed(0)}%)</span>}
+                            </div>
+                          )) : <div style={mono(9, C.mut)}>No domain breakdown available</div>}
+
+                          {/* Status explanation */}
+                          <div style={{marginTop:12}}>
+                            <div style={{...mono(8, C.mut, 600), letterSpacing:"0.06em", marginBottom:4}}>STATUS</div>
+                            <div style={mono(9, C.txt)}>
+                              {opp.status === "Active Trade" ? "Score and confidence both meet active thresholds — this is actionable" :
+                               opp.status === "Pre-Entry" ? "Score or confidence is close but not yet at active threshold — monitor for upgrade" :
+                               opp.status === "Watchlist" ? "Signal exists but conviction is insufficient for positioning — developing setup" :
+                               opp.status === "Weak" ? "Marginal signals — not currently attractive" :
+                               "No actionable signal detected"}
+                            </div>
+                          </div>
+
+                          {/* What improves / invalidates */}
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:10}}>
+                            <div style={{padding:"6px 10px",borderRadius:6,background:C.grn+"08",border:`1px solid ${C.grn}18`}}>
+                              <div style={{...mono(7, C.grn, 700), letterSpacing:"0.06em", marginBottom:3}}>UPGRADES IF</div>
+                              <div style={mono(8, C.txt)}>
+                                {opp.status === "Active Trade" ? "Additional domain confirmation" :
+                                 opp.status === "Pre-Entry" ? "Score rises above 35 or confidence above 65%" :
+                                 "More domains produce confirming signals"}
+                              </div>
+                            </div>
+                            <div style={{padding:"6px 10px",borderRadius:6,background:C.red+"08",border:`1px solid ${C.red}18`}}>
+                              <div style={{...mono(7, C.red, 700), letterSpacing:"0.06em", marginBottom:3}}>INVALIDATES IF</div>
+                              <div style={mono(8, C.txt)}>
+                                {Math.abs(opp.alpha_score) > 0.2 ? "Score reverses sign or confidence drops below 25%" :
+                                 "Signals fade or domain agreement deteriorates"}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Right: Drivers + Risks */}
+                        <div>
+                          {/* Drivers */}
+                          {opp.top_drivers?.length > 0 && (
+                            <div style={{marginBottom:12}}>
+                              <div style={{...mono(9, C.grn, 700), marginBottom:6}}>DRIVERS</div>
+                              {opp.top_drivers.map((d,j) => (
+                                <div key={j} style={{display:"flex",gap:6,marginBottom:3}}>
+                                  <span style={mono(9, C.grn)}>+</span>
+                                  <span style={mono(9, C.txt)}>{d}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Risks */}
+                          {opp.risks?.length > 0 && (
+                            <div style={{marginBottom:12}}>
+                              <div style={{...mono(9, C.red, 700), marginBottom:6}}>RISKS</div>
+                              {opp.risks.map((r,j) => (
+                                <div key={j} style={{display:"flex",gap:6,marginBottom:3}}>
+                                  <span style={mono(9, C.red)}>-</span>
+                                  <span style={mono(9, C.txt)}>{r}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Best Next Action */}
+                          <div style={{marginTop:8,padding:"10px 14px",borderRadius:8,background:C.sky+"08",border:`1px solid ${C.sky}20`}}>
+                            <div style={{...mono(8, C.sky, 700), letterSpacing:"0.06em", marginBottom:4}}>BEST NEXT ACTION</div>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                              <span style={mono(9, C.txt)}>Inspect {opp.symbol} in {bestTab.charAt(0).toUpperCase()+bestTab.slice(1)} tab</span>
+                              {onNav && (
+                                <button onClick={(e)=>{e.stopPropagation();onNav(bestTab);}}
+                                  style={{...mono(9, C.sky, 700), padding:"4px 12px", borderRadius:6,
+                                    border:`1px solid ${C.sky}40`, background:C.sky+"10", cursor:"pointer"}}>
+                                  Go to {bestTab.charAt(0).toUpperCase()+bestTab.slice(1)} →
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
-                {/* Score */}
-                <div style={{textAlign:"center"}}>
-                  <div style={{...mono(7,C.mut,600),letterSpacing:"0.06em"}}>SCORE</div>
-                  <div style={mono(14, biasCol(opp.alpha_score), 800)}>{opp.alpha_score > 0 ? "+" : ""}{(opp.alpha_score*100).toFixed(0)}</div>
-                </div>
-                {/* Confidence */}
-                <div style={{textAlign:"center"}}>
-                  <div style={{...mono(7,C.mut,600),letterSpacing:"0.06em"}}>CONF</div>
-                  <div style={mono(14, confCol(opp.confidence), 700)}>{opp.confidence.toFixed(0)}%</div>
-                </div>
-                {/* Bias */}
-                <div style={{textAlign:"center"}}>
-                  <div style={{...mono(7,C.mut,600),letterSpacing:"0.06em"}}>BIAS</div>
-                  <div style={mono(11, biasCol(opp.alpha_score), 600)}>{opp.bias}</div>
-                </div>
-                {/* Posture */}
-                <div style={{textAlign:"center"}}>
-                  <div style={{...mono(7,C.mut,600),letterSpacing:"0.06em"}}>POSTURE</div>
-                  <div style={mono(10, opp.posture?.includes("Long")?C.grn:opp.posture?.includes("Short")?C.red:C.amb, 600)}>{opp.posture}</div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </Card>
 
-        <div style={mono(8,C.mut)}>Alpha scores computed from Technical + Sentiment signals. Full domain coverage expanding.</div>
+        {/* ═══════════ 5. COVERAGE & ENGINE HEALTH ═══════════ */}
+        <Card>
+          <Lbl>Coverage & Engine Health</Lbl>
+          <div style={{display:"grid",gridTemplateColumns: C.isMobile?"repeat(2,1fr)":"repeat(5,1fr)",gap:8}}>
+            <div style={{padding:"8px 10px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+              <div style={{...mono(8,C.mut,700),letterSpacing:"0.08em",marginBottom:2}}>UNIVERSE</div>
+              <div style={mono(14,C.headingTxt,800)}>{regime.universeSize} tickers</div>
+            </div>
+            <div style={{padding:"8px 10px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+              <div style={{...mono(8,C.mut,700),letterSpacing:"0.08em",marginBottom:2}}>EVALUATED</div>
+              <div style={mono(14,regime.evaluatedCount >= regime.universeSize * 0.8 ? C.grn : C.amb,800)}>{regime.evaluatedCount} / {regime.universeSize}</div>
+            </div>
+            <div style={{padding:"8px 10px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+              <div style={{...mono(8,C.mut,700),letterSpacing:"0.08em",marginBottom:2}}>DOMAINS LIVE</div>
+              <div style={mono(14,regime.domainsActive.length >= 3 ? C.grn : C.amb,800)}>{regime.domainsActive.length} active</div>
+            </div>
+            <div style={{padding:"8px 10px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+              <div style={{...mono(8,C.mut,700),letterSpacing:"0.08em",marginBottom:2}}>MISSING</div>
+              <div style={mono(10,C.mut,600)}>{["macro","markets","sectors","fundamentals"].filter(d => !regime.domainsActive.includes(d)).join(", ") || "None"}</div>
+            </div>
+            <div style={{padding:"8px 10px",borderRadius:8,background:C.dim,border:`1px solid ${C.bdr}`}}>
+              <div style={{...mono(8,C.mut,700),letterSpacing:"0.08em",marginBottom:2}}>LAST COMPUTE</div>
+              <div style={mono(10,C.mut,600)}>{data.timestamp ? data.timestamp.slice(0,19).replace("T"," ") + " UTC" : "—"}</div>
+            </div>
+          </div>
+        </Card>
+
       </>)}
     </div>
   );
@@ -12573,7 +13751,7 @@ function AppShell() {
     sectors:   <SectorsView/>,
     signals:   <SignalsView/>,
     pairs:     <PairsView/>,
-    alpha:     <AlphaView/>,
+    alpha:     <AlphaView onNav={(v)=>{setDetailSym(null);setView(v);}}/>,
     portfolio: <PortfolioHubView/>,
     paper:     <PaperTradingView/>,
     lab:       <LabView/>,
