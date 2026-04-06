@@ -3059,22 +3059,26 @@ def technical_analysis(
 # ---------------------------------------------------------------------------
 
 @app.get("/alpha/opportunities")
-def alpha_opportunities():
+def alpha_opportunities(bust: Optional[str] = None):
     """Scan the default universe and return ranked Alpha opportunities. DB-first, live fallback."""
     from alpha_engine import DEFAULT_UNIVERSE, rank_opportunity
     from precompute import db_cache_get, db_cache_set, TTL_ALPHA
     from cache import cache
 
-    # Layer 1: Memory cache
-    cached = cache.get("alpha:opportunities")
-    if cached:
-        return cached
+    if not bust:
+        # Layer 1: Memory cache
+        cached = cache.get("alpha:opportunities")
+        if cached:
+            return cached
 
-    # Layer 2: DB cache
-    db_cached = db_cache_get(SessionLocal, "alpha:opportunities")
-    if db_cached:
-        cache.set("alpha:opportunities", db_cached, 900)
-        return db_cached
+        # Layer 2: DB cache
+        db_cached = db_cache_get(SessionLocal, "alpha:opportunities")
+        if db_cached:
+            cache.set("alpha:opportunities", db_cached, 900)
+            return db_cached
+    else:
+        # Bust: clear memory cache
+        cache.delete("alpha:opportunities")
 
     # Layer 3: Compute from pre-cached domain scores (fast path)
     results = []
@@ -3089,27 +3093,35 @@ def alpha_opportunities():
             results.append(domain_cached)
             continue
 
-        # Fallback: compute live (slow path)
+        # Fallback: compute live (slow path — with per-ticker timeout)
         domain_outputs = []
-        try:
+        import concurrent.futures
+        def _compute_technical(s):
             from technical_analysis import fetch_and_compute
-            from signal_strategies import StrategyEngine
-            ta = fetch_and_compute(sym, period="1y", interval="1d")
+            from signal_strategies import StrategyEngine, god_mode
+            ta = fetch_and_compute(s, period="1y", interval="1d")
             if ta:
-                se = StrategyEngine()
-                sigs = se.check_all(ta)
-                gm = se.god_mode(sigs, ta)
+                se = StrategyEngine(ta)
+                sigs = se.check_all()
+                gm = god_mode(sigs, ta, s)
                 if gm:
                     net = gm.get("net_score", 0)
-                    domain_outputs.append({
+                    return {
                         "domain": "technicals", "score": max(-1, min(1, net)),
                         "confidence": gm.get("confidence", 50),
                         "bias": "Bullish" if net > 0.15 else ("Bearish" if net < -0.15 else "Neutral"),
                         "setup": gm.get("direction", ""),
                         "drivers": gm.get("primary_signals", [])[:2],
                         "risks": [],
-                    })
-        except Exception:
+                    }
+            return None
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_compute_technical, sym)
+                result = future.result(timeout=12)
+                if result:
+                    domain_outputs.append(result)
+        except (concurrent.futures.TimeoutError, Exception):
             pass
 
         try:
