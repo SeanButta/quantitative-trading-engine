@@ -12413,6 +12413,11 @@ const COMPANY_NAMES = {
   "KGC":"Kinross Gold","HL":"Hecla Mining","CDE":"Coeur Mining","WPM":"Wheaton Precious Metals",
   "FCX":"Freeport-McMoRan","TECK":"Teck Resources","IP":"International Paper","PKG":"Packaging Corp",
   "SEE":"Sealed Air","BALL":"Ball Corp","CCK":"Crown Holdings","OI":"O-I Glass",
+  "CTVA":"Corteva","MLM":"Martin Marietta","VMC":"Vulcan Materials","PPG":"PPG Industries",
+  "RPM":"RPM International","AVY":"Avery Dennison","AMCR":"Amcor","WRK":"WestRock",
+  "SON":"Sonoco Products","GEF":"Greif","SMG":"Scotts Miracle-Gro","HUN":"Huntsman",
+  "OLN":"Olin Corp","ASH":"Ashland","CBT":"Cabot Corp","KWR":"Quaker Houghton",
+  "AXTA":"Axalta Coating","SLVM":"Sylvamo","RYN":"Rayonier","PCH":"PotlatchDeltic",
   // Real Estate
   "AMT":"American Tower","PLD":"Prologis","CCI":"Crown Castle","EQIX":"Equinix","PSA":"Public Storage",
   "O":"Realty Income","SPG":"Simon Property Group","EQR":"Equity Residential","AVB":"AvalonBay",
