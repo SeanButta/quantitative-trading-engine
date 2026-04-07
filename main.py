@@ -1084,7 +1084,7 @@ def price_option(req: OptionPriceRequest):
 # ---------------------------------------------------------------------------
 
 @app.post("/options/refresh")
-@limiter.limit("3/minute")
+@limiter.limit("10/minute")
 def options_refresh(request: Request, req: OptionsRefreshRequest, background_tasks: BackgroundTasks,
                     _user=Depends(get_optional_user)):
     """Trigger a background fetch of options chains + Greeks for a symbol list."""

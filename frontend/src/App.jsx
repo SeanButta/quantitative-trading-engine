@@ -9088,25 +9088,6 @@ function MacroView() {
           </div>
         </div>
 
-        {/* ── 3. REGIME ENGINE ── */}
-        <Section accent={regimeColor(snap.regime)}>
-          <SectionTitle sub="Why this regime was selected">REGIME CLASSIFICATION</SectionTitle>
-          <div style={{display:"flex",gap:20,flexWrap:"wrap",marginBottom:14}}>
-            <div>
-              <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em"}}>CURRENT REGIME</div>
-              <div style={{...mono(18, regimeColor(snap.regime), 800), marginTop:4}}>{snap.regime}</div>
-            </div>
-            <div style={{flex:1, minWidth:200}}>
-              <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em", marginBottom:6}}>DRIVING PILLARS</div>
-              <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
-                {pillarOrder.filter(p => Math.abs(pillars[p]?.score || 0) >= 0.5).map(p => (
-                  <Tag key={p} color={scoreColor(pillars[p]?.score)}>{p.toUpperCase()} {pillars[p]?.score > 0 ? "+" : ""}{pillars[p]?.score?.toFixed(1)}</Tag>
-                ))}
-              </div>
-            </div>
-          </div>
-        </Section>
-
         {/* ── 5. NARRATIVE ENGINE ── */}
         {snapshot.narrative && (
           <Section accent={C.pur}>
@@ -11315,11 +11296,13 @@ function SectorsView() {
       .then(r=>r.ok?r.json():Promise.reject("Backend offline"))
       .then(d=>{
         setSummaries(d); setLoadingOv(false);
-        // Auto-refresh if no sectors are cached or all have zero data
-        const cached = (d || []).filter(s => s.cached);
-        const hasData = cached.some(s => s.total_market_cap > 0 || (s.etf_price != null && s.etf_price > 0));
-        if (cached.length === 0 || !hasData) {
-          triggerRefresh();
+        // Auto-refresh if most sectors are stale or missing data
+        const withData = (d || []).filter(s => s.cached && (s.total_market_cap > 0 || (s.etf_price != null && s.etf_price > 0)));
+        const staleSectors = (d || []).filter(s => !s.cached || (s.total_market_cap == null && (s.etf_price == null || s.etf_price <= 0)));
+        if (withData.length < 3 || staleSectors.length >= 6) {
+          // Refresh only the stale sectors to avoid hitting rate limits
+          const staleNames = staleSectors.map(s => s.sector);
+          if (staleNames.length > 0) triggerRefresh(staleNames.length <= 11 ? staleNames : undefined);
         }
       })
       .catch(e=>{setErr(String(e));setLoadingOv(false);});
