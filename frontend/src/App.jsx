@@ -10663,7 +10663,7 @@ function AlphaView({onNav}) {
   const [bucket, setBucket] = useState("all");
   const [expanded, setExpanded] = useState(null);
 
-  const doFetch = (bust = false) => {
+  const doFetch = (bust = true) => {
     setLoading(true); setError(null);
     const url = bust ? `/api/alpha/opportunities?bust=${Date.now()}` : "/api/alpha/opportunities";
     fetch(url)
