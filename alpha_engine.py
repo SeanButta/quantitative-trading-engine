@@ -208,7 +208,7 @@ def rank_opportunity(symbol: str, domain_outputs: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Default Universe
+# Default Universe (core tickers — always included)
 # ---------------------------------------------------------------------------
 
 DEFAULT_UNIVERSE = [
@@ -228,3 +228,62 @@ DEFAULT_UNIVERSE = [
     {"symbol": "XLK", "display_name": "Technology", "asset_type": "SectorETF", "sector": "Technology"},
     {"symbol": "XLE", "display_name": "Energy", "asset_type": "SectorETF", "sector": "Energy"},
 ]
+
+
+def get_full_universe() -> list[dict]:
+    """
+    Build the full Alpha universe dynamically from S&P 500 sector data
+    + Russell 2000 holdings.  Returns DEFAULT_UNIVERSE as fallback.
+    """
+    seen: set[str] = set()
+    universe: list[dict] = []
+
+    # 1. Always include core ETFs/names
+    for entry in DEFAULT_UNIVERSE:
+        if entry["symbol"] not in seen:
+            seen.add(entry["symbol"])
+            universe.append(entry)
+
+    # 2. S&P 500 from cached sector data
+    try:
+        import json
+        from pathlib import Path
+        sp_path = Path(__file__).parent / "runs" / "sp500_universe.json"
+        if sp_path.exists():
+            data = json.loads(sp_path.read_text())
+            sp_uni = data.get("universe", {})
+            if isinstance(sp_uni, dict):
+                for sector, tickers in sp_uni.items():
+                    for sym in tickers:
+                        sym = sym.replace(".", "-")  # yfinance compat
+                        if sym not in seen:
+                            seen.add(sym)
+                            universe.append({
+                                "symbol": sym,
+                                "display_name": sym,
+                                "asset_type": "Equity",
+                                "sector": sector,
+                            })
+    except Exception:
+        pass
+
+    # 3. Russell 2000 from cached or fetched data
+    try:
+        from extended_universe import get_russell2000_tickers
+        r2k = get_russell2000_tickers()
+        for sym in r2k:
+            sym = sym.replace(".", "-")
+            if sym not in seen:
+                seen.add(sym)
+                universe.append({
+                    "symbol": sym,
+                    "display_name": sym,
+                    "asset_type": "Equity",
+                    "sector": "Small Cap",
+                })
+    except Exception:
+        pass
+
+    logger.info("Full Alpha universe: %d tickers (core=%d, total=%d)",
+                len(universe), len(DEFAULT_UNIVERSE), len(universe))
+    return universe if len(universe) > len(DEFAULT_UNIVERSE) else DEFAULT_UNIVERSE

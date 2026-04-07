@@ -3061,7 +3061,7 @@ def technical_analysis(
 @app.get("/alpha/opportunities")
 def alpha_opportunities(bust: Optional[str] = None):
     """Scan the default universe and return ranked Alpha opportunities. DB-first, live fallback."""
-    from alpha_engine import DEFAULT_UNIVERSE, rank_opportunity
+    from alpha_engine import DEFAULT_UNIVERSE, get_full_universe, rank_opportunity
     from precompute import db_cache_get, db_cache_set, TTL_ALPHA
     from cache import cache
 
@@ -3081,8 +3081,10 @@ def alpha_opportunities(bust: Optional[str] = None):
         cache.delete("alpha:opportunities")
 
     # Layer 3: Compute from pre-cached domain scores (fast path)
+    # Use full universe (S&P 500 + Russell 2000) — all scoring is from cached data
+    full_universe = get_full_universe()
     results = []
-    for ticker in DEFAULT_UNIVERSE:
+    for ticker in full_universe:
         sym = ticker["symbol"]
         # Try to read pre-computed domain score
         domain_cached = db_cache_get(SessionLocal, f"alpha:domain:{sym}")
@@ -3136,9 +3138,13 @@ def alpha_opportunities(bust: Optional[str] = None):
 
         if _intermediate_outputs:
             ranking = rank_opportunity(sym, _intermediate_outputs)
-            ranking["display_name"] = ticker["display_name"]
+            # Enrich display_name from ticker snapshot if available
+            _dn = ticker["display_name"]
+            if _dn == sym and _ticker_snap:
+                _dn = _ticker_snap.get("name") or sym
+            ranking["display_name"] = _dn
             ranking["asset_type"] = ticker["asset_type"]
-            ranking["sector"] = ticker.get("sector", "")
+            ranking["sector"] = _ticker_snap.get("sector") if _ticker_snap else ticker.get("sector", "")
             results.append(ranking)
             # Cache this result for next time
             try:
@@ -3147,7 +3153,10 @@ def alpha_opportunities(bust: Optional[str] = None):
                 pass
             continue
 
-        # Fallback: compute live (slow path — with per-ticker timeout)
+        # Fallback: compute live (slow path — only for core universe tickers)
+        _core_syms = {t["symbol"] for t in DEFAULT_UNIVERSE}
+        if sym not in _core_syms:
+            continue  # skip live computation for extended universe — rely on cached data only
         domain_outputs = []
         import concurrent.futures
         def _compute_technical(s):
@@ -3228,7 +3237,7 @@ def alpha_opportunities(bust: Optional[str] = None):
 
     output = {
         "opportunities": results,
-        "universe_size": len(DEFAULT_UNIVERSE),
+        "universe_size": len(full_universe),
         "scored": len(results),
         "timestamp": datetime.utcnow().isoformat(),
     }
@@ -5657,6 +5666,14 @@ def _warmer_loop() -> None:
     # Short initial sleep so the process finishes startup before the first hit
     time.sleep(15)
     logger.info("Cache warmer started — running initial warm cycle")
+
+    # Pre-fetch Russell 2000 ticker list (cached for 7 days) so Alpha universe is populated
+    try:
+        from extended_universe import get_russell2000_tickers
+        r2k = get_russell2000_tickers()
+        logger.info("Warmer ✓ Russell 2000 universe: %d tickers", len(r2k))
+    except Exception as _r2e:
+        logger.warning("Warmer ✗ Russell 2000 fetch: %s", _r2e)
 
     while True:
         now = time.time()
