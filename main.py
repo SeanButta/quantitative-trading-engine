@@ -3120,6 +3120,31 @@ def alpha_opportunities(bust: Optional[str] = None):
                     "drivers": [f"Valuation: {_ticker_snap.get('val_label', 'UNKNOWN')}"],
                     "risks": [],
                 })
+            # Also derive a technicals-lite signal from RSI + price momentum if no TA cached
+            if not _ta_cached:
+                _rsi = _ticker_snap.get("rsi_14")
+                _chg1m = _ticker_snap.get("change_1m_pct")
+                _sig = _ticker_snap.get("signal_score")
+                if _rsi is not None or _sig is not None:
+                    _t_score = 0
+                    _t_drivers = []
+                    _t_conf = 35
+                    if _sig is not None:
+                        _t_score = max(-1, min(1, _sig / 3))  # signal_score range is -3 to +3
+                        _t_drivers.append(f"Signal: {_ticker_snap.get('signal_label', '')}")
+                        _t_conf = 40
+                    elif _rsi is not None:
+                        _t_score = max(-1, min(1, (_rsi - 50) / 50))  # RSI 0-100 → -1 to +1
+                        _t_drivers.append(f"RSI: {_rsi:.0f}")
+                    if _chg1m is not None:
+                        _t_drivers.append(f"1M: {'+' if _chg1m >= 0 else ''}{_chg1m:.1f}%")
+                    _intermediate_outputs.append({
+                        "domain": "technicals", "score": _t_score,
+                        "confidence": _t_conf,
+                        "bias": "Bullish" if _t_score > 0.15 else ("Bearish" if _t_score < -0.15 else "Neutral"),
+                        "drivers": _t_drivers,
+                        "risks": [],
+                    })
         # Also check for options domain output
         try:
             from models import DomainOutput as DO
@@ -5644,13 +5669,14 @@ def _warmer_loop() -> None:
 
     # Schedules: {name: (interval_seconds, last_run_timestamp)}
     schedules = {
-        "market_overview":   270,    # every 4.5 min  (TTL 5 min)
-        "feeds":             1680,   # every 28 min   (TTL 30 min)
-        "sentiment":         3300,   # every 55 min   (TTL 60 min)
-        "ta":                840,    # every 14 min   (TTL 15 min)
-        "sectors":           1200,   # every 20 min   (TTL 2 hours)
-        "alpha_precompute":  2400,   # every 40 min   (domain scores for Alpha universe)
-        "options":           5400,   # every 90 min   (market hours only, TTL 1 hour)
+        "market_overview":     270,    # every 4.5 min  (TTL 5 min)
+        "feeds":               1680,   # every 28 min   (TTL 30 min)
+        "sentiment":           3300,   # every 55 min   (TTL 60 min)
+        "ta":                  840,    # every 14 min   (TTL 15 min)
+        "sectors":             1200,   # every 20 min   (TTL 2 hours)
+        "alpha_precompute":    2400,   # every 40 min   (domain scores for Alpha universe)
+        "extended_universe":   14400,  # every 4 hours   (R2000 + non-S&P tickers)
+        "options":             5400,   # every 90 min   (market hours only, TTL 1 hour)
     }
     last: dict[str, float] = {k: 0.0 for k in schedules}
 
@@ -5846,6 +5872,69 @@ def _warmer_loop() -> None:
                 logger.info("Warmer ✓ alpha_precompute (%d computed, %d errors)", _ar["computed"], _ar["errors"])
             except Exception as e:
                 logger.warning("Warmer ✗ alpha_precompute: %s", e)
+
+        if now - last["extended_universe"] >= schedules["extended_universe"]:
+            last["extended_universe"] = now
+            try:
+                from extended_universe import get_russell2000_tickers
+                from sectors_engine import SectorProvider, TickerSnapshot
+                import dataclasses as _dc2
+
+                # Collect symbols already cached by the sector warmer
+                _cached_syms = set()
+                from sectors_engine import SECTOR_UNIVERSE as _SU
+                for _su_sector, _su_tickers in _SU.items():
+                    for _su_sym in _su_tickers:
+                        _cached_syms.add(_su_sym)
+                # Also check the S&P 500 dynamic universe
+                try:
+                    from sp500_universe import list_sp500_tickers
+                    for _sp_sym in list_sp500_tickers():
+                        _cached_syms.add(_sp_sym)
+                except Exception:
+                    pass
+
+                # R2000 tickers not in S&P 500
+                _r2k_all = get_russell2000_tickers()
+                _r2k_new = [s for s in _r2k_all if s.replace(".", "-") not in _cached_syms]
+                logger.info("Extended universe: %d R2000 tickers to process (%d already in S&P)", len(_r2k_new), len(_r2k_all) - len(_r2k_new))
+
+                if _r2k_new:
+                    _ext_provider = SectorProvider()
+                    _batch_size = 200   # process in batches to avoid overwhelming yfinance
+                    _ext_done = 0
+                    _ext_errors = 0
+                    from concurrent.futures import ThreadPoolExecutor as _TP, as_completed as _ac
+
+                    for _batch_start in range(0, len(_r2k_new), _batch_size):
+                        _batch = _r2k_new[_batch_start:_batch_start + _batch_size]
+                        with _TP(max_workers=15) as _ex:
+                            _futs = {_ex.submit(_ext_provider.fetch_ticker, _sym.replace(".", "-"), "Small Cap"): _sym for _sym in _batch}
+                            for _fut in _ac(_futs):
+                                _sym = _futs[_fut].replace(".", "-")
+                                try:
+                                    _snap = _fut.result()
+                                    if _snap and not _snap.error:
+                                        _set_cache(f"ticker:snapshot:{_snap.symbol}", _sanitize(_dc2.asdict(_snap)), _TTL_SECTORS, "warmer:extended")
+                                        _ext_done += 1
+                                    elif _snap and _snap.error:
+                                        _ext_errors += 1
+                                except Exception:
+                                    _ext_errors += 1
+                        logger.info("Extended universe batch %d–%d done (%d ok, %d err)", _batch_start, _batch_start + len(_batch), _ext_done, _ext_errors)
+                        # Brief pause between batches to avoid rate limiting
+                        import time as _t2
+                        _t2.sleep(5)
+
+                    # Clear alpha cache so expanded universe is picked up
+                    try:
+                        from cache import cache as _mcache2
+                        _mcache2.delete("alpha:opportunities")
+                    except Exception:
+                        pass
+                    logger.info("Warmer ✓ extended_universe: %d tickers cached, %d errors", _ext_done, _ext_errors)
+            except Exception as e:
+                logger.warning("Warmer ✗ extended_universe: %s", e)
 
         # Prune stale cache rows once an hour
         if now % 3600 < 30:
