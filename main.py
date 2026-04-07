@@ -3093,6 +3093,60 @@ def alpha_opportunities(bust: Optional[str] = None):
             results.append(domain_cached)
             continue
 
+        # Intermediate: construct domain signals from cached ticker snapshot + TA
+        _intermediate_outputs = []
+        _ta_cached = db_cache_get(SessionLocal, f"ta:{sym}:1y:1d") or _get_cache(f"ta:{sym}:1y:1d")
+        if _ta_cached and _ta_cached.get("god_mode"):
+            _gm = _ta_cached["god_mode"]
+            _net = _gm.get("net_score", 0)
+            _intermediate_outputs.append({
+                "domain": "technicals", "score": max(-1, min(1, _net)),
+                "confidence": _gm.get("confidence", 50),
+                "bias": "Bullish" if _net > 0.15 else ("Bearish" if _net < -0.15 else "Neutral"),
+                "setup": _gm.get("direction", ""),
+                "drivers": _gm.get("primary_signals", [])[:2],
+                "risks": [],
+            })
+        _ticker_snap = _get_cache(f"ticker:snapshot:{sym}")
+        if _ticker_snap:
+            _vs = _ticker_snap.get("val_score")
+            if _vs is not None:
+                _intermediate_outputs.append({
+                    "domain": "fundamentals", "score": max(-1, min(1, _vs / 2)),
+                    "confidence": 45,
+                    "bias": "Bullish" if _vs > 0.5 else ("Bearish" if _vs < -0.5 else "Neutral"),
+                    "drivers": [f"Valuation: {_ticker_snap.get('val_label', 'UNKNOWN')}"],
+                    "risks": [],
+                })
+        # Also check for options domain output
+        try:
+            from models import DomainOutput as DO
+            _odb = SessionLocal()
+            try:
+                _lo = _odb.query(DO).filter(DO.symbol == sym, DO.domain == "options").order_by(DO.timestamp.desc()).first()
+                if _lo and _lo.score is not None:
+                    _intermediate_outputs.append({
+                        "domain": "options", "score": _lo.score, "confidence": _lo.confidence or 50,
+                        "bias": _lo.bias or "Neutral", "drivers": _lo.drivers_json or [], "risks": _lo.risks_json or [],
+                    })
+            finally:
+                _odb.close()
+        except Exception:
+            pass
+
+        if _intermediate_outputs:
+            ranking = rank_opportunity(sym, _intermediate_outputs)
+            ranking["display_name"] = ticker["display_name"]
+            ranking["asset_type"] = ticker["asset_type"]
+            ranking["sector"] = ticker.get("sector", "")
+            results.append(ranking)
+            # Cache this result for next time
+            try:
+                db_cache_set(SessionLocal, f"alpha:domain:{sym}", ranking, 7200, source="alpha_intermediate")
+            except Exception:
+                pass
+            continue
+
         # Fallback: compute live (slow path — with per-ticker timeout)
         domain_outputs = []
         import concurrent.futures
@@ -5581,12 +5635,13 @@ def _warmer_loop() -> None:
 
     # Schedules: {name: (interval_seconds, last_run_timestamp)}
     schedules = {
-        "market_overview": 270,    # every 4.5 min  (TTL 5 min)
-        "feeds":           1680,   # every 28 min   (TTL 30 min)
-        "sentiment":       3300,   # every 55 min   (TTL 60 min)
-        "ta":              840,    # every 14 min   (TTL 15 min)
-        "sectors":         1200,   # every 20 min   (TTL 2 hours)
-        "options":         5400,   # every 90 min   (market hours only, TTL 1 hour)
+        "market_overview":   270,    # every 4.5 min  (TTL 5 min)
+        "feeds":             1680,   # every 28 min   (TTL 30 min)
+        "sentiment":         3300,   # every 55 min   (TTL 60 min)
+        "ta":                840,    # every 14 min   (TTL 15 min)
+        "sectors":           1200,   # every 20 min   (TTL 2 hours)
+        "alpha_precompute":  2400,   # every 40 min   (domain scores for Alpha universe)
+        "options":           5400,   # every 90 min   (market hours only, TTL 1 hour)
     }
     last: dict[str, float] = {k: 0.0 for k in schedules}
 
@@ -5630,7 +5685,9 @@ def _warmer_loop() -> None:
 
         if now - last["ta"] >= schedules["ta"]:
             last["ta"] = now
-            for sym in ["SPY", "QQQ"]:
+            from alpha_engine import DEFAULT_UNIVERSE as _ALPHA_UNI
+            _ta_symbols = list(dict.fromkeys([t["symbol"] for t in _ALPHA_UNI] + ["SPY", "QQQ"]))
+            for sym in _ta_symbols:
                 try:
                     from technical_analysis import fetch_and_compute
                     res = fetch_and_compute(sym, period="1y", interval="1d",
@@ -5642,7 +5699,13 @@ def _warmer_loop() -> None:
                         res["god_mode"] = _gm(res["signals"], res, sym)
                     except Exception:
                         res["signals"] = []; res["god_mode"] = None
-                    _set_cache(f"ta:{sym}:1y:1d", _sanitize(res), _TTL_TECHNICAL, "warmer:ta")
+                    _sanitized_ta = _sanitize(res)
+                    _set_cache(f"ta:{sym}:1y:1d", _sanitized_ta, _TTL_TECHNICAL, "warmer:ta")
+                    # Also persist to DB cache so Alpha intermediate layer can read it
+                    try:
+                        db_cache_set(SessionLocal, f"ta:{sym}:1y:1d", _sanitized_ta, 14400, source="warmer:ta")
+                    except Exception:
+                        pass
                     logger.info("Warmer ✓ ta:%s", sym)
                 except Exception as e:
                     logger.warning("Warmer ✗ ta:%s: %s", sym, e)
@@ -5703,6 +5766,12 @@ def _warmer_loop() -> None:
                             _TTL_SECTORS,
                             "warmer:sectors",
                         )
+                        # Dual-write: per-ticker snapshot so any endpoint can look up by symbol
+                        for _tk in _snap.tickers:
+                            try:
+                                _set_cache(f"ticker:snapshot:{_tk.symbol}", _sanitize(_dc.asdict(_tk)), _TTL_SECTORS, "warmer:ticker")
+                            except Exception:
+                                pass
                         logger.info("Warmer ✓ sector:%s (%d tickers)", _sector, len(_snap.tickers))
                     except Exception as _se:
                         logger.warning("Warmer ✗ sector:%s: %s", _sector, _se)
@@ -5743,6 +5812,23 @@ def _warmer_loop() -> None:
                             logger.warning("Warmer ✗ options:%s: %s", _sym, _oe)
                 except Exception as e:
                     logger.warning("Warmer ✗ options: %s", e)
+
+        if now - last["alpha_precompute"] >= schedules["alpha_precompute"]:
+            last["alpha_precompute"] = now
+            try:
+                from precompute import precompute_universe
+                from alpha_engine import DEFAULT_UNIVERSE as _AU
+                _alpha_syms = [t["symbol"] for t in _AU]
+                _ar = precompute_universe(SessionLocal, _alpha_syms, max_workers=4)
+                # Clear the alpha opportunities cache so next request picks up fresh scores
+                try:
+                    from cache import cache as _mcache
+                    _mcache.delete("alpha:opportunities")
+                except Exception:
+                    pass
+                logger.info("Warmer ✓ alpha_precompute (%d computed, %d errors)", _ar["computed"], _ar["errors"])
+            except Exception as e:
+                logger.warning("Warmer ✗ alpha_precompute: %s", e)
 
         # Prune stale cache rows once an hour
         if now % 3600 < 30:
