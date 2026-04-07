@@ -2202,12 +2202,9 @@ function SignalsView() {
     setJobStatus("pending");
     setPollActive(false);
     try {
-      // Use project-based endpoint when a project exists; otherwise quick mode
-      // (quick mode fetches data on-the-fly — no pre-built project needed)
-      const url = selProject
-        ? `/api/projects/${selProject}/signals/reading`
-        : `/api/signals/quick`;
-      const r = await fetch(url, {
+      // Use quick mode (fetches data on-the-fly) — works for any symbol
+      // without needing a pre-built project with ingested data
+      const r = await fetch("/api/signals/quick", {
         method:  "POST",
         headers: {"Content-Type":"application/json"},
         body:    JSON.stringify({symbol: symbol.trim().toUpperCase()}),
