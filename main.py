@@ -794,7 +794,7 @@ def compute_features(request: Request, project_id: str, req: ComputeFeaturesRequ
         features = engine.compute(raw)
 
         # Save features as parquet
-        feat_path = DATA_DIR / f"{project_id}_features.parquet"
+        feat_path = _safe_path(DATA_DIR, project_id, "_features.parquet")
         features.write_parquet(feat_path)
 
         return {
@@ -808,12 +808,12 @@ def compute_features(request: Request, project_id: str, req: ComputeFeaturesRequ
         raise
     except Exception as e:
         logger.exception("Feature computation failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 @app.get("/projects/{project_id}/features")
 def get_features(project_id: str, symbol: Optional[str] = None, limit: int = 100):
-    feat_path = DATA_DIR / f"{project_id}_features.parquet"
+    feat_path = _safe_path(DATA_DIR, project_id, "_features.parquet")
     if not feat_path.exists():
         raise HTTPException(status_code=404, detail="Features not computed yet.")
 
@@ -828,7 +828,7 @@ def get_features(project_id: str, symbol: Optional[str] = None, limit: int = 100
             "data": df.tail(limit).fill_nan(None).to_dicts(),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -871,7 +871,7 @@ def list_strategies(project_id: str):
 @app.post("/projects/{project_id}/signals/explore")
 def explore_conditional_prob(project_id: str, req: ConditionalProbExplorerRequest):
     """UI: Conditional Probability Explorer"""
-    feat_path = DATA_DIR / f"{project_id}_features.parquet"
+    feat_path = _safe_path(DATA_DIR, project_id, "_features.parquet")
     if not feat_path.exists():
         raise HTTPException(status_code=404, detail="Features not computed yet.")
 
@@ -891,7 +891,7 @@ def explore_conditional_prob(project_id: str, req: ConditionalProbExplorerReques
         return result
     except Exception as e:
         logger.exception("Conditional prob explorer failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -933,7 +933,7 @@ def run_backtest(request: Request, project_id: str, req: RunBacktestRequest, bac
             run.status = "complete"
             run.metrics = result.get("metrics", {})
             run.validation = result.get("validation", {})
-            run.artifacts_dir = str(ARTIFACTS_DIR / run_id)
+            run.artifacts_dir = str(_safe_path(ARTIFACTS_DIR, run_id))
             run.completed_at = datetime.utcnow()
         except Exception as e:
             logger.exception("Backtest failed")
@@ -1025,7 +1025,7 @@ def list_runs():
 
 @app.get("/runs/{run_id}/report")
 def get_report(run_id: str):
-    report_path = ARTIFACTS_DIR / run_id / "report.md"
+    report_path = _safe_path(ARTIFACTS_DIR, run_id) / "report.md"
     if not report_path.exists():
         raise HTTPException(status_code=404, detail="Report not found")
     return PlainTextResponse(report_path.read_text())
@@ -1050,7 +1050,7 @@ def get_run_metrics(run_id: str):
 
 @app.get("/runs/{run_id}/equity_curve")
 def get_equity_curve(run_id: str):
-    ec_path = ARTIFACTS_DIR / run_id / "equity_curve.json"
+    ec_path = _safe_path(ARTIFACTS_DIR, run_id) / "equity_curve.json"
     if not ec_path.exists():
         raise HTTPException(status_code=404, detail="Equity curve not found")
     return json.loads(ec_path.read_text())
@@ -1062,7 +1062,7 @@ def get_equity_curve(run_id: str):
 
 @app.post("/projects/{project_id}/optimize")
 def optimize_portfolio(project_id: str, req: OptimizeRequest):
-    feat_path = DATA_DIR / f"{project_id}_features.parquet"
+    feat_path = _safe_path(DATA_DIR, project_id, "_features.parquet")
     if not feat_path.exists():
         raise HTTPException(status_code=404, detail="Features not computed yet.")
 
@@ -1093,7 +1093,7 @@ def optimize_portfolio(project_id: str, req: OptimizeRequest):
         return result.to_dict()
     except Exception as e:
         logger.exception("Optimization failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -1110,7 +1110,7 @@ def simulate_gbm(req: GBMRequest):
             T=req.T, n_steps=req.n_steps, n_paths=req.n_paths,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 @app.post("/finance/options")
@@ -1120,7 +1120,7 @@ def price_option(req: OptionPriceRequest):
         from stochastic_finance import price_option_full
         return price_option_full(req.S, req.K, req.T, req.r, req.sigma, req.option_type)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -1130,7 +1130,7 @@ def price_option(req: OptionPriceRequest):
 @app.post("/options/refresh")
 @limiter.limit("10/minute")
 def options_refresh(request: Request, req: OptionsRefreshRequest, background_tasks: BackgroundTasks,
-                    _user=Depends(get_optional_user)):
+                    _user=Depends(get_current_user)):
     """Trigger a background fetch of options chains + Greeks for a symbol list."""
     from options_feed import SP500_UNIVERSE
     symbols = req.symbols or SP500_UNIVERSE
@@ -1693,7 +1693,7 @@ def lmsr_market(req: LMSRRequest):
             "trades": results,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -1714,7 +1714,7 @@ def create_signal_reading(
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
-        feat_path = DATA_DIR / f"{project_id}_features.parquet"
+        feat_path = _safe_path(DATA_DIR, project_id, "_features.parquet")
         if not feat_path.exists():
             raise HTTPException(
                 status_code=404,
@@ -2558,7 +2558,7 @@ def market_price_history(symbol: str, period: str = "3mo"):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -2705,7 +2705,7 @@ def market_overview():
 @app.post("/portfolio/analyze")
 @limiter.limit("5/minute")
 def portfolio_analyze(request: Request, req: PortfolioAnalyzeRequest, background_tasks: BackgroundTasks,
-                      _user=Depends(get_optional_user)):
+                      _user=Depends(get_current_user)):
     """Kick off an async portfolio analysis job. Poll GET /portfolio/job/{job_id}."""
     job_id = str(uuid.uuid4())[:12]
     holdings_data = [h.model_dump() for h in req.holdings]
@@ -3125,7 +3125,7 @@ def technical_analysis(
         return out
     except Exception as e:
         logger.exception("TA compute failed for %s", symbol)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -3761,7 +3761,7 @@ def ml_signal(req: MLSignalRequest, project_id: Optional[str] = None):
 
         # Try to load from project feature store
         if project_id:
-            feat_path = DATA_DIR / f"{project_id}_features.parquet"
+            feat_path = _safe_path(DATA_DIR, project_id, "_features.parquet")
             if feat_path.exists():
                 features = pl.read_parquet(feat_path)
 
@@ -3826,7 +3826,7 @@ def ml_signal(req: MLSignalRequest, project_id: Optional[str] = None):
         raise
     except Exception as e:
         logger.exception("ML signal failed for %s", req.symbol)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -3878,7 +3878,7 @@ def get_sentiment(symbol: str, window_hours: int = 24):
         return out
     except Exception as e:
         logger.exception("Sentiment failed for %s", sym)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 @app.get("/sentiment/market/overview")
@@ -3907,7 +3907,7 @@ def get_market_sentiment():
         return out
     except Exception as e:
         logger.exception("Market sentiment failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -4040,7 +4040,7 @@ def get_news_feed(symbol: str = "market", limit: int = 50, window_hours: int = 4
         return out
     except Exception as e:
         logger.exception("News feed failed for %s", symbol)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -4506,7 +4506,7 @@ def get_sectors_universe():
 
 
 @app.post("/sectors/universe/refresh")
-def refresh_sp500_universe(_user=Depends(get_optional_user)):
+def refresh_sp500_universe(_user=Depends(get_current_user)):
     """Force-refresh the S&P 500 universe list from Wikipedia."""
     try:
         from sp500_universe import get_sp500_universe
@@ -4552,7 +4552,7 @@ def get_combined_universe_endpoint():
 
 
 @app.post("/universe/refresh")
-def refresh_extended_universe(_user=Depends(get_optional_user)):
+def refresh_extended_universe(_user=Depends(get_current_user)):
     """Force-refresh Russell 1000, Russell 2000, and EDGAR CIK maps from source."""
     from extended_universe import (
         get_edgar_cik_map, get_russell1000_tickers, get_russell2000_tickers
@@ -4600,7 +4600,7 @@ def get_ticker_filings(symbol: str, limit: int = 20):
 
 @app.post("/sectors/refresh")
 def refresh_sectors(background_tasks: BackgroundTasks, body: Optional[dict] = None,
-                    _user=Depends(get_optional_user)):
+                    _user=Depends(get_current_user)):
     """Trigger background refresh of one or all sectors. Body: {sectors?: [str]}"""
     from sectors_engine import SECTOR_UNIVERSE
     target = (body or {}).get("sectors") or list(SECTOR_UNIVERSE.keys())
@@ -4738,7 +4738,7 @@ def pairs_screen(req: PairsScreenRequest):
         })
     except Exception as e:
         logger.exception("Pairs screen failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 @app.get("/pairs/{sym_a}/{sym_b}")
@@ -4794,7 +4794,7 @@ def pairs_signal(sym_a: str, sym_b: str, z_entry: float = 2.0, z_exit: float = 0
         raise
     except Exception as e:
         logger.exception("Pairs signal failed for %s/%s", sym_a, sym_b)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -4803,7 +4803,7 @@ def pairs_signal(sym_a: str, sym_b: str, z_entry: float = 2.0, z_exit: float = 0
 
 @app.post("/advisor")
 @limiter.limit("30/minute")
-def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_optional_user)):
+def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_current_user)):
     """
     Trade Advisor: synthesizes technical signals, ML prediction, sentiment,
     options analytics, and macro context into structured trade recommendations.
@@ -5394,7 +5394,7 @@ def optimize_black_litterman(req: BlackLittermanRequest):
         raise
     except Exception as e:
         logger.exception("Black-Litterman optimization failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -5462,7 +5462,7 @@ def portfolio_stress_test(req: StressTestRequest):
         raise
     except Exception as e:
         logger.exception("Stress test failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -5550,7 +5550,7 @@ def options_strategy_recommend(
         raise
     except Exception as e:
         logger.exception("Options recommendation failed for %s", symbol)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=_sanitize_error(e))
 
 
 # ---------------------------------------------------------------------------
@@ -6155,7 +6155,7 @@ def admin_precompute(
     request: Request,
     background_tasks: BackgroundTasks,
     symbols: Optional[list[str]] = None,
-    user=Depends(get_optional_user),
+    user=Depends(get_current_user),
 ):
     """Trigger batch pre-computation of TA, sentiment, and domain scores for all universe tickers."""
     def _run():
@@ -6173,7 +6173,7 @@ def admin_precompute(
 def admin_ingest_eod(
     background_tasks: BackgroundTasks,
     symbols: Optional[list[str]] = None,
-    user=Depends(get_optional_user),
+    user=Depends(get_current_user),
 ):
     """Trigger EOD price ingestion for tracked symbols."""
     syms = symbols or _ingestion.get_tracked_symbols()
@@ -6190,7 +6190,7 @@ def admin_ingest_eod(
 def admin_ingest_fred(
     background_tasks: BackgroundTasks,
     series_ids: Optional[list[str]] = None,
-    user=Depends(get_optional_user),
+    user=Depends(get_current_user),
 ):
     """Trigger FRED macro series ingestion."""
     def _run():
@@ -6205,7 +6205,7 @@ def admin_ingest_fred(
 def admin_ingest_sec(
     background_tasks: BackgroundTasks,
     ciks: Optional[list[str]] = None,
-    user=Depends(get_optional_user),
+    user=Depends(get_current_user),
 ):
     """Trigger SEC filing ingestion."""
     def _run():
@@ -6217,14 +6217,14 @@ def admin_ingest_sec(
 
 
 @app.get("/admin/ingest/status")
-def admin_ingest_status(user=Depends(get_optional_user)):
+def admin_ingest_status(user=Depends(get_current_user)):
     """Return ingestion status: row counts and last-updated timestamps."""
     return _ingestion.get_ingestion_status()
 
 
 @app.post("/admin/overnight-batch")
 @limiter.limit("1/minute")
-def admin_overnight_batch(request: Request, background_tasks: BackgroundTasks, user=Depends(get_optional_user)):
+def admin_overnight_batch(request: Request, background_tasks: BackgroundTasks, user=Depends(get_current_user)):
     """Trigger the full overnight batch pre-computation pipeline."""
     from overnight_batch import run_overnight_batch
     def _run():
@@ -6234,7 +6234,7 @@ def admin_overnight_batch(request: Request, background_tasks: BackgroundTasks, u
 
 
 @app.post("/admin/intraday-refresh")
-def admin_intraday_refresh(background_tasks: BackgroundTasks, user=Depends(get_optional_user)):
+def admin_intraday_refresh(background_tasks: BackgroundTasks, user=Depends(get_current_user)):
     """Trigger lightweight intraday refresh (prices + TA for core symbols)."""
     from overnight_batch import run_intraday_refresh
     def _run():
@@ -6244,7 +6244,7 @@ def admin_intraday_refresh(background_tasks: BackgroundTasks, user=Depends(get_o
 
 
 @app.get("/admin/batch/status")
-def admin_batch_status(user=Depends(get_optional_user)):
+def admin_batch_status(user=Depends(get_current_user)):
     """Return status of last overnight batch run."""
     cached = _get_cache("batch:last_run")
     if cached:

@@ -27,8 +27,8 @@ from typing import Optional
 # Demo Mode — set to False to re-enable auth
 # ---------------------------------------------------------------------------
 # When True: all protected endpoints accept any/no token and return a demo user.
-# To re-enable auth: change this to False and redeploy.
-DEMO_MODE: bool = True
+# Set DEMO_MODE=false in environment for production.
+DEMO_MODE: bool = os.getenv("DEMO_MODE", "true").lower() in ("true", "1", "yes")
 
 _DEMO_USER = {"sub": "demo@picador.app", "email": "demo@picador.app",
               "tier": "free", "display_name": "Demo", "user_id": 0}
@@ -47,15 +47,23 @@ import bcrypt as _bcrypt
 
 logger = logging.getLogger(__name__)
 
+if DEMO_MODE:
+    logger.warning("DEMO_MODE is ON — authentication is bypassed. Set DEMO_MODE=false for production.")
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
 SECRET_KEY: str = os.getenv("SECRET_KEY", "CHANGE_ME_IN_PRODUCTION_USE_openssl_rand_hex_32")
 ALGORITHM: str = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 
 if SECRET_KEY == "CHANGE_ME_IN_PRODUCTION_USE_openssl_rand_hex_32":
+    if not DEMO_MODE:
+        raise RuntimeError(
+            "SECRET_KEY environment variable is REQUIRED in production. "
+            "Generate one with: openssl rand -hex 32"
+        )
     logger.warning(
         "SECRET_KEY is using the insecure default value. "
         "Set SECRET_KEY env var before deploying to production."
@@ -219,11 +227,21 @@ def register(req: RegisterRequest):
     from main import get_db
     from models import User
 
-    # Basic email validation (not using EmailStr pydantic validator to keep deps simple)
-    if "@" not in req.email or len(req.email) < 5:
+    # Email validation
+    import re as _re_auth
+    if not _re_auth.match(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$", req.email or ""):
         raise HTTPException(status_code=400, detail="Invalid email address")
-    if len(req.password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if len(req.email) > 254:
+        raise HTTPException(status_code=400, detail="Email address too long")
+    # Password strength
+    if len(req.password) < 10:
+        raise HTTPException(status_code=400, detail="Password must be at least 10 characters")
+    if not _re_auth.search(r"[A-Z]", req.password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one uppercase letter")
+    if not _re_auth.search(r"[a-z]", req.password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one lowercase letter")
+    if not _re_auth.search(r"[0-9]", req.password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one number")
 
     db_gen = get_db()
     db: Session = next(db_gen)
@@ -261,7 +279,7 @@ def register(req: RegisterRequest):
     except Exception as e:
         db.rollback()
         logger.exception("Registration failed for %s: %s", req.email, e)
-        raise HTTPException(status_code=500, detail=f"Registration failed: {e}")
+        raise HTTPException(status_code=500, detail="Registration failed. Please try again.")
     finally:
         db.close()
 
@@ -298,7 +316,7 @@ def login(req: LoginRequest):
         raise
     except Exception as e:
         logger.exception("Login failed for %s: %s", req.email, e)
-        raise HTTPException(status_code=500, detail=f"Login failed: {e}")
+        raise HTTPException(status_code=500, detail="Login failed. Please check your credentials.")
     finally:
         db.close()
 

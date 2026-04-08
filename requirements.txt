@@ -1,30 +1,30 @@
 # ── Web framework ─────────────────────────────────────────────────────────────
-fastapi>=0.110.0
-python-jose[cryptography]>=3.3.0   # JWT signing/verification (auth.py)
+fastapi==0.115.0
+python-jose[cryptography]==3.5.0   # JWT signing/verification (auth.py)
 passlib[bcrypt]>=1.7.4             # kept for any legacy verify paths; bcrypt direct-use
-bcrypt>=3.2.0                      # password hashing — used directly in auth.py (passlib 1.7.4 + bcrypt 4.x compat issue)
-uvicorn[standard]>=0.29.0      # ASGI server with websocket support
-gunicorn>=21.2.0               # multi-worker process manager (4 workers in prod)
-slowapi>=0.1.9                 # per-IP rate limiting for FastAPI
-pydantic>=2.0.0
-python-multipart>=0.0.9        # form/file uploads
+bcrypt==5.0.0                      # password hashing — used directly in auth.py
+uvicorn[standard]==0.30.6          # ASGI server with websocket support
+gunicorn>=21.2.0                   # multi-worker process manager (4 workers in prod)
+slowapi==0.1.9                     # per-IP rate limiting for FastAPI
+pydantic==2.9.2
+python-multipart>=0.0.9            # form/file uploads
 
 # ── Database ──────────────────────────────────────────────────────────────────
-sqlalchemy>=2.0.0
-psycopg2-binary>=2.9.9         # PostgreSQL adapter (Supabase / any PG instance)
+sqlalchemy==2.0.35
+psycopg2-binary>=2.9.9             # PostgreSQL adapter (Supabase / any PG instance)
 
 # ── Data science ──────────────────────────────────────────────────────────────
-polars>=0.20.0                 # fast DataFrames (feature engine, signal engine)
-numpy>=1.26.0
-scipy>=1.12.0
+polars==1.39.3                     # fast DataFrames (feature engine, signal engine)
+numpy==2.4.2
+scipy==1.17.0
 statsmodels>=0.14.0
-scikit-learn>=1.4.0
+scikit-learn==1.8.0
 pandas>=2.0.0
 
 # ── Market data ───────────────────────────────────────────────────────────────
-yfinance>=0.2.36               # primary price / options data source
+yfinance==1.2.0                    # primary price / options data source
 
 # ── HTTP / async ──────────────────────────────────────────────────────────────
-websockets>=12.0               # WebSocket endpoint
-httpx>=0.27.0                  # async HTTP (used by some internal calls)
-requests>=2.31.0               # sync HTTP fallback (sec_feed, fred_data)
+websockets>=12.0                   # WebSocket endpoint
+httpx==0.27.2                      # async HTTP (used by some internal calls)
+requests==2.32.5                   # sync HTTP fallback (sec_feed, fred_data)
