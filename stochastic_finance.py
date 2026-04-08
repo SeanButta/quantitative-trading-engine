@@ -320,6 +320,142 @@ class BlackScholes:
 
 
 # ---------------------------------------------------------------------------
+# American Option Pricing — Binomial Tree (Cox-Ross-Rubinstein)
+# ---------------------------------------------------------------------------
+
+class BinomialTree:
+    """
+    Cox-Ross-Rubinstein binomial tree for American option pricing.
+    Handles early exercise — essential for ITM puts and dividend-paying stocks.
+    """
+
+    @staticmethod
+    def price(spot, strike, T, r, sigma, option_type="call", steps=200, american=True):
+        """
+        Price an option using CRR binomial tree.
+        Returns: price, delta, gamma, early_exercise_boundary
+        """
+        dt = T / steps
+        u = np.exp(sigma * np.sqrt(dt))
+        d = 1 / u
+        p = (np.exp(r * dt) - d) / (u - d)  # risk-neutral probability
+        disc = np.exp(-r * dt)
+
+        # Build price tree at expiration
+        asset_prices = spot * u ** np.arange(steps, -1, -1) * d ** np.arange(0, steps + 1)
+
+        if option_type == "call":
+            option_values = np.maximum(asset_prices - strike, 0)
+        else:
+            option_values = np.maximum(strike - asset_prices, 0)
+
+        # Backward induction
+        early_exercise_nodes = 0
+        for step in range(steps - 1, -1, -1):
+            asset_prices_step = spot * u ** np.arange(step, -1, -1) * d ** np.arange(0, step + 1)
+            continuation = disc * (p * option_values[:step + 1] + (1 - p) * option_values[1:step + 2])
+
+            if american:
+                if option_type == "call":
+                    intrinsic = np.maximum(asset_prices_step - strike, 0)
+                else:
+                    intrinsic = np.maximum(strike - asset_prices_step, 0)
+                exercise_mask = intrinsic > continuation
+                early_exercise_nodes += np.sum(exercise_mask)
+                option_values = np.maximum(continuation, intrinsic)
+            else:
+                option_values = continuation
+
+        price = float(option_values[0])
+
+        # Delta: (V_u - V_d) / (S*u - S*d) at first step
+        if steps >= 2:
+            s_u = spot * u
+            s_d = spot * d
+            delta = (option_values[0] - option_values[1]) / (s_u - s_d) if abs(s_u - s_d) > 0 else 0
+        else:
+            delta = 0
+
+        return {
+            "price": round(price, 4),
+            "delta": round(float(delta), 4),
+            "steps": steps,
+            "american": american,
+            "early_exercise_nodes": int(early_exercise_nodes),
+        }
+
+
+# ---------------------------------------------------------------------------
+# SABR Volatility Surface
+# ---------------------------------------------------------------------------
+
+class SABRModel:
+    """
+    SABR (Stochastic Alpha Beta Rho) volatility model.
+    Fits the implied volatility smile across strikes for a given expiry.
+
+    σ_SABR(K) ≈ α/F^(1-β) * [1 + ((1-β)²/24 * α²/F^(2-2β) + ρβνα/(4F^(1-β)) + (2-3ρ²)/24 * ν²) * T]
+    """
+
+    @staticmethod
+    def implied_vol(F, K, T, alpha, beta, rho, nu):
+        """
+        Hagan's SABR approximation for implied volatility.
+        F: forward price, K: strike, T: time to expiry
+        alpha: vol of vol initial, beta: CEV exponent, rho: correlation, nu: vol of vol
+        """
+        if abs(F - K) < 1e-8:
+            # ATM approximation
+            Fmid = F
+            vol = (alpha / Fmid ** (1 - beta)) * (
+                1 + ((1 - beta) ** 2 / 24 * alpha ** 2 / Fmid ** (2 - 2 * beta)
+                     + rho * beta * nu * alpha / (4 * Fmid ** (1 - beta))
+                     + (2 - 3 * rho ** 2) / 24 * nu ** 2) * T
+            )
+            return max(vol, 0.001)
+
+        # General case
+        FK = F * K
+        logFK = np.log(F / K)
+        Fmid = np.sqrt(FK)
+
+        z = nu / alpha * Fmid ** (1 - beta) * logFK
+        x = np.log((np.sqrt(1 - 2 * rho * z + z ** 2) + z - rho) / (1 - rho))
+
+        if abs(x) < 1e-8:
+            x = z
+
+        prefix = alpha / (Fmid ** (1 - beta) * (1 + (1 - beta) ** 2 / 24 * logFK ** 2))
+        correction = 1 + ((1 - beta) ** 2 / 24 * alpha ** 2 / Fmid ** (2 - 2 * beta)
+                          + rho * beta * nu * alpha / (4 * Fmid ** (1 - beta))
+                          + (2 - 3 * rho ** 2) / 24 * nu ** 2) * T
+
+        vol = prefix * z / x * correction
+        return max(float(vol), 0.001)
+
+    @staticmethod
+    def fit(strikes, market_vols, F, T, beta=0.5):
+        """
+        Calibrate SABR parameters (alpha, rho, nu) to market implied vols.
+        beta is typically fixed (0.5 for rates, 1.0 for equity).
+        """
+        from scipy.optimize import minimize
+
+        def objective(params):
+            alpha, rho, nu = params
+            if alpha <= 0 or nu <= 0 or abs(rho) >= 1:
+                return 1e10
+            model_vols = [SABRModel.implied_vol(F, K, T, alpha, beta, rho, nu) for K in strikes]
+            return sum((mv - sv) ** 2 for mv, sv in zip(model_vols, market_vols))
+
+        result = minimize(objective, [0.3, -0.2, 0.4], method="Nelder-Mead",
+                         options={"maxiter": 1000, "xatol": 1e-6})
+        alpha, rho, nu = result.x
+        return {"alpha": round(alpha, 4), "beta": beta, "rho": round(rho, 4), "nu": round(nu, 4),
+                "fit_error": round(float(result.fun), 6)}
+
+
+# ---------------------------------------------------------------------------
 # LMSR Prediction Market
 # ---------------------------------------------------------------------------
 

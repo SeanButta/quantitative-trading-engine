@@ -166,6 +166,116 @@ class TAEngine:
         s2 = pp - (high.shift(1) - low.shift(1))
         return {"pp": pp, "r1": r1, "s1": s1, "r2": r2, "s2": s2}
 
+    # ── Ichimoku Cloud ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def ichimoku(
+        high: pd.Series, low: pd.Series, close: pd.Series,
+        tenkan_period: int = 9, kijun_period: int = 26,
+        senkou_b_period: int = 52, displacement: int = 26,
+    ) -> dict[str, pd.Series]:
+        """
+        Ichimoku Cloud (Kinko Hyo) — 5 lines:
+        - Tenkan-sen (conversion): (highest high + lowest low) / 2 over 9 periods
+        - Kijun-sen (base): (highest high + lowest low) / 2 over 26 periods
+        - Senkou Span A (leading A): (tenkan + kijun) / 2, displaced 26 forward
+        - Senkou Span B (leading B): (highest high + lowest low) / 2 over 52, displaced 26 forward
+        - Chikou Span (lagging): close displaced 26 backward
+        """
+        def _mid(s, period):
+            return (s.rolling(period).max() + s.rolling(period).min()) / 2
+
+        tenkan = _mid(high, tenkan_period).combine_first(_mid(low, tenkan_period))
+        # Recompute using high for max, low for min
+        tenkan = (high.rolling(tenkan_period).max() + low.rolling(tenkan_period).min()) / 2
+        kijun = (high.rolling(kijun_period).max() + low.rolling(kijun_period).min()) / 2
+        senkou_a = ((tenkan + kijun) / 2).shift(displacement)
+        senkou_b = ((high.rolling(senkou_b_period).max() + low.rolling(senkou_b_period).min()) / 2).shift(displacement)
+        chikou = close.shift(-displacement)
+
+        return {
+            "tenkan": tenkan,
+            "kijun": kijun,
+            "senkou_a": senkou_a,
+            "senkou_b": senkou_b,
+            "chikou": chikou,
+        }
+
+    # ── Volume Profile ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def volume_profile(
+        close: pd.Series, volume: pd.Series, bins: int = 24,
+    ) -> dict:
+        """
+        Volume Profile — distribution of volume at each price level.
+        Returns: value_area_high, value_area_low, poc (Point of Control),
+                 and the profile as list of {price, volume} dicts.
+        """
+        prices = close.dropna().values
+        volumes = volume.dropna().values
+        if len(prices) < 10 or len(volumes) < 10:
+            return {"poc": None, "va_high": None, "va_low": None, "profile": []}
+
+        min_p, max_p = float(np.min(prices)), float(np.max(prices))
+        if max_p <= min_p:
+            return {"poc": None, "va_high": None, "va_low": None, "profile": []}
+
+        edges = np.linspace(min_p, max_p, bins + 1)
+        profile = []
+        max_vol = 0
+        poc_price = min_p
+
+        for i in range(bins):
+            lo, hi = edges[i], edges[i + 1]
+            mask = (prices >= lo) & (prices < hi)
+            vol_sum = float(np.sum(volumes[:len(mask)][mask[:len(volumes)]]))
+            mid = (lo + hi) / 2
+            profile.append({"price": round(mid, 2), "volume": round(vol_sum)})
+            if vol_sum > max_vol:
+                max_vol = vol_sum
+                poc_price = mid
+
+        # Value Area: 70% of total volume around POC
+        total_vol = sum(p["volume"] for p in profile)
+        sorted_prof = sorted(profile, key=lambda x: x["volume"], reverse=True)
+        cum_vol = 0
+        va_prices = []
+        for p in sorted_prof:
+            cum_vol += p["volume"]
+            va_prices.append(p["price"])
+            if cum_vol >= total_vol * 0.7:
+                break
+
+        return {
+            "poc": round(poc_price, 2),
+            "va_high": round(max(va_prices), 2) if va_prices else None,
+            "va_low": round(min(va_prices), 2) if va_prices else None,
+            "profile": profile,
+        }
+
+    # ── Heikin-Ashi ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def heikin_ashi(
+        open_: pd.Series, high: pd.Series, low: pd.Series, close: pd.Series,
+    ) -> dict[str, pd.Series]:
+        """
+        Heikin-Ashi transformed bars — smoothed candles for trend clarity.
+        HA_Close = (O + H + L + C) / 4
+        HA_Open  = (prev_HA_Open + prev_HA_Close) / 2
+        HA_High  = max(H, HA_Open, HA_Close)
+        HA_Low   = min(L, HA_Open, HA_Close)
+        """
+        ha_close = (open_ + high + low + close) / 4
+        ha_open = pd.Series(index=open_.index, dtype=float)
+        ha_open.iloc[0] = (open_.iloc[0] + close.iloc[0]) / 2
+        for i in range(1, len(open_)):
+            ha_open.iloc[i] = (ha_open.iloc[i - 1] + ha_close.iloc[i - 1]) / 2
+        ha_high = pd.concat([high, ha_open, ha_close], axis=1).max(axis=1)
+        ha_low = pd.concat([low, ha_open, ha_close], axis=1).min(axis=1)
+        return {"ha_open": ha_open, "ha_high": ha_high, "ha_low": ha_low, "ha_close": ha_close}
+
     # ── Main compute entry point ───────────────────────────────────────────────
 
     def compute(
@@ -270,20 +380,34 @@ class TAEngine:
         piv = self.pivots(h, l, c)
         pivots_out = {k: _ser(s) for k, s in piv.items()}
 
+        # Ichimoku Cloud
+        ichi = self.ichimoku(h, l, c)
+        ichimoku_out = {k: _ser(s) for k, s in ichi.items()}
+
+        # Volume Profile
+        vol_profile = self.volume_profile(c, v)
+
+        # Heikin-Ashi
+        ha = self.heikin_ashi(o, h, l, c)
+        heikin_ashi_out = {k: _ser(s) for k, s in ha.items()}
+
         return {
-            "ohlcv":      ohlcv,
-            "sma":        smas,
-            "ema":        emas,
-            "bb":         bb,
-            "rsi":        rsi_vals,
-            "macd":       macd_out,
-            "stoch":      stoch,
-            "atr":        atr_vals,
-            "obv":        obv_vals,
-            "vwap":       vwap_vals,
-            "williams_r": wr_vals,
-            "cci":        cci_vals,
-            "pivots":     pivots_out,
+            "ohlcv":        ohlcv,
+            "sma":          smas,
+            "ema":          emas,
+            "bb":           bb,
+            "rsi":          rsi_vals,
+            "macd":         macd_out,
+            "stoch":        stoch,
+            "atr":          atr_vals,
+            "obv":          obv_vals,
+            "vwap":         vwap_vals,
+            "williams_r":   wr_vals,
+            "cci":          cci_vals,
+            "pivots":       pivots_out,
+            "ichimoku":     ichimoku_out,
+            "vol_profile":  vol_profile,
+            "heikin_ashi":  heikin_ashi_out,
         }
 
 

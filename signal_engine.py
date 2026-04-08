@@ -604,6 +604,188 @@ def get_signal(name: str, **kwargs) -> BaseSignal:
 # Combined Signal Engine
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Signal 6 — GARCH Volatility Forecast
+# ---------------------------------------------------------------------------
+
+class GARCHVolatilitySignal(BaseSignal):
+    """
+    GARCH(1,1) volatility model: σ²ₜ = ω + α·ε²ₜ₋₁ + β·σ²ₜ₋₁
+
+    Captures volatility clustering — the #1 empirical fact of financial returns.
+    Signal: ratio of GARCH forecast vol to realized vol.
+    High ratio (vol expanding) = risk-off signal.
+    Low ratio (vol contracting) = opportunity signal.
+    """
+
+    def __init__(self, lookback: int = 252, forecast_horizon: int = 5):
+        super().__init__("garch_volatility", {"lookback": lookback, "forecast_horizon": forecast_horizon})
+        self.lookback = lookback
+        self.horizon = forecast_horizon
+
+    def compute(self, features: pl.DataFrame, symbol: str) -> SignalResult:
+        df = features.filter(pl.col("symbol") == symbol).sort("timestamp")
+        rets = df["returns"].to_numpy()
+        ts = df["timestamp"].to_list()
+
+        signal = np.full(len(rets), np.nan)
+
+        for t in range(max(self.lookback, 50), len(rets)):
+            window = rets[t - self.lookback:t]
+            window = window[~np.isnan(window)]
+            if len(window) < 50:
+                continue
+
+            try:
+                # Fit GARCH(1,1) via quasi-MLE
+                omega, alpha, beta, sigma2 = self._fit_garch11(window)
+
+                # Forecast h-step ahead variance
+                last_eps2 = window[-1] ** 2
+                forecast_var = sigma2
+                for _ in range(self.horizon):
+                    forecast_var = omega + alpha * last_eps2 + beta * forecast_var
+                    last_eps2 = forecast_var  # expected eps^2 = sigma^2
+
+                forecast_vol = np.sqrt(forecast_var) * np.sqrt(252)  # annualize
+                realized_vol = np.std(window[-21:]) * np.sqrt(252) if len(window) >= 21 else np.std(window) * np.sqrt(252)
+
+                if realized_vol > 0:
+                    # Signal: negative when forecast vol >> realized (risk expanding)
+                    # Positive when forecast vol << realized (vol contracting = opportunity)
+                    ratio = realized_vol / max(forecast_vol, 1e-8)
+                    signal[t] = np.clip(ratio - 1.0, -1.0, 1.0)
+            except Exception:
+                continue
+
+        return SignalResult(
+            name=self.name, symbol=symbol, signal=signal,
+            timestamps=ts, metadata=self.params,
+        )
+
+    @staticmethod
+    def _fit_garch11(returns, max_iter=100):
+        """Fit GARCH(1,1) via variance targeting + simple optimization."""
+        r = returns - np.mean(returns)
+        T = len(r)
+        var_target = np.var(r)
+
+        # Initialize: omega from variance targeting, alpha=0.1, beta=0.85
+        alpha, beta = 0.1, 0.85
+        omega = var_target * (1 - alpha - beta)
+        omega = max(omega, 1e-10)
+
+        # Iterative quasi-MLE (simplified — avoids scipy.optimize for speed)
+        sigma2 = np.full(T, var_target)
+        for iteration in range(max_iter):
+            # E-step: compute conditional variances
+            for t in range(1, T):
+                sigma2[t] = omega + alpha * r[t - 1] ** 2 + beta * sigma2[t - 1]
+                sigma2[t] = max(sigma2[t], 1e-10)
+
+            # M-step: update parameters (moment matching)
+            eps2 = r ** 2
+            new_alpha = np.clip(np.mean(eps2[1:] * sigma2[:-1]) / np.mean(sigma2[:-1] ** 2) * alpha, 0.01, 0.3)
+            new_beta = np.clip(1 - new_alpha - omega / max(var_target, 1e-10), 0.5, 0.98)
+            new_omega = max(var_target * (1 - new_alpha - new_beta), 1e-10)
+
+            if abs(new_alpha - alpha) + abs(new_beta - beta) < 1e-6:
+                break
+            alpha, beta, omega = new_alpha, new_beta, new_omega
+
+        return omega, alpha, beta, sigma2[-1]
+
+
+# ---------------------------------------------------------------------------
+# Signal 7 — Hurst Exponent (Trending vs Mean-Reverting)
+# ---------------------------------------------------------------------------
+
+class HurstExponentSignal(BaseSignal):
+    """
+    Hurst Exponent via Rescaled Range (R/S) analysis.
+
+    H > 0.5 → persistent (trending) — use momentum strategies
+    H = 0.5 → random walk — no exploitable pattern
+    H < 0.5 → anti-persistent (mean-reverting) — use pairs/reversion strategies
+
+    Signal output: H mapped to [-1, +1] where:
+    - +1 = strongly trending (H ≈ 1.0)
+    - 0  = random walk (H ≈ 0.5)
+    - -1 = strongly mean-reverting (H ≈ 0.0)
+    """
+
+    def __init__(self, lookback: int = 252, min_window: int = 20):
+        super().__init__("hurst_exponent", {"lookback": lookback, "min_window": min_window})
+        self.lookback = lookback
+        self.min_window = min_window
+
+    def compute(self, features: pl.DataFrame, symbol: str) -> SignalResult:
+        df = features.filter(pl.col("symbol") == symbol).sort("timestamp")
+        rets = df["returns"].to_numpy()
+        ts = df["timestamp"].to_list()
+
+        signal = np.full(len(rets), np.nan)
+
+        for t in range(self.lookback, len(rets)):
+            window = rets[t - self.lookback:t]
+            window = window[~np.isnan(window)]
+            if len(window) < 50:
+                continue
+
+            try:
+                H = self._compute_hurst(window)
+                # Map H ∈ [0, 1] to signal ∈ [-1, +1]
+                # H=0.5 → 0, H=1.0 → +1, H=0.0 → -1
+                signal[t] = np.clip((H - 0.5) * 2, -1.0, 1.0)
+            except Exception:
+                continue
+
+        return SignalResult(
+            name=self.name, symbol=symbol, signal=signal,
+            timestamps=ts, metadata=self.params,
+        )
+
+    @staticmethod
+    def _compute_hurst(series):
+        """Compute Hurst exponent via Rescaled Range (R/S) analysis."""
+        N = len(series)
+        if N < 20:
+            return 0.5
+
+        # Use multiple sub-period lengths
+        max_k = min(N // 2, 128)
+        sizes = []
+        rs_values = []
+
+        for k in [16, 32, 64, 128, 256]:
+            if k > max_k or k < 8:
+                continue
+            n_blocks = N // k
+            if n_blocks < 1:
+                continue
+
+            rs_list = []
+            for i in range(n_blocks):
+                block = series[i * k:(i + 1) * k]
+                mean = np.mean(block)
+                devs = np.cumsum(block - mean)
+                R = np.max(devs) - np.min(devs)
+                S = np.std(block, ddof=1)
+                if S > 0:
+                    rs_list.append(R / S)
+
+            if rs_list:
+                sizes.append(np.log(k))
+                rs_values.append(np.log(np.mean(rs_list)))
+
+        if len(sizes) < 2:
+            return 0.5
+
+        # Linear regression: log(R/S) = H * log(n) + c
+        slope, _, _, _, _ = stats.linregress(sizes, rs_values)
+        return np.clip(slope, 0.0, 1.0)
+
+
 class SignalEngine:
     """Runs all signals for a project and combines into a signal matrix."""
 
@@ -614,6 +796,8 @@ class SignalEngine:
             RegressionAlphaSignal(),
             PCARegimeFilter(),
             FatTailRiskSignal(),
+            GARCHVolatilitySignal(),
+            HurstExponentSignal(),
         ]
 
     def run(self, features: pl.DataFrame) -> pl.DataFrame:

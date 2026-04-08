@@ -845,3 +845,140 @@ def _recent_change_summary(pillars: dict) -> str:
     if deteriorating:
         parts.append(f"{', '.join(p.title() for p in deteriorating)} weakening")
     return " while ".join(parts) if parts else "No significant recent changes"
+
+
+# ---------------------------------------------------------------------------
+# Nelson-Siegel Yield Curve Model
+# ---------------------------------------------------------------------------
+
+def nelson_siegel_fit(maturities: list[float], yields: list[float]) -> dict:
+    """
+    Fit Nelson-Siegel model to yield curve data.
+
+    y(τ) = β₀ + β₁ · [(1-e^(-τ/λ))/(τ/λ)]
+              + β₂ · [(1-e^(-τ/λ))/(τ/λ) - e^(-τ/λ)]
+
+    β₀ = long-term rate (level)
+    β₁ = short-term component (slope)
+    β₂ = medium-term component (curvature)
+    λ  = decay factor
+
+    Returns: {beta0, beta1, beta2, lambda, level, slope, curvature, fitted_yields}
+    """
+    import numpy as np
+    from scipy.optimize import minimize
+
+    m = np.array(maturities)
+    y = np.array(yields)
+
+    def _ns_yield(tau, b0, b1, b2, lam):
+        x = tau / max(lam, 0.01)
+        factor1 = np.where(x > 0, (1 - np.exp(-x)) / x, 1.0)
+        factor2 = factor1 - np.exp(-x)
+        return b0 + b1 * factor1 + b2 * factor2
+
+    def objective(params):
+        b0, b1, b2, lam = params
+        if lam <= 0:
+            return 1e10
+        fitted = _ns_yield(m, b0, b1, b2, lam)
+        return np.sum((fitted - y) ** 2)
+
+    # Initial guesses from yield curve shape
+    b0_init = y[-1] if len(y) > 0 else 4.0  # long rate
+    b1_init = y[0] - y[-1] if len(y) > 1 else -1.0  # slope
+    result = minimize(objective, [b0_init, b1_init, 0.0, 2.0], method="Nelder-Mead")
+    b0, b1, b2, lam = result.x
+    fitted = _ns_yield(m, b0, b1, b2, max(lam, 0.01))
+
+    return {
+        "beta0": round(float(b0), 4),  # level
+        "beta1": round(float(b1), 4),  # slope
+        "beta2": round(float(b2), 4),  # curvature
+        "lambda": round(float(max(lam, 0.01)), 4),
+        "level": round(float(b0), 4),
+        "slope": round(float(b1), 4),
+        "curvature": round(float(b2), 4),
+        "fitted_yields": [round(float(f), 4) for f in fitted],
+        "fit_error": round(float(result.fun), 6),
+        "interpretation": (
+            f"Level: {'high' if b0 > 4 else 'low'} ({b0:.1f}%), "
+            f"Slope: {'steep' if b1 < -1 else 'flat' if b1 > -0.3 else 'normal'} ({b1:.2f}), "
+            f"Curvature: {'humped' if abs(b2) > 1 else 'smooth'} ({b2:.2f})"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Nowcasting — Real-time GDP proxy from high-frequency indicators
+# ---------------------------------------------------------------------------
+
+def compute_nowcast(series_data: dict) -> dict:
+    """
+    Simple nowcasting model: estimate current quarter GDP growth
+    from high-frequency indicators (weekly/monthly data).
+
+    Uses: initial claims, industrial production, retail sales,
+    consumer sentiment, yield curve, VIX.
+
+    Returns: nowcast_gdp_growth (%), confidence, contributing_factors
+    """
+    factors = []
+    weights = []
+
+    # Initial claims (weekly, inverse — lower is better)
+    icsa = _latest(series_data.get("ICSA", {}).get("observations", []))
+    if icsa is not None:
+        # 200K = very strong, 300K = neutral, 400K+ = weak
+        claims_signal = _clamp((300 - icsa) / 100, -2, 2)
+        factors.append(("Initial Claims", claims_signal, 0.20))
+
+    # Industrial production (monthly)
+    indpro_chg = _pct_change(series_data.get("INDPRO", {}).get("observations", []), 3)
+    if indpro_chg is not None:
+        factors.append(("Industrial Production", _clamp(indpro_chg / 2, -2, 2), 0.20))
+
+    # Consumer sentiment
+    umcsent = _latest(series_data.get("UMCSENT", {}).get("observations", []))
+    if umcsent is not None:
+        sent_signal = _clamp((umcsent - 70) / 20, -2, 2)
+        factors.append(("Consumer Sentiment", sent_signal, 0.15))
+
+    # Yield curve (10Y-3M) — recession predictor
+    curve = _latest(series_data.get("T10Y3M", {}).get("observations", []))
+    if curve is not None:
+        curve_signal = _clamp(curve, -2, 2)
+        factors.append(("Yield Curve", curve_signal, 0.20))
+
+    # VIX (inverse — low VIX = growth)
+    vix = _latest(series_data.get("VIXCLS", {}).get("observations", []))
+    if vix is not None:
+        vix_signal = _clamp((20 - vix) / 10, -2, 2)
+        factors.append(("VIX", vix_signal, 0.10))
+
+    # Retail sales growth
+    retail_chg = _pct_change(series_data.get("RETAILSMNSA", {}).get("observations", []), 3)
+    if retail_chg is not None:
+        factors.append(("Retail Sales", _clamp(retail_chg / 3, -2, 2), 0.15))
+
+    if not factors:
+        return {"nowcast_gdp": None, "confidence": 0, "factors": []}
+
+    # Weighted nowcast
+    total_weight = sum(w for _, _, w in factors)
+    nowcast_score = sum(s * w for _, s, w in factors) / max(total_weight, 0.01)
+
+    # Map score to GDP growth estimate (rough calibration)
+    # Score 2.0 ≈ 4% growth, 0 ≈ 2% growth, -2.0 ≈ -1% growth
+    gdp_estimate = 2.0 + nowcast_score * 1.0
+
+    return {
+        "nowcast_gdp": round(gdp_estimate, 2),
+        "nowcast_score": round(float(nowcast_score), 2),
+        "confidence": round(min(total_weight / 1.0 * 100, 100), 0),
+        "factors": [{"name": n, "score": round(float(s), 2), "weight": round(w, 2)} for n, s, w in factors],
+        "interpretation": (
+            f"Real-time GDP estimate: {gdp_estimate:.1f}% "
+            f"({'above trend' if gdp_estimate > 2.5 else 'near trend' if gdp_estimate > 1.5 else 'below trend'})"
+        ),
+    }

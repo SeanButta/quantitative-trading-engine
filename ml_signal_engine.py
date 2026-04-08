@@ -308,18 +308,35 @@ class WalkForwardMLSignal(BaseSignal):
                     continue
 
                 try:
-                    model = GradientBoostingClassifier(
-                        n_estimators=self.n_estimators,
-                        max_depth=self.max_depth,
-                        random_state=42,
-                        subsample=0.8,
-                        learning_rate=0.05,
-                    )
-                    model.fit(X_tr, y_tr)
-                    last_importance = model.feature_importances_.copy()
+                    # Try XGBoost first (faster, handles missing data, better accuracy)
+                    try:
+                        import xgboost as xgb
+                        model = xgb.XGBClassifier(
+                            n_estimators=self.n_estimators,
+                            max_depth=self.max_depth,
+                            random_state=42,
+                            subsample=0.8,
+                            learning_rate=0.05,
+                            use_label_encoder=False,
+                            eval_metric="logloss",
+                            verbosity=0,
+                        )
+                        model.fit(X_tr, y_tr)
+                        last_importance = model.feature_importances_.copy()
+                    except (ImportError, Exception):
+                        # Fallback to sklearn GBM
+                        model = GradientBoostingClassifier(
+                            n_estimators=self.n_estimators,
+                            max_depth=self.max_depth,
+                            random_state=42,
+                            subsample=0.8,
+                            learning_rate=0.05,
+                        )
+                        model.fit(X_tr, y_tr)
+                        last_importance = model.feature_importances_.copy()
                     n_retrain_events += 1
                 except Exception as fit_exc:
-                    logger.warning("GBM fit failed at i=%d for %s: %s", i, symbol, fit_exc)
+                    logger.warning("ML fit failed at i=%d for %s: %s", i, symbol, fit_exc)
                     model = None
                     continue
 

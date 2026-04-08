@@ -1080,3 +1080,108 @@ class RiskAnalyzer:
             "cluster_order": cluster_symbols,
             "cluster_matrix": _round_matrix(cluster_corr),
         }
+
+
+# ---------------------------------------------------------------------------
+# Copula Tail Dependence
+# ---------------------------------------------------------------------------
+
+class CopulaDependence:
+    """
+    Estimates tail dependence between asset pairs using empirical copulas.
+    Normal correlation understates joint crash risk — copulas capture
+    "everything drops together in a crisis" which is critical for risk management.
+    """
+
+    @staticmethod
+    def compute_tail_dependence(returns_a: np.ndarray, returns_b: np.ndarray,
+                                 quantile: float = 0.05) -> dict:
+        """
+        Compute lower and upper tail dependence coefficients.
+
+        Lower tail: λ_L = P(Y ≤ F⁻¹(q) | X ≤ F⁻¹(q)) — crash co-movement
+        Upper tail: λ_U = P(Y > F⁻¹(1-q) | X > F⁻¹(1-q)) — rally co-movement
+
+        Values close to 1 = strong tail dependence (crash together).
+        Values close to 0 = independent in tails.
+        """
+        n = len(returns_a)
+        if n < 50:
+            return {"lower_tail": None, "upper_tail": None, "interpretation": "Insufficient data"}
+
+        # Convert to pseudo-observations (empirical CDF)
+        from scipy.stats import rankdata
+        u = rankdata(returns_a) / (n + 1)
+        v = rankdata(returns_b) / (n + 1)
+
+        # Lower tail dependence (crashes)
+        lower_mask = (u <= quantile) & (v <= quantile)
+        lower_count = np.sum(lower_mask)
+        lower_expected = np.sum(u <= quantile)
+        lambda_lower = lower_count / max(lower_expected, 1)
+
+        # Upper tail dependence (rallies)
+        upper_mask = (u >= 1 - quantile) & (v >= 1 - quantile)
+        upper_count = np.sum(upper_mask)
+        upper_expected = np.sum(u >= 1 - quantile)
+        lambda_upper = upper_count / max(upper_expected, 1)
+
+        # Linear correlation for comparison
+        corr = float(np.corrcoef(returns_a, returns_b)[0, 1])
+
+        # Interpretation
+        if lambda_lower > 0.5:
+            interp = "Strong crash co-movement — diversification fails in downturns"
+        elif lambda_lower > 0.25:
+            interp = "Moderate tail dependence — some crash correlation"
+        else:
+            interp = "Low tail dependence — diversification holds in stress"
+
+        return {
+            "lower_tail": round(float(lambda_lower), 3),
+            "upper_tail": round(float(lambda_upper), 3),
+            "linear_correlation": round(corr, 3),
+            "tail_asymmetry": round(float(lambda_lower - lambda_upper), 3),
+            "quantile": quantile,
+            "n_observations": n,
+            "interpretation": interp,
+        }
+
+    @staticmethod
+    def compute_portfolio_tail_risk(returns_matrix: np.ndarray, symbols: list[str],
+                                     quantile: float = 0.05) -> dict:
+        """
+        Compute pairwise tail dependence for a portfolio.
+        Returns NxN lower tail dependence matrix.
+        """
+        n_assets = returns_matrix.shape[1]
+        tail_matrix = np.zeros((n_assets, n_assets))
+
+        for i in range(n_assets):
+            for j in range(i, n_assets):
+                if i == j:
+                    tail_matrix[i][j] = 1.0
+                else:
+                    result = CopulaDependence.compute_tail_dependence(
+                        returns_matrix[:, i], returns_matrix[:, j], quantile
+                    )
+                    tail_matrix[i][j] = result.get("lower_tail", 0) or 0
+                    tail_matrix[j][i] = tail_matrix[i][j]
+
+        # Find riskiest pairs (highest crash co-movement)
+        risky_pairs = []
+        for i in range(n_assets):
+            for j in range(i + 1, n_assets):
+                if tail_matrix[i][j] > 0.2:
+                    risky_pairs.append({
+                        "pair": f"{symbols[i]}-{symbols[j]}",
+                        "tail_dependence": round(float(tail_matrix[i][j]), 3),
+                    })
+        risky_pairs.sort(key=lambda x: x["tail_dependence"], reverse=True)
+
+        return {
+            "symbols": symbols,
+            "tail_matrix": [[round(float(v), 3) for v in row] for row in tail_matrix],
+            "risky_pairs": risky_pairs[:10],
+            "avg_tail_dependence": round(float(np.mean(tail_matrix[np.triu_indices_from(tail_matrix, k=1)])), 3),
+        }

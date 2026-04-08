@@ -207,6 +207,21 @@ class TickerSnapshot:
     val_score:         Optional[float] = None   # +2 = very cheap, -2 = very expensive
     val_label:         str             = "UNKNOWN"  # UNDERVALUED/FAIR/OVERVALUED
 
+    # Intrinsic value models
+    dcf_value:         Optional[float] = None   # DCF fair value per share
+    dcf_upside:        Optional[float] = None   # % upside to DCF value
+    ddm_value:         Optional[float] = None   # Dividend Discount Model value
+    graham_number:     Optional[float] = None   # Graham Number (sqrt(22.5 * EPS * BVPS))
+
+    # Financial health scores
+    altman_z:          Optional[float] = None   # Altman Z-Score (>2.99=safe, <1.81=distress)
+    altman_label:      str             = ""     # SAFE/GREY/DISTRESS
+    beneish_m:         Optional[float] = None   # Beneish M-Score (>-1.78=likely manipulator)
+    beneish_label:     str             = ""     # CLEAN/WARNING/LIKELY MANIPULATOR
+
+    # Relative strength
+    relative_strength: Optional[float] = None   # Mansfield RS vs SPY (>0=outperforming)
+
     # Composite signal
     signal_score:      Optional[float] = None   # -3 to +3
     signal_label:      str             = ""
@@ -523,6 +538,70 @@ class SectorProvider:
                     snap.earnings_streak = streak if streak > 0 else -miss_streak
                     if recent:
                         snap.last_eps_surprise = round(float(recent[-1]) * 100, 1)
+            except Exception:
+                pass
+
+            # ── Intrinsic value models ──────────────────────────────────
+            try:
+                import math
+                _eps = self._sf(info.get("trailingEps"))
+                _bvps = self._sf(info.get("bookValue"))
+                _fcf = info.get("freeCashflow")
+                _shares = info.get("sharesOutstanding")
+                _div_rate = info.get("dividendRate")
+                _price = snap.price
+
+                # Graham Number: sqrt(22.5 × EPS × BVPS)
+                if _eps and _bvps and _eps > 0 and _bvps > 0:
+                    snap.graham_number = round(math.sqrt(22.5 * _eps * _bvps), 2)
+
+                # DCF (simplified 10-year, terminal value)
+                if _fcf and _shares and _fcf > 0 and _shares > 0:
+                    fcf_per_share = _fcf / _shares
+                    growth = min(max(info.get("revenueGrowth") or 0.05, 0.02), 0.25)
+                    discount = 0.10  # WACC proxy
+                    terminal_growth = 0.025
+                    dcf_sum = sum(fcf_per_share * (1 + growth) ** yr / (1 + discount) ** yr for yr in range(1, 11))
+                    terminal = fcf_per_share * (1 + growth) ** 10 * (1 + terminal_growth) / (discount - terminal_growth)
+                    terminal_pv = terminal / (1 + discount) ** 10
+                    snap.dcf_value = round(dcf_sum + terminal_pv, 2)
+                    if _price and _price > 0:
+                        snap.dcf_upside = round((snap.dcf_value - _price) / _price * 100, 1)
+
+                # Dividend Discount Model (Gordon Growth)
+                if _div_rate and _div_rate > 0:
+                    div_growth = min(max(info.get("revenueGrowth") or 0.03, 0.01), 0.08)
+                    req_return = 0.10
+                    if req_return > div_growth:
+                        snap.ddm_value = round(_div_rate * (1 + div_growth) / (req_return - div_growth), 2)
+
+                # Altman Z-Score (manufacturing model, adapted)
+                _ta = info.get("totalAssets") or 0
+                _tl = info.get("totalDebt") or 0
+                _wc = (info.get("totalCurrentAssets") or 0) - (info.get("totalCurrentLiabilities") or 0)
+                _re = info.get("retainedEarnings") or 0
+                _ebit = info.get("ebitda") or 0
+                _mcap = info.get("marketCap") or 0
+                _rev = info.get("totalRevenue") or 0
+                if _ta > 0 and _tl > 0:
+                    z = (1.2 * (_wc / _ta) + 1.4 * (_re / _ta) + 3.3 * (_ebit / _ta)
+                         + 0.6 * (_mcap / max(_tl, 1)) + 1.0 * (_rev / _ta))
+                    snap.altman_z = round(z, 2)
+                    snap.altman_label = "SAFE" if z > 2.99 else ("GREY" if z > 1.81 else "DISTRESS")
+
+                # Beneish M-Score (simplified — needs multi-year data, use proxy)
+                # Uses single-period ratios as approximation
+                _gm = info.get("grossMargins") or 0
+                _sgai = (info.get("operatingExpenses") or 0) / max(_rev, 1) if _rev else 0
+                if _ta > 0 and _rev > 0:
+                    dsri = 1.0  # would need prior-year receivables
+                    gmi = 1.0 / max(_gm, 0.01) if _gm > 0 else 1.0
+                    aqi = 1.0 - (info.get("totalCurrentAssets") or 0) / max(_ta, 1)
+                    sgi = 1.0 + (info.get("revenueGrowth") or 0)
+                    m = -4.84 + 0.92 * dsri + 0.528 * gmi + 0.404 * aqi + 0.892 * sgi
+                    snap.beneish_m = round(m, 2)
+                    snap.beneish_label = "LIKELY MANIPULATOR" if m > -1.78 else ("WARNING" if m > -2.22 else "CLEAN")
+
             except Exception:
                 pass
 
