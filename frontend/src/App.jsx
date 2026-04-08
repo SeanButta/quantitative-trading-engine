@@ -182,12 +182,17 @@ function ScrollTable({children}) {
   const ref = useRef(null);
   const [canScroll, setCanScroll] = useState(false);
   const [scrolledRight, setScrolledRight] = useState(false);
+  const [scrollPct, setScrollPct] = useState(0);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     const check = () => {
-      setCanScroll(el.scrollWidth > el.clientWidth + 4);
+      const overflow = el.scrollWidth > el.clientWidth + 4;
+      setCanScroll(overflow);
       setScrolledRight(el.scrollLeft + el.clientWidth >= el.scrollWidth - 4);
+      if (overflow) {
+        setScrollPct(el.scrollLeft / (el.scrollWidth - el.clientWidth));
+      }
     };
     check();
     el.addEventListener("scroll", check);
@@ -197,15 +202,26 @@ function ScrollTable({children}) {
   }, [children]);
   return (
     <div style={{position:"relative"}}>
+      {/* Top scroll hint bar — always visible without scrolling down */}
+      {canScroll && (
+        <div style={{display:"flex",alignItems:"center",gap:8,padding:"4px 8px",marginBottom:4,
+          borderRadius:6,background:C.dim,border:`1px solid ${C.bdr}`}}>
+          <span style={mono(8,C.mut)}>← Scroll horizontally →</span>
+          <div style={{flex:1,height:4,background:C.bdr,borderRadius:2,overflow:"hidden",position:"relative"}}>
+            <div style={{position:"absolute",left:`${scrollPct*100}%`,width:"20%",maxWidth:60,height:"100%",
+              background:C.sky,borderRadius:2,opacity:0.6,transition:"left .1s"}}/>
+          </div>
+          <span style={mono(8,C.mut)}>{scrolledRight ? "✓" : "→"}</span>
+        </div>
+      )}
       <div ref={ref} style={{overflowX:"auto"}}>
         {children}
       </div>
+      {/* Right edge fade gradient */}
       {canScroll && !scrolledRight && (
-        <div style={{position:"absolute",top:0,right:0,bottom:0,width:40,
-          background:`linear-gradient(90deg, transparent, ${C.surf})`,
-          pointerEvents:"none",display:"flex",alignItems:"center",justifyContent:"flex-end",paddingRight:6}}>
-          <span style={{...mono(10,C.mut),opacity:0.7,writingMode:"vertical-rl",textOrientation:"mixed",letterSpacing:1}}>scroll →</span>
-        </div>
+        <div style={{position:"absolute",top:canScroll?32:0,right:0,bottom:0,width:30,
+          background:`linear-gradient(90deg, transparent, ${C.surf}cc)`,
+          pointerEvents:"none"}}/>
       )}
     </div>
   );
