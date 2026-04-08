@@ -6792,6 +6792,27 @@ def event_calendar(days: int = 30):
     return {"events": events, "count": len(events), "days": days}
 
 
+# ---------------------------------------------------------------------------
+# Endpoints: Factor Exposure
+# ---------------------------------------------------------------------------
+
+@app.get("/factors/{symbol}")
+def factor_exposure(symbol: str, period_days: int = 252):
+    """Compute Fama-French factor betas for a ticker."""
+    cache_key = f"factors:{symbol.upper()}:{period_days}"
+    cached = _get_cache(cache_key)
+    if cached:
+        return cached
+    try:
+        from factor_engine import compute_factor_exposure
+        result = compute_factor_exposure(symbol, period_days)
+        if result:
+            _set_cache(cache_key, result, _TTL_TECHNICAL, "factors")
+        return result or {"symbol": symbol.upper(), "error": "Computation failed", "factors": {}}
+    except Exception as e:
+        return {"symbol": symbol.upper(), "error": _sanitize_error(e), "factors": {}}
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8001))
