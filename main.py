@@ -3380,12 +3380,12 @@ def signals_ensemble(symbol: str):
     # Technical signals
     try:
         from technical_analysis import fetch_and_compute
-        from signal_strategies import StrategyEngine
+        from signal_strategies import StrategyEngine, god_mode as _gm_ens
         ta = fetch_and_compute(symbol, period="1y", interval="1d")
         if ta:
-            se2 = StrategyEngine()
-            sigs = se2.check_all(ta)
-            gm = se2.god_mode(sigs, ta)
+            se2 = StrategyEngine(ta)
+            sigs = se2.check_all()
+            gm = _gm_ens(sigs, ta, symbol)
             if gm:
                 norm = normalize_technical_signals(sigs, gm)
                 if norm:
@@ -4781,8 +4781,8 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
         engine = StrategyEngine(ta)
         signals = engine.check_all()
         triggered = [s for s in signals if s.get("triggered")]
-        bull_count = sum(1 for s in triggered if s.get("direction") == "bullish")
-        bear_count = sum(1 for s in triggered if s.get("direction") == "bearish")
+        bull_count = sum(1 for s in triggered if s.get("direction") in ("bull", "bullish"))
+        bear_count = sum(1 for s in triggered if s.get("direction") in ("bear", "bearish"))
         # Compute HV20 from OHLCV data (always available, no options data needed)
         ohlcv = ta.get("ohlcv", [])
         closes = [row["close"] for row in ohlcv if row.get("close")]

@@ -95,13 +95,13 @@ def compute_ta_for_ticker(symbol: str) -> Optional[dict]:
     """Compute full technical analysis for a ticker."""
     try:
         from technical_analysis import fetch_and_compute
-        from signal_strategies import StrategyEngine
+        from signal_strategies import StrategyEngine, god_mode as _god_mode
         ta = fetch_and_compute(symbol, period="1y", interval="1d")
         if not ta:
             return None
-        se = StrategyEngine()
-        signals = se.check_all(ta)
-        god_mode = se.god_mode(signals, ta)
+        se = StrategyEngine(ta)
+        signals = se.check_all()
+        god_mode = _god_mode(signals, ta, symbol)
 
         # Serialize — strip large arrays for storage, keep key metrics
         result = {
