@@ -12237,6 +12237,17 @@ function ScreenerView() {
   const [showMore, setShowMore] = useState(false);
   const [sortCol, setSortCol] = useState("market_cap");
   const [sortDir, setSortDir] = useState(-1); // -1 = desc, 1 = asc
+  // Watchlist integration — shared with WatchlistView via localStorage
+  const [watchlist, setWatchlist] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("watchlist_symbols")) || []; } catch { return []; }
+  });
+  const toggleWatchlist = (sym) => {
+    setWatchlist(prev => {
+      const next = prev.includes(sym) ? prev.filter(s => s !== sym) : [...prev, sym];
+      try { localStorage.setItem("watchlist_symbols", JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
   const run = () => {
     setLoading(true);
     const body = {};
@@ -12345,6 +12356,7 @@ function ScreenerView() {
           <div style={{overflowX:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontFamily:"monospace"}}>
               <thead><tr style={{background:C.dim}}>
+                <th style={{...mono(8,C.amb,700),padding:"5px 6px",borderBottom:`1px solid ${C.bdr}`,width:28,textAlign:"center"}} title="Add to Watchlist">★</th>
                 {[["Symbol","symbol"],["Name","name"],["Sector","sector"],["Industry","industry"],["Price","price"],["Mkt Cap","market_cap"],
                   ["P/E","pe_ratio"],["P/B","pb_ratio"],["Div%","dividend_yield"],["RSI","rsi_14"],
                   ["ROE","roe"],["Short%","short_pct_float"],["Value","val_score"],
@@ -12374,6 +12386,12 @@ function ScreenerView() {
                   return (av - bv) * sortDir;
                 }).map((t,i)=>(
                   <tr key={t.symbol||i} style={{background:i%2===0?"transparent":C.dim+"60"}}>
+                    <td style={{padding:"5px 6px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"center",cursor:"pointer"}}
+                      onClick={()=>toggleWatchlist(t.symbol)} title={watchlist.includes(t.symbol)?"Remove from Watchlist":"Add to Watchlist"}>
+                      <span style={{fontSize:14,color:watchlist.includes(t.symbol)?C.amb:C.bdr,transition:"color .15s"}}>
+                        {watchlist.includes(t.symbol)?"★":"☆"}
+                      </span>
+                    </td>
                     <td style={{...mono(11,C.headingTxt,700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`}}>{t.symbol}</td>
                     <td style={{...mono(9,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.name}</td>
                     <td style={{...mono(8,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`}}>{t.sector}</td>
