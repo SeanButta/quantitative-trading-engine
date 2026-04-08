@@ -6371,18 +6371,31 @@ class ScreenerRequest(BaseModel):
     min_pb: Optional[float] = None
     max_pb: Optional[float] = None
     min_dividend_yield: Optional[float] = None  # percent
+    max_dividend_yield: Optional[float] = None
     min_rsi: Optional[float] = None
     max_rsi: Optional[float] = None
     min_revenue_growth: Optional[float] = None  # percent
+    min_eps_growth: Optional[float] = None      # percent
     min_roe: Optional[float] = None
+    max_roe: Optional[float] = None
+    min_net_margin: Optional[float] = None      # percent
+    min_gross_margin: Optional[float] = None    # percent
     sector: Optional[str] = None
     signal_label: Optional[str] = None          # STRONG BUY, BUY, NEUTRAL, SELL
+    val_label: Optional[str] = None              # UNDERVALUED, FAIR, OVERVALUED
+    min_val_score: Optional[float] = None        # -2 to +2 (positive = undervalued)
     above_ma50: Optional[bool] = None
     above_ma200: Optional[bool] = None
     min_short_ratio: Optional[float] = None
+    max_short_ratio: Optional[float] = None
+    min_short_pct_float: Optional[float] = None # percent
+    min_beta: Optional[float] = None
+    max_beta: Optional[float] = None
+    min_change_ytd: Optional[float] = None      # percent
+    max_change_ytd: Optional[float] = None
     sort_by: str = "market_cap"
     sort_dir: str = "desc"
-    limit: int = 100
+    limit: int = 500
 
 
 @app.post("/screener")
@@ -6430,11 +6443,37 @@ def stock_screener(req: ScreenerRequest):
                 continue
             if req.signal_label and s.get("signal_label", "").upper() != req.signal_label.upper():
                 continue
+            if req.val_label and s.get("val_label", "").upper() != req.val_label.upper():
+                continue
+            if req.min_val_score is not None and (s.get("val_score") is None or s["val_score"] < req.min_val_score):
+                continue
             if req.above_ma50 is not None and s.get("above_ma50") != req.above_ma50:
                 continue
             if req.above_ma200 is not None and s.get("above_ma200") != req.above_ma200:
                 continue
             if req.min_short_ratio and (s.get("short_ratio") or 0) < req.min_short_ratio:
+                continue
+            if req.max_short_ratio and (s.get("short_ratio") or 0) > req.max_short_ratio:
+                continue
+            if req.min_short_pct_float and (s.get("short_pct_float") or 0) < req.min_short_pct_float:
+                continue
+            if req.max_dividend_yield and (s.get("dividend_yield") or 0) > req.max_dividend_yield:
+                continue
+            if req.min_eps_growth and (s.get("eps_growth") or -999) < req.min_eps_growth:
+                continue
+            if req.max_roe and (s.get("roe") is not None and s["roe"] > req.max_roe):
+                continue
+            if req.min_net_margin and (s.get("net_margin") or -999) < req.min_net_margin:
+                continue
+            if req.min_gross_margin and (s.get("gross_margin") or -999) < req.min_gross_margin:
+                continue
+            if req.min_beta and (s.get("beta") is None or s["beta"] < req.min_beta):
+                continue
+            if req.max_beta and (s.get("beta") is not None and s["beta"] > req.max_beta):
+                continue
+            if req.min_change_ytd and (s.get("change_ytd_pct") or -999) < req.min_change_ytd:
+                continue
+            if req.max_change_ytd and (s.get("change_ytd_pct") is not None and s["change_ytd_pct"] > req.max_change_ytd):
                 continue
             results.append(s)
         # Sort

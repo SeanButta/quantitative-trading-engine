@@ -12233,19 +12233,27 @@ function ScreenerView() {
   const C = useC();
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [filters, setFilters] = useState({ max_pe: "", min_roe: "", sector: "", above_ma50: "", min_dividend_yield: "", max_rsi: "", sort_by: "market_cap", limit: 500 });
+  const [filters, setFilters] = useState({ max_pe: "", min_pe: "", min_roe: "", max_pb: "", min_dividend_yield: "", min_rsi: "", max_rsi: "", min_market_cap: "", max_market_cap: "", min_revenue_growth: "", min_eps_growth: "", min_net_margin: "", min_gross_margin: "", min_beta: "", max_beta: "", min_short_pct_float: "", min_change_ytd: "", sector: "", signal_label: "", above_ma50: "", above_ma200: "", sort_by: "market_cap", limit: 500 });
+  const [showMore, setShowMore] = useState(false);
   const [sortCol, setSortCol] = useState("market_cap");
   const [sortDir, setSortDir] = useState(-1); // -1 = desc, 1 = asc
   const run = () => {
     setLoading(true);
     const body = {};
-    if (filters.max_pe) body.max_pe = parseFloat(filters.max_pe);
-    if (filters.min_roe) body.min_roe = parseFloat(filters.min_roe);
+    // Parse all numeric filters
+    const numFields = ["max_pe","min_pe","min_roe","max_pb","min_dividend_yield","min_rsi","max_rsi",
+      "min_market_cap","max_market_cap","min_revenue_growth","min_eps_growth","min_net_margin",
+      "min_gross_margin","min_beta","max_beta","min_short_pct_float","min_change_ytd"];
+    numFields.forEach(k => { if (filters[k]) body[k] = parseFloat(filters[k]); });
+    // String filters
     if (filters.sector) body.sector = filters.sector;
+    if (filters.signal_label) body.signal_label = filters.signal_label;
+    if (filters.val_label) body.val_label = filters.val_label;
+    // Boolean filters
     if (filters.above_ma50 === "true") body.above_ma50 = true;
     if (filters.above_ma50 === "false") body.above_ma50 = false;
-    if (filters.min_dividend_yield) body.min_dividend_yield = parseFloat(filters.min_dividend_yield);
-    if (filters.max_rsi) body.max_rsi = parseFloat(filters.max_rsi);
+    if (filters.above_ma200 === "true") body.above_ma200 = true;
+    if (filters.above_ma200 === "false") body.above_ma200 = false;
     body.sort_by = filters.sort_by;
     body.limit = filters.limit;
     fetch("/api/screener", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
@@ -12258,26 +12266,67 @@ function ScreenerView() {
     <div style={{display:"flex",flexDirection:"column",gap:16}}>
       <div><Lbl>Stock Screener</Lbl><div style={mono(10,C.mut)}>Filter and rank the full universe by fundamentals, technicals, and valuation</div></div>
       <Card>
-        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"repeat(4,1fr)",gap:10,marginBottom:12}}>
-          {[["Max P/E","max_pe","e.g. 20"],["Min ROE %","min_roe","e.g. 10"],["Min Div Yield %","min_dividend_yield","e.g. 2"],["Max RSI","max_rsi","e.g. 70"]].map(([label,key,ph])=>(
+        {/* Row 1: Core filters */}
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(6,1fr)",gap:8,marginBottom:10}}>
+          {[["Max P/E","max_pe","20"],["Min P/E","min_pe","5"],["Max P/B","max_pb","3"],["Min ROE %","min_roe","10"],["Min Div %","min_dividend_yield","2"],["Max RSI","max_rsi","70"]].map(([label,key,ph])=>(
             <div key={key}>
-              <div style={{...mono(8,C.mut,600),letterSpacing:"0.06em",marginBottom:4}}>{label.toUpperCase()}</div>
+              <div style={{...mono(7,C.mut,600),letterSpacing:"0.05em",marginBottom:3}}>{label.toUpperCase()}</div>
               <input value={filters[key]} onChange={e=>setFilters(p=>({...p,[key]:e.target.value}))} placeholder={ph}
-                style={{width:"100%",padding:"6px 10px",borderRadius:6,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:12,boxSizing:"border-box",outline:"none"}}/>
+                style={{width:"100%",padding:"5px 8px",borderRadius:5,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:11,boxSizing:"border-box",outline:"none"}}/>
             </div>
           ))}
         </div>
-        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+
+        {/* Row 2: More filters (collapsible) */}
+        {showMore && (
+          <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(6,1fr)",gap:8,marginBottom:10,paddingTop:8,borderTop:`1px solid ${C.bdr}`}}>
+            {[["Min RSI","min_rsi","30"],["Min Mkt Cap ($B)","min_market_cap","1"],["Max Mkt Cap ($B)","max_market_cap","100"],
+              ["Min Rev Growth %","min_revenue_growth","10"],["Min EPS Growth %","min_eps_growth","15"],["Min Net Margin %","min_net_margin","5"],
+              ["Min Gross Margin %","min_gross_margin","30"],["Min Beta","min_beta","0.5"],["Max Beta","max_beta","1.5"],
+              ["Min Short % Float","min_short_pct_float","10"],["Min YTD %","min_change_ytd","0"]].map(([label,key,ph])=>(
+              <div key={key}>
+                <div style={{...mono(7,C.mut,600),letterSpacing:"0.05em",marginBottom:3}}>{label.toUpperCase()}</div>
+                <input value={filters[key]} onChange={e=>setFilters(p=>({...p,[key]:e.target.value}))} placeholder={ph}
+                  style={{width:"100%",padding:"5px 8px",borderRadius:5,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:11,boxSizing:"border-box",outline:"none"}}/>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Controls row */}
+        <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}>
           <select value={filters.above_ma50} onChange={e=>setFilters(p=>({...p,above_ma50:e.target.value}))}
-            style={{padding:"6px 10px",borderRadius:6,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:11}}>
+            style={{padding:"5px 8px",borderRadius:5,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:10}}>
             <option value="">MA50: Any</option><option value="true">Above MA50</option><option value="false">Below MA50</option>
           </select>
-          <select value={filters.sort_by} onChange={e=>setFilters(p=>({...p,sort_by:e.target.value}))}
-            style={{padding:"6px 10px",borderRadius:6,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:11}}>
-            <option value="market_cap">Sort: Market Cap</option><option value="pe_ratio">Sort: P/E</option><option value="rsi_14">Sort: RSI</option>
-            <option value="change_1d_pct">Sort: 1D Change</option><option value="change_ytd_pct">Sort: YTD</option><option value="dividend_yield">Sort: Dividend</option>
-            <option value="signal_score">Sort: Signal Score</option>
+          <select value={filters.above_ma200} onChange={e=>setFilters(p=>({...p,above_ma200:e.target.value}))}
+            style={{padding:"5px 8px",borderRadius:5,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:10}}>
+            <option value="">MA200: Any</option><option value="true">Above MA200</option><option value="false">Below MA200</option>
           </select>
+          <select value={filters.signal_label} onChange={e=>setFilters(p=>({...p,signal_label:e.target.value}))}
+            style={{padding:"5px 8px",borderRadius:5,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:10}}>
+            <option value="">Signal: Any</option><option value="STRONG BUY">Strong Buy</option><option value="BUY">Buy</option>
+            <option value="NEUTRAL">Neutral</option><option value="SELL">Sell</option><option value="STRONG SELL">Strong Sell</option>
+          </select>
+          <select value={filters.val_label||""} onChange={e=>setFilters(p=>({...p,val_label:e.target.value}))}
+            style={{padding:"5px 8px",borderRadius:5,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:10}}>
+            <option value="">Valuation: Any</option><option value="UNDERVALUED">Undervalued</option><option value="FAIR">Fair</option><option value="OVERVALUED">Overvalued</option>
+          </select>
+          <select value={filters.sort_by} onChange={e=>setFilters(p=>({...p,sort_by:e.target.value}))}
+            style={{padding:"5px 8px",borderRadius:5,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:10}}>
+            <option value="market_cap">Sort: Mkt Cap</option><option value="pe_ratio">Sort: P/E</option><option value="rsi_14">Sort: RSI</option>
+            <option value="change_1d_pct">Sort: 1D</option><option value="change_ytd_pct">Sort: YTD</option><option value="dividend_yield">Sort: Dividend</option>
+            <option value="signal_score">Sort: Signal</option><option value="roe">Sort: ROE</option><option value="short_pct_float">Sort: Short%</option>
+            <option value="revenue_growth">Sort: Rev Growth</option><option value="beta">Sort: Beta</option>
+          </select>
+          <button onClick={()=>setShowMore(!showMore)}
+            style={{...mono(9,C.mut,600),padding:"5px 10px",borderRadius:5,border:`1px solid ${C.bdr}`,background:"transparent",cursor:"pointer"}}>
+            {showMore ? "− Less" : "+ More Filters"}
+          </button>
+          <button onClick={()=>{setFilters(p=>Object.fromEntries(Object.keys(p).map(k=>k==="sort_by"?[k,"market_cap"]:k==="limit"?[k,500]:[k,""])));}}
+            style={{...mono(9,C.mut,600),padding:"5px 10px",borderRadius:5,border:`1px solid ${C.bdr}`,background:"transparent",cursor:"pointer"}}>
+            ✕ Clear
+          </button>
           <button onClick={run} disabled={loading}
             style={{padding:"6px 16px",borderRadius:8,border:"none",background:C.sky,color:"#000",...mono(11,"#000",700),cursor:"pointer"}}>
             {loading ? "Scanning..." : "Screen"}
@@ -12297,7 +12346,7 @@ function ScreenerView() {
               <thead><tr style={{background:C.dim}}>
                 {[["Symbol","symbol"],["Name","name"],["Sector","sector"],["Price","price"],["Mkt Cap","market_cap"],
                   ["P/E","pe_ratio"],["P/B","pb_ratio"],["Div%","dividend_yield"],["RSI","rsi_14"],
-                  ["ROE","roe"],["Short%","short_pct_float"],
+                  ["ROE","roe"],["Short%","short_pct_float"],["Value","val_score"],
                   ["1D","change_1d_pct"],["1M","change_1m_pct"],["YTD","change_ytd_pct"],["Signal","signal_score"]].map(([label,key])=>{
                   const active = sortCol === key;
                   const arrow = active ? (sortDir === -1 ? " ▼" : " ▲") : "";
@@ -12335,6 +12384,11 @@ function ScreenerView() {
                     <td style={{...mono(10,t.rsi_14>70?C.red:t.rsi_14<30?C.grn:C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.rsi_14?.toFixed(0)||"—"}</td>
                     <td style={{...mono(10,cc(t.roe),700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.roe?.toFixed(1)||"—"}</td>
                     <td style={{...mono(10,t.short_pct_float>20?C.red:C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.short_pct_float?.toFixed(1)||"—"}</td>
+                    <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>
+                      {t.val_label ? <span style={{...mono(8,t.val_label==="UNDERVALUED"?C.grn:t.val_label==="OVERVALUED"?C.red:C.amb,700),
+                        padding:"1px 5px",borderRadius:3,background:(t.val_label==="UNDERVALUED"?C.grn:t.val_label==="OVERVALUED"?C.red:C.amb)+"15"}}>
+                        {t.val_label}</span> : <span style={mono(9,C.mut)}>—</span>}
+                    </td>
                     <td style={{...mono(10,cc(t.change_1d_pct),700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{fp(t.change_1d_pct)}</td>
                     <td style={{...mono(10,cc(t.change_1m_pct),700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{fp(t.change_1m_pct)}</td>
                     <td style={{...mono(10,cc(t.change_ytd_pct),700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{fp(t.change_ytd_pct)}</td>
