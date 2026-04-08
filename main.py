@@ -3303,9 +3303,17 @@ def alpha_opportunities(bust: Optional[str] = None):
 
 @app.get("/alpha/universe")
 def alpha_universe():
-    """Return the current universe registry."""
-    from alpha_engine import DEFAULT_UNIVERSE
-    return {"universe": DEFAULT_UNIVERSE, "count": len(DEFAULT_UNIVERSE)}
+    """Return the full universe registry — all actively traded US securities."""
+    from alpha_engine import get_full_universe, DEFAULT_UNIVERSE
+    full = get_full_universe()
+    from collections import Counter
+    types = Counter(t.get("asset_type", "Equity") for t in full)
+    return {
+        "universe": full[:100],  # first 100 for quick preview
+        "count": len(full),
+        "core_count": len(DEFAULT_UNIVERSE),
+        "breakdown": dict(types),
+    }
 
 
 # ---------------------------------------------------------------------------

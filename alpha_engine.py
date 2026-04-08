@@ -232,58 +232,62 @@ DEFAULT_UNIVERSE = [
 
 def get_full_universe() -> list[dict]:
     """
-    Build the full Alpha universe dynamically from S&P 500 sector data
-    + Russell 2000 holdings.  Returns DEFAULT_UNIVERSE as fallback.
+    Build the full Alpha universe from ALL actively traded US securities.
+    Sources: NASDAQ screener (7,000+ securities) + S&P 500 + Russell 1000/2000.
+    Covers: NYSE, NASDAQ, NYSE American/ARCA, ETFs, ETNs, ADRs, preferred, warrants.
+    Returns DEFAULT_UNIVERSE as fallback if all sources fail.
     """
     seen: set[str] = set()
     universe: list[dict] = []
 
-    # 1. Always include core ETFs/names
+    # 1. Always include core ETFs/names first
     for entry in DEFAULT_UNIVERSE:
         if entry["symbol"] not in seen:
             seen.add(entry["symbol"])
             universe.append(entry)
 
-    # 2. S&P 500 from cached sector data
+    # 2. Full US universe from NASDAQ screener + index constituents
     try:
-        import json
-        from pathlib import Path
-        sp_path = Path(__file__).parent / "runs" / "sp500_universe.json"
-        if sp_path.exists():
-            data = json.loads(sp_path.read_text())
-            sp_uni = data.get("universe", {})
-            if isinstance(sp_uni, dict):
-                for sector, tickers in sp_uni.items():
-                    for sym in tickers:
-                        sym = sym.replace(".", "-")  # yfinance compat
-                        if sym not in seen:
-                            seen.add(sym)
-                            universe.append({
-                                "symbol": sym,
-                                "display_name": sym,
-                                "asset_type": "Equity",
-                                "sector": sector,
-                            })
-    except Exception:
-        pass
-
-    # 3. Russell 2000 from cached or fetched data
-    try:
-        from extended_universe import get_russell2000_tickers
-        r2k = get_russell2000_tickers()
-        for sym in r2k:
-            sym = sym.replace(".", "-")
+        from extended_universe import get_full_us_universe
+        full_us = get_full_us_universe()
+        for entry in full_us:
+            sym = entry["symbol"]
             if sym not in seen:
                 seen.add(sym)
                 universe.append({
                     "symbol": sym,
-                    "display_name": sym,
-                    "asset_type": "Equity",
-                    "sector": "Small Cap",
+                    "display_name": entry.get("name", sym),
+                    "asset_type": entry.get("asset_type", "Equity"),
+                    "sector": entry.get("asset_type", "Equity"),  # use asset_type as sector proxy
                 })
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Full US universe fetch failed, falling back to indices: %s", exc)
+        # Fallback: S&P 500 + Russell
+        try:
+            import json
+            from pathlib import Path
+            sp_path = Path(__file__).parent / "runs" / "sp500_universe.json"
+            if sp_path.exists():
+                data = json.loads(sp_path.read_text())
+                sp_uni = data.get("universe", {})
+                if isinstance(sp_uni, dict):
+                    for sector, tickers in sp_uni.items():
+                        for sym in tickers:
+                            sym = sym.replace(".", "-")
+                            if sym not in seen:
+                                seen.add(sym)
+                                universe.append({"symbol": sym, "display_name": sym, "asset_type": "Equity", "sector": sector})
+        except Exception:
+            pass
+        try:
+            from extended_universe import get_russell2000_tickers
+            for sym in get_russell2000_tickers():
+                sym = sym.replace(".", "-")
+                if sym not in seen:
+                    seen.add(sym)
+                    universe.append({"symbol": sym, "display_name": sym, "asset_type": "Equity", "sector": "Small Cap"})
+        except Exception:
+            pass
 
-    logger.info("Full Alpha universe: %d tickers (core=%d, total=%d)",
-                len(universe), len(DEFAULT_UNIVERSE), len(universe))
+    logger.info("Full Alpha universe: %d tickers (core=%d)", len(universe), len(DEFAULT_UNIVERSE))
     return universe if len(universe) > len(DEFAULT_UNIVERSE) else DEFAULT_UNIVERSE
