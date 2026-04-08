@@ -7084,7 +7084,7 @@ def trade_plan(symbol: str, direction: str = "long", risk_pct: float = 2.0):
 
 @app.get("/daily-brief")
 def daily_brief(user=Depends(get_current_user)):
-    """Generate a personalized daily brief based on watchlist."""
+    """Generate a comprehensive daily brief — institutional morning note style."""
     # Get user's watchlist
     watchlist_symbols = []
     try:
@@ -7096,47 +7096,174 @@ def daily_brief(user=Depends(get_current_user)):
         db.close()
     except Exception:
         pass
-
     if not watchlist_symbols:
-        watchlist_symbols = ["SPY", "QQQ", "AAPL", "TSLA", "NVDA"]
+        watchlist_symbols = ["SPY", "QQQ", "AAPL", "TSLA", "NVDA", "MSFT", "AMZN", "META", "GOOGL", "IWM"]
 
-    brief = {"date": datetime.utcnow().strftime("%Y-%m-%d"), "watchlist": watchlist_symbols, "movers": [], "alerts": [], "earnings_today": [], "summary": []}
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    brief = {
+        "date": today,
+        "watchlist": watchlist_symbols,
+        "market_regime": None,
+        "market_summary": [],
+        "index_performance": [],
+        "sector_leaders": [],
+        "sector_laggards": [],
+        "watchlist_movers": [],
+        "watchlist_snapshot": [],
+        "alerts": [],
+        "earnings_upcoming": [],
+        "alpha_top_picks": [],
+        "signal_changes": [],
+        "positioning": None,
+    }
 
-    # Check each watchlist ticker
+    # ── 1. Market regime & overview ──────────────────────────────────────
+    mkt = _get_cache("market:overview")
+    if mkt:
+        # Indices
+        for idx in (mkt.get("indices") or []):
+            brief["index_performance"].append({
+                "symbol": idx["symbol"], "price": idx.get("price"),
+                "change": idx.get("change_pct"),
+            })
+
+        # Sectors — leaders & laggards
+        sectors = sorted(mkt.get("sectors") or [], key=lambda s: s.get("change_pct") or 0, reverse=True)
+        brief["sector_leaders"] = [{"symbol": s["symbol"], "name": s.get("name",""), "change": s.get("change_pct")} for s in sectors[:3]]
+        brief["sector_laggards"] = [{"symbol": s["symbol"], "name": s.get("name",""), "change": s.get("change_pct")} for s in sectors[-3:]]
+
+        adv = sum(1 for s in sectors if (s.get("change_pct") or 0) >= 0)
+        total = len(sectors) or 11
+        vix = mkt.get("vix", {}).get("value")
+        vix_regime = mkt.get("vix", {}).get("regime", "")
+        fg = mkt.get("sentiment", {})
+
+        brief["market_summary"].append(f"{adv}/{total} sectors advancing — {'broad strength' if adv >= 8 else 'mixed breadth' if adv >= 5 else 'weak breadth'}")
+        if vix:
+            brief["market_summary"].append(f"VIX at {vix:.1f} ({vix_regime}) — {'elevated fear' if vix > 25 else 'calm conditions' if vix < 18 else 'moderate anxiety'}")
+        if fg.get("score"):
+            brief["market_summary"].append(f"Fear & Greed: {fg['score']} ({fg.get('label','')}) — {'greedy, potential complacency' if fg['score'] > 65 else 'fearful, potential opportunity' if fg['score'] < 35 else 'balanced sentiment'}")
+
+        # Credit
+        cr = mkt.get("credit", {})
+        if cr.get("stress"):
+            brief["market_summary"].append(f"Credit: {cr['stress']} stress — {'monitor for deterioration' if cr['stress'] != 'normal' else 'no concern'}")
+
+        # Yield curve
+        fi = mkt.get("fixed_income", {})
+        if fi.get("curve_regime"):
+            brief["market_summary"].append(f"Yield curve: {fi['curve_regime']} — {'recession watch' if fi['curve_regime'] == 'inverted' else 'normalization underway' if fi['curve_regime'] == 'steepening' else 'flat — policy uncertainty'}")
+
+        # Regime classification
+        try:
+            from alpha_engine import score_to_bias
+            idx_chgs = [i.get("change_pct", 0) for i in mkt.get("indices", [])]
+            avg_chg = sum(idx_chgs) / max(len(idx_chgs), 1)
+            brief["market_regime"] = {
+                "bias": "Bullish" if avg_chg > 0.5 else ("Bearish" if avg_chg < -0.5 else "Neutral"),
+                "breadth": f"{adv}/{total}",
+                "vix": vix,
+                "sentiment": fg.get("label", ""),
+            }
+        except Exception:
+            pass
+
+    # ── 2. Watchlist analysis ────────────────────────────────────────────
     for sym in watchlist_symbols[:20]:
         snap = _get_cache(f"ticker:snapshot:{sym}")
         if not snap:
             continue
 
         chg = snap.get("change_1d_pct")
-        if chg is not None and abs(chg) > 2:
-            brief["movers"].append({"symbol": sym, "change": chg, "price": snap.get("price")})
-
-        # Check if earnings today
-        ed = snap.get("next_earnings")
-        if ed and ed == datetime.utcnow().strftime("%Y-%m-%d"):
-            brief["earnings_today"].append({"symbol": sym, "date": ed})
-
-        # Check RSI extremes
+        price = snap.get("price")
         rsi = snap.get("rsi_14")
-        if rsi and (rsi > 75 or rsi < 25):
-            brief["alerts"].append({"symbol": sym, "type": "rsi", "value": rsi,
-                                     "message": f"{sym} RSI at {rsi:.0f} — {'overbought' if rsi > 75 else 'oversold'}"})
+        val_label = snap.get("val_label")
+        signal = snap.get("signal_label")
 
-        # Check valuation
-        if snap.get("val_label") == "UNDERVALUED" and chg and chg < -2:
-            brief["alerts"].append({"symbol": sym, "type": "value_dip",
-                                     "message": f"{sym} undervalued and down {chg:.1f}% today — potential opportunity"})
+        # Snapshot row for every watchlist ticker
+        brief["watchlist_snapshot"].append({
+            "symbol": sym, "price": price, "change_1d": chg,
+            "change_1m": snap.get("change_1m_pct"), "change_ytd": snap.get("change_ytd_pct"),
+            "rsi": rsi, "val_label": val_label, "signal": signal,
+            "pe": snap.get("pe_ratio"), "market_cap": snap.get("market_cap"),
+        })
 
-    brief["movers"].sort(key=lambda x: abs(x.get("change", 0)), reverse=True)
+        # Big movers
+        if chg is not None and abs(chg) > 1.5:
+            brief["watchlist_movers"].append({"symbol": sym, "change": chg, "price": price,
+                "reason": f"{'Earnings-related' if snap.get('next_earnings') == today else 'Market-driven'} move"})
 
-    # Market summary
-    mkt = _get_cache("market:overview")
+        # Alerts
+        if rsi and rsi > 75:
+            brief["alerts"].append({"symbol": sym, "type": "rsi_overbought", "severity": "warning",
+                "message": f"{sym} RSI at {rsi:.0f} — overbought, potential pullback risk"})
+        if rsi and rsi < 25:
+            brief["alerts"].append({"symbol": sym, "type": "rsi_oversold", "severity": "opportunity",
+                "message": f"{sym} RSI at {rsi:.0f} — oversold, potential bounce candidate"})
+        if val_label == "UNDERVALUED" and chg and chg < -2:
+            brief["alerts"].append({"symbol": sym, "type": "value_dip", "severity": "opportunity",
+                "message": f"{sym} undervalued and down {chg:.1f}% — potential value opportunity"})
+        if val_label == "OVERVALUED" and chg and chg > 3:
+            brief["alerts"].append({"symbol": sym, "type": "overvalued_rally", "severity": "warning",
+                "message": f"{sym} overvalued and up {chg:.1f}% — consider taking profits"})
+        if snap.get("altman_label") == "DISTRESS":
+            brief["alerts"].append({"symbol": sym, "type": "distress", "severity": "critical",
+                "message": f"{sym} Altman Z-Score indicates financial distress — elevated bankruptcy risk"})
+        if snap.get("short_pct_float") and snap["short_pct_float"] > 20:
+            brief["alerts"].append({"symbol": sym, "type": "high_short", "severity": "info",
+                "message": f"{sym} has {snap['short_pct_float']:.0f}% short interest — potential squeeze candidate"})
+
+        # Upcoming earnings
+        ed = snap.get("next_earnings")
+        if ed:
+            try:
+                from datetime import timedelta
+                ed_date = datetime.strptime(ed, "%Y-%m-%d").date()
+                days_away = (ed_date - datetime.utcnow().date()).days
+                if 0 <= days_away <= 7:
+                    brief["earnings_upcoming"].append({
+                        "symbol": sym, "date": ed, "days_away": days_away,
+                        "streak": snap.get("earnings_streak", 0),
+                        "label": "TODAY" if days_away == 0 else f"in {days_away}d",
+                    })
+            except Exception:
+                pass
+
+    brief["watchlist_movers"].sort(key=lambda x: abs(x.get("change", 0)), reverse=True)
+    brief["earnings_upcoming"].sort(key=lambda x: x.get("days_away", 99))
+
+    # ── 3. Alpha top picks ───────────────────────────────────────────────
+    try:
+        alpha = _get_cache("alpha:opportunities")
+        if alpha and alpha.get("opportunities"):
+            top = sorted(alpha["opportunities"], key=lambda o: abs(o.get("alpha_score", 0)), reverse=True)[:5]
+            brief["alpha_top_picks"] = [{
+                "symbol": o["symbol"], "score": o.get("alpha_score"),
+                "status": o.get("status"), "type": o.get("opportunity_type"),
+                "bias": o.get("bias"),
+            } for o in top]
+    except Exception:
+        pass
+
+    # ── 4. Positioning suggestion ────────────────────────────────────────
     if mkt:
-        adv = sum(1 for s in (mkt.get("sectors") or []) if (s.get("change_pct") or 0) >= 0)
-        brief["summary"].append(f"Market: {adv}/{len(mkt.get('sectors',[]))} sectors advancing")
-        if mkt.get("vix", {}).get("value"):
-            brief["summary"].append(f"VIX: {mkt['vix']['value']:.1f}")
+        sectors = mkt.get("sectors") or []
+        adv = sum(1 for s in sectors if (s.get("change_pct") or 0) >= 0)
+        total = len(sectors) or 11
+        vix = mkt.get("vix", {}).get("value") or 20
+
+        if adv >= 8 and vix < 20:
+            brief["positioning"] = {"posture": "Risk-On", "suggestion": "Broad participation supports equity exposure. Favor growth and cyclicals.",
+                "overweight": ["QQQ", "IWM", "Cyclicals"], "underweight": ["Gold", "Defensives"]}
+        elif adv >= 5:
+            brief["positioning"] = {"posture": "Constructive", "suggestion": "Positive but selective. Focus on quality and sector leaders.",
+                "overweight": ["Quality growth"], "underweight": ["Speculative longs"]}
+        elif adv >= 3:
+            brief["positioning"] = {"posture": "Neutral", "suggestion": "Mixed signals. Stay balanced and reduce concentration risk.",
+                "overweight": [], "underweight": ["Leveraged exposure"]}
+        else:
+            brief["positioning"] = {"posture": "Defensive", "suggestion": "Weak breadth. Favor cash, bonds, and defensive sectors.",
+                "overweight": ["Cash", "Gold", "Utilities"], "underweight": ["Equity", "Cyclicals"]}
 
     return brief
 

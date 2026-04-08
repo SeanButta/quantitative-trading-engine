@@ -12680,26 +12680,169 @@ function DailyBriefView() {
   const [data, setData] = useState(null);
   useEffect(()=>{fetch("/api/daily-brief").then(r=>r.json()).then(setData).catch(()=>{});},[]);
   const cc = v => v==null?C.mut:v>=0?C.grn:C.red;
+  const fp = v => v!=null?(v>=0?"+":"")+v.toFixed(1)+"%":"—";
+  const Section = ({accent,title,children}) => (
+    <div style={{borderRadius:14,border:`1.5px solid ${accent||C.bdr}30`,background:(accent||C.surf)+"07",padding:"16px 18px"}}>
+      <div style={{...mono(11,C.headingTxt,700),marginBottom:10}}>{title}</div>{children}
+    </div>
+  );
   return (
-    <div style={{display:"flex",flexDirection:"column",gap:16}}>
-      <div><Lbl>Daily Brief</Lbl><div style={mono(10,C.mut)}>Personalized morning summary based on your watchlist</div></div>
+    <div style={{display:"flex",flexDirection:"column",gap:14}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div><Lbl>Daily Brief</Lbl><div style={mono(10,C.mut)}>Personalized morning note — {data?.date || "loading..."}</div></div>
+        {data?.market_regime && <Tag color={data.market_regime.bias==="Bullish"?C.grn:data.market_regime.bias==="Bearish"?C.red:C.amb}>{data.market_regime.bias}</Tag>}
+      </div>
       {data ? (<>
-        {data.summary?.length>0 && <Card accent={C.sky}><div style={{...mono(11,C.headingTxt,700),marginBottom:8}}>MARKET SNAPSHOT</div>
-          {data.summary.map((s,i)=><div key={i} style={mono(10,C.txt)}>• {s}</div>)}</Card>}
-        {data.movers?.length>0 && <Card accent={C.amb}><div style={{...mono(11,C.headingTxt,700),marginBottom:8}}>BIG MOVERS IN YOUR WATCHLIST</div>
-          <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
-            {data.movers.map(m=><div key={m.symbol} style={{padding:"8px 12px",borderRadius:8,background:C.dim,border:`1px solid ${cc(m.change)}25`}}>
-              <span style={mono(12,C.headingTxt,700)}>{m.symbol}</span>
-              <span style={{...mono(12,cc(m.change),700),marginLeft:8}}>{m.change>=0?"+":""}{m.change?.toFixed(1)}%</span>
-              {m.price && <span style={{...mono(9,C.mut),marginLeft:6}}>${m.price.toFixed(2)}</span>}
-            </div>)}
-          </div></Card>}
-        {data.alerts?.length>0 && <Card accent={C.red}><div style={{...mono(11,C.headingTxt,700),marginBottom:8}}>ALERTS</div>
-          {data.alerts.map((a,i)=><div key={i} style={{...mono(10,C.txt),padding:"4px 0"}}>⚠ {a.message}</div>)}</Card>}
-        {data.earnings_today?.length>0 && <Card accent={C.amb}><div style={{...mono(11,C.headingTxt,700),marginBottom:8}}>EARNINGS TODAY</div>
-          {data.earnings_today.map(e=><Tag key={e.symbol} color={C.amb}>{e.symbol}</Tag>)}</Card>}
-        {!data.movers?.length && !data.alerts?.length && <Card><div style={mono(10,C.mut)}>No significant activity in your watchlist today. Add tickers to your Watchlist for personalized alerts.</div></Card>}
-      </>) : <Card><div style={mono(10,C.mut)}>Loading daily brief...</div></Card>}
+        {/* Market Summary */}
+        {data.market_summary?.length>0 && (
+          <Section accent={C.sky} title="MARKET ENVIRONMENT">
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+              {data.market_summary.map((s,i)=><div key={i} style={{display:"flex",gap:6}}><span style={mono(10,C.mut)}>•</span><span style={mono(10,C.txt)}>{s}</span></div>)}
+            </div>
+          </Section>
+        )}
+
+        {/* Index + Sector Performance */}
+        {(data.index_performance?.length>0 || data.sector_leaders?.length>0) && (
+          <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"1fr 1fr",gap:12}}>
+            {data.index_performance?.length>0 && (
+              <Section accent={C.sky} title="INDEX PERFORMANCE">
+                <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+                  {data.index_performance.map(idx=>(
+                    <div key={idx.symbol} style={{padding:"8px 12px",borderRadius:8,background:C.dim,border:`1px solid ${cc(idx.change)}25`,flex:"1 1 80px"}}>
+                      <div style={mono(10,C.headingTxt,700)}>{idx.symbol}</div>
+                      <div style={mono(12,cc(idx.change),700)}>{fp(idx.change)}</div>
+                    </div>
+                  ))}
+                </div>
+              </Section>
+            )}
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              {data.sector_leaders?.length>0 && (
+                <div style={{padding:"10px 14px",borderRadius:10,background:C.grn+"08",border:`1px solid ${C.grn}20`}}>
+                  <div style={{...mono(8,C.grn,700),letterSpacing:"0.06em",marginBottom:4}}>SECTOR LEADERS</div>
+                  {data.sector_leaders.map(s=><div key={s.symbol} style={{display:"flex",justifyContent:"space-between"}}><span style={mono(9,C.txt)}>{s.name||s.symbol}</span><span style={mono(9,C.grn,700)}>{fp(s.change)}</span></div>)}
+                </div>
+              )}
+              {data.sector_laggards?.length>0 && (
+                <div style={{padding:"10px 14px",borderRadius:10,background:C.red+"08",border:`1px solid ${C.red}20`}}>
+                  <div style={{...mono(8,C.red,700),letterSpacing:"0.06em",marginBottom:4}}>SECTOR LAGGARDS</div>
+                  {data.sector_laggards.map(s=><div key={s.symbol} style={{display:"flex",justifyContent:"space-between"}}><span style={mono(9,C.txt)}>{s.name||s.symbol}</span><span style={mono(9,C.red,700)}>{fp(s.change)}</span></div>)}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Positioning */}
+        {data.positioning && (
+          <Section accent={data.positioning.posture==="Risk-On"?C.grn:data.positioning.posture==="Defensive"?C.red:C.amb} title={`POSITIONING: ${data.positioning.posture.toUpperCase()}`}>
+            <div style={mono(10,C.txt)}>{data.positioning.suggestion}</div>
+            {data.positioning.overweight?.length>0 && <div style={{...mono(9,C.grn),marginTop:6}}>Overweight: {data.positioning.overweight.join(", ")}</div>}
+            {data.positioning.underweight?.length>0 && <div style={{...mono(9,C.red),marginTop:3}}>Underweight: {data.positioning.underweight.join(", ")}</div>}
+          </Section>
+        )}
+
+        {/* Alerts */}
+        {data.alerts?.length>0 && (
+          <Section accent={C.red} title={`ALERTS (${data.alerts.length})`}>
+            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+              {data.alerts.map((a,i)=>{
+                const col = a.severity==="critical"?C.red:a.severity==="warning"?C.amb:a.severity==="opportunity"?C.grn:C.sky;
+                return <div key={i} style={{display:"flex",gap:8,padding:"4px 8px",borderRadius:6,background:col+"08",borderLeft:`3px solid ${col}`}}>
+                  <span style={mono(10,C.txt)}>{a.message}</span>
+                </div>;
+              })}
+            </div>
+          </Section>
+        )}
+
+        {/* Watchlist Movers */}
+        {data.watchlist_movers?.length>0 && (
+          <Section accent={C.amb} title="WATCHLIST MOVERS">
+            <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+              {data.watchlist_movers.map(m=>(
+                <div key={m.symbol} style={{padding:"8px 14px",borderRadius:10,background:C.dim,border:`1px solid ${cc(m.change)}25`,minWidth:120}}>
+                  <div style={{display:"flex",justifyContent:"space-between",gap:12}}>
+                    <span style={mono(12,C.headingTxt,700)}>{m.symbol}</span>
+                    <span style={mono(12,cc(m.change),700)}>{fp(m.change)}</span>
+                  </div>
+                  {m.price && <div style={mono(9,C.mut)}>${m.price.toFixed(2)}</div>}
+                  {m.reason && <div style={mono(8,C.mut)}>{m.reason}</div>}
+                </div>
+              ))}
+            </div>
+          </Section>
+        )}
+
+        {/* Earnings Upcoming */}
+        {data.earnings_upcoming?.length>0 && (
+          <Section accent={C.amb} title="EARNINGS COMING UP">
+            <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+              {data.earnings_upcoming.map(e=>(
+                <div key={e.symbol} style={{padding:"6px 12px",borderRadius:8,background:C.dim,border:`1px solid ${C.amb}25`}}>
+                  <span style={mono(11,C.headingTxt,700)}>{e.symbol}</span>
+                  <span style={{...mono(9,e.label==="TODAY"?C.red:C.amb,700),marginLeft:8}}>{e.label}</span>
+                  {e.streak!==0 && <span style={{...mono(8,e.streak>0?C.grn:C.red),marginLeft:6}}>{e.streak>0?`${e.streak} beats`:`${Math.abs(e.streak)} misses`}</span>}
+                </div>
+              ))}
+            </div>
+          </Section>
+        )}
+
+        {/* Watchlist Snapshot Table */}
+        {data.watchlist_snapshot?.length>0 && (
+          <Card>
+            <Lbl>WATCHLIST SNAPSHOT</Lbl>
+            <ScrollTable>
+            <table style={{width:"100%",borderCollapse:"collapse",fontFamily:"monospace"}}>
+              <thead><tr style={{background:C.dim}}>
+                {["Symbol","Price","1D","1M","YTD","RSI","P/E","Value","Signal"].map(h=>
+                  <th key={h} style={{...mono(8,C.mut,700),padding:"4px 8px",borderBottom:`1px solid ${C.bdr}`,textAlign:"right"}}>{h}</th>
+                )}
+              </tr></thead>
+              <tbody>
+                {data.watchlist_snapshot.map(t=>(
+                  <tr key={t.symbol}>
+                    <td style={{...mono(11,C.headingTxt,700),padding:"4px 8px",borderBottom:`1px solid ${C.bdr}20`}}>{t.symbol}</td>
+                    <td style={{...mono(10,C.txt),padding:"4px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.price?`$${t.price.toFixed(2)}`:"—"}</td>
+                    <td style={{...mono(10,cc(t.change_1d),700),padding:"4px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{fp(t.change_1d)}</td>
+                    <td style={{...mono(10,cc(t.change_1m),700),padding:"4px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{fp(t.change_1m)}</td>
+                    <td style={{...mono(10,cc(t.change_ytd),700),padding:"4px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{fp(t.change_ytd)}</td>
+                    <td style={{...mono(10,t.rsi>70?C.red:t.rsi<30?C.grn:C.txt),padding:"4px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.rsi?.toFixed(0)||"—"}</td>
+                    <td style={{...mono(10,C.txt),padding:"4px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.pe?.toFixed(1)||"—"}</td>
+                    <td style={{padding:"4px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.val_label?<span style={{...mono(7,t.val_label==="UNDERVALUED"?C.grn:t.val_label==="OVERVALUED"?C.red:C.amb,600),padding:"1px 4px",borderRadius:3,background:(t.val_label==="UNDERVALUED"?C.grn:t.val_label==="OVERVALUED"?C.red:C.amb)+"15"}}>{t.val_label}</span>:"—"}</td>
+                    <td style={{padding:"4px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.signal?<Tag color={t.signal.includes("BUY")?C.grn:t.signal.includes("SELL")?C.red:C.amb}>{t.signal}</Tag>:"—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            </ScrollTable>
+          </Card>
+        )}
+
+        {/* Alpha Top Picks */}
+        {data.alpha_top_picks?.length>0 && (
+          <Section accent={C.pur} title="ALPHA TOP PICKS">
+            <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+              {data.alpha_top_picks.map(o=>(
+                <div key={o.symbol} style={{padding:"8px 12px",borderRadius:8,background:C.dim,border:`1px solid ${C.pur}25`,minWidth:100}}>
+                  <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                    <span style={mono(11,C.headingTxt,700)}>{o.symbol}</span>
+                    <Tag color={o.bias==="Bullish"?C.grn:o.bias==="Bearish"?C.red:C.amb}>{o.bias}</Tag>
+                  </div>
+                  <div style={mono(8,C.sky)}>{o.type}</div>
+                  <div style={mono(9,cc(o.score),700)}>Score: {o.score>0?"+":""}{(o.score*100).toFixed(0)}</div>
+                </div>
+              ))}
+            </div>
+          </Section>
+        )}
+
+        {!data.watchlist_movers?.length && !data.alerts?.length && !data.market_summary?.length && (
+          <Card><div style={mono(10,C.mut)}>Add tickers to your Watchlist for a personalized daily brief.</div></Card>
+        )}
+      </>) : <Card><div style={{...mono(11,C.mut),textAlign:"center",padding:"30px 0"}}>Loading daily brief...</div></Card>}
     </div>
   );
 }
