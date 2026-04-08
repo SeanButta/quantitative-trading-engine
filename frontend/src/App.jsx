@@ -12233,7 +12233,9 @@ function ScreenerView() {
   const C = useC();
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [filters, setFilters] = useState({ max_pe: "", min_roe: "", sector: "", above_ma50: "", min_dividend_yield: "", max_rsi: "", sort_by: "market_cap", limit: 100 });
+  const [filters, setFilters] = useState({ max_pe: "", min_roe: "", sector: "", above_ma50: "", min_dividend_yield: "", max_rsi: "", sort_by: "market_cap", limit: 500 });
+  const [sortCol, setSortCol] = useState("market_cap");
+  const [sortDir, setSortDir] = useState(-1); // -1 = desc, 1 = asc
   const run = () => {
     setLoading(true);
     const body = {};
@@ -12293,12 +12295,34 @@ function ScreenerView() {
           <div style={{overflowX:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontFamily:"monospace"}}>
               <thead><tr style={{background:C.dim}}>
-                {["Symbol","Name","Sector","Price","Mkt Cap","P/E","P/B","Div%","RSI","1D","1M","YTD","Signal"].map(h=>(
-                  <th key={h} style={{...mono(8,C.mut,700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}`,textAlign:"right",whiteSpace:"nowrap"}}>{h}</th>
-                ))}
+                {[["Symbol","symbol"],["Name","name"],["Sector","sector"],["Price","price"],["Mkt Cap","market_cap"],
+                  ["P/E","pe_ratio"],["P/B","pb_ratio"],["Div%","dividend_yield"],["RSI","rsi_14"],
+                  ["ROE","roe"],["Short%","short_pct_float"],
+                  ["1D","change_1d_pct"],["1M","change_1m_pct"],["YTD","change_ytd_pct"],["Signal","signal_score"]].map(([label,key])=>{
+                  const active = sortCol === key;
+                  const arrow = active ? (sortDir === -1 ? " ▼" : " ▲") : "";
+                  return (
+                    <th key={key} onClick={()=>{
+                      if (sortCol === key) setSortDir(d => d * -1);
+                      else { setSortCol(key); setSortDir(key==="symbol"||key==="name"||key==="sector" ? 1 : -1); }
+                    }}
+                      style={{...mono(8,active?C.sky:C.mut,700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}`,
+                        textAlign:"right",whiteSpace:"nowrap",cursor:"pointer",userSelect:"none",
+                        borderBottom: active ? `2px solid ${C.sky}` : `1px solid ${C.bdr}`}}>
+                      {label}{arrow}
+                    </th>
+                  );
+                })}
               </tr></thead>
               <tbody>
-                {(results.results||[]).map((t,i)=>(
+                {[...(results.results||[])].sort((a,b)=>{
+                  const av = a[sortCol], bv = b[sortCol];
+                  if (av == null && bv == null) return 0;
+                  if (av == null) return 1;
+                  if (bv == null) return -1;
+                  if (typeof av === "string") return av.localeCompare(bv) * sortDir;
+                  return (av - bv) * sortDir;
+                }).map((t,i)=>(
                   <tr key={t.symbol||i} style={{background:i%2===0?"transparent":C.dim+"60"}}>
                     <td style={{...mono(11,C.headingTxt,700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`}}>{t.symbol}</td>
                     <td style={{...mono(9,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.name}</td>
@@ -12309,6 +12333,8 @@ function ScreenerView() {
                     <td style={{...mono(10,C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.pb_ratio?.toFixed(1)||"—"}</td>
                     <td style={{...mono(10,C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.dividend_yield?.toFixed(1)||"—"}</td>
                     <td style={{...mono(10,t.rsi_14>70?C.red:t.rsi_14<30?C.grn:C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.rsi_14?.toFixed(0)||"—"}</td>
+                    <td style={{...mono(10,cc(t.roe),700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.roe?.toFixed(1)||"—"}</td>
+                    <td style={{...mono(10,t.short_pct_float>20?C.red:C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.short_pct_float?.toFixed(1)||"—"}</td>
                     <td style={{...mono(10,cc(t.change_1d_pct),700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{fp(t.change_1d_pct)}</td>
                     <td style={{...mono(10,cc(t.change_1m_pct),700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{fp(t.change_1m_pct)}</td>
                     <td style={{...mono(10,cc(t.change_ytd_pct),700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{fp(t.change_ytd_pct)}</td>
