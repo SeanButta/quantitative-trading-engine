@@ -5052,18 +5052,25 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
     else:
         try:
             import yfinance as _yf2
-            _t = _yf2.Ticker(sym)
-            # Isolate .info so a rate-limit or network error doesn't kill the whole block
-            _info = {}
-            try:
-                _info = _t.info or {}
-            except Exception:
-                pass
+            # Try cached info dict first (from overnight batch / sector warmer)
+            _info = _get_cache(f"ticker:info:{sym}") or {}
+            _t = None
+            if not _info:
+                _t = _yf2.Ticker(sym)
+                try:
+                    _info = _t.info or {}
+                except Exception:
+                    _info = {}
+                # Cache for next time
+                if _info:
+                    _set_cache(f"ticker:info:{sym}", _info, _TTL_FINANCIALS, "advisor")
             _price = (result.get("technical") or {}).get("latest_close")
+            if _t is None:
+                _t = _yf2.Ticker(sym)  # lazy init for analyst/earnings data
             # Analyst price target upside
             _target_upside = None
             try:
-                _apt = _t.analyst_price_targets
+                _apt = _info.get("_analyst_targets") if _info.get("_analyst_targets") else _t.analyst_price_targets
                 if _apt is not None:
                     _apt_d = _apt.to_dict() if hasattr(_apt, "to_dict") else _apt
                     _mean_target = _apt_d.get("mean") or _apt_d.get("current")
@@ -5075,7 +5082,7 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
             _earnings_streak = 0
             _last_eps_surprise = None
             try:
-                _eh = _t.earnings_history
+                _eh = _t.earnings_history if _t else None
                 if _eh is not None and not _eh.empty and "surprisePercent" in _eh.columns:
                     _recent = _eh["surprisePercent"].dropna().tolist()
                     _streak = 0
