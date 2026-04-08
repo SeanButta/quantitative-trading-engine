@@ -4813,61 +4813,88 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
 
     # ── 2. Sentiment ─────────────────────────────────────────────────────────
     try:
-        from sentiment_engine import SentimentEngine
-        sent = SentimentEngine().compute_signal(sym)
-        result["sentiment"] = {
-            "score":      sent.score,
-            "direction":  sent.direction,
-            "strength":   sent.signal_strength,
-            "articles":   sent.article_count,
-            "momentum":   sent.momentum,
-            "blurb":      sent.blurb,
-            "headlines":  sent.headline_snippets[:3],
-        }
+        # Cache-first: check for pre-computed sentiment
+        _sent_cached = _get_cache(f"sentiment:{sym}:24")
+        if _sent_cached:
+            result["sentiment"] = _sent_cached
+        else:
+            from sentiment_engine import SentimentEngine
+            sent = SentimentEngine().compute_signal(sym)
+            _sent_out = {
+                "score":      sent.score,
+                "direction":  sent.direction,
+                "strength":   sent.signal_strength,
+                "articles":   sent.article_count,
+                "momentum":   sent.momentum,
+                "blurb":      sent.blurb,
+                "headlines":  sent.headline_snippets[:3],
+            }
+            result["sentiment"] = _sent_out
+            _set_cache(f"sentiment:{sym}:24", _sent_out, _TTL_SENTIMENT, "advisor")
     except Exception as e:
         errors.append(f"sentiment: {e}")
         result["sentiment"] = None
 
     # ── 3. ML Signal ─────────────────────────────────────────────────────────
     try:
-        import yfinance as yf
-        import polars as pl
-        from feature_engine import FeatureEngine
-        from ml_signal_engine import MLSignalEngine
-
-        hist = yf.Ticker(sym).history(period="3y")
-        if not hist.empty:
-            # Build Polars DataFrame without PyArrow — construct from plain Python lists
-            # to avoid pandas datetime64/nullable-int incompatibilities.
-            idx = hist.index
-            if hasattr(idx.dtype, "tz") and idx.dtype.tz:
-                ts_us = [int(t.timestamp() * 1_000_000) for t in idx]
-            else:
-                ts_us = [int(t.value // 1_000) for t in idx]   # ns → µs
-            prices_df = pl.DataFrame({
-                "timestamp": ts_us,
-                "open":      hist["Open"].astype(float).tolist(),
-                "high":      hist["High"].astype(float).tolist(),
-                "low":       hist["Low"].astype(float).tolist(),
-                "close":     hist["Close"].astype(float).tolist(),
-                "volume":    hist["Volume"].astype(int).tolist(),
-                "symbol":    [sym] * len(hist),
-            }).with_columns([
-                pl.col("timestamp").cast(pl.Datetime("us")),
-            ])
-            features = FeatureEngine().compute(prices_df)
-            ml_result = MLSignalEngine().run(features, sym)
-            result["ml_signal"] = {
-                "p_up":        ml_result.p_up,
-                "direction":   ml_result.direction,
-                "confidence":  ml_result.confidence,
-                "strength":    ml_result.signal_strength,
-                "top_feature": ml_result.top_feature,
-                "accuracy":    ml_result.model_accuracy,
-                "blurb":       ml_result.blurb,
-            }
+        # Cache-first: check for pre-computed ML signal
+        _ml_cached = _get_cache(f"ml_signal:{sym}")
+        if _ml_cached:
+            result["ml_signal"] = _ml_cached
         else:
-            result["ml_signal"] = None
+            from precompute import db_cache_get as _dbcg2
+            _ml_db = _dbcg2(SessionLocal, f"ml_signal:{sym}")
+            if _ml_db:
+                result["ml_signal"] = _ml_db
+                _set_cache(f"ml_signal:{sym}", _ml_db, _TTL_TECHNICAL, "advisor")
+            else:
+                import yfinance as yf
+                import polars as pl
+                from feature_engine import FeatureEngine
+                from ml_signal_engine import MLSignalEngine
+
+                # DB-first for OHLCV
+                from technical_analysis import _load_ohlcv_from_db
+                _ml_hist = _load_ohlcv_from_db(sym, "3y", "1d")
+                if _ml_hist is not None:
+                    hist = _ml_hist
+                    hist.columns = [c.capitalize() for c in hist.columns]  # match yfinance format
+                else:
+                    hist = yf.Ticker(sym).history(period="3y")
+                if not hist.empty:
+                    # Build Polars DataFrame without PyArrow — construct from plain Python lists
+                    # to avoid pandas datetime64/nullable-int incompatibilities.
+                    idx = hist.index
+                    if hasattr(idx.dtype, "tz") and idx.dtype.tz:
+                        ts_us = [int(t.timestamp() * 1_000_000) for t in idx]
+                    else:
+                        ts_us = [int(t.value // 1_000) for t in idx]   # ns → µs
+                    prices_df = pl.DataFrame({
+                        "timestamp": ts_us,
+                        "open":      hist["Open"].astype(float).tolist(),
+                        "high":      hist["High"].astype(float).tolist(),
+                        "low":       hist["Low"].astype(float).tolist(),
+                        "close":     hist["Close"].astype(float).tolist(),
+                        "volume":    hist["Volume"].astype(int).tolist(),
+                        "symbol":    [sym] * len(hist),
+                    }).with_columns([
+                        pl.col("timestamp").cast(pl.Datetime("us")),
+                    ])
+                    features = FeatureEngine().compute(prices_df)
+                    ml_result = MLSignalEngine().run(features, sym)
+                    _ml_out = {
+                        "p_up":        ml_result.p_up,
+                        "direction":   ml_result.direction,
+                        "confidence":  ml_result.confidence,
+                        "strength":    ml_result.signal_strength,
+                        "top_feature": ml_result.top_feature,
+                        "accuracy":    ml_result.model_accuracy,
+                        "blurb":       ml_result.blurb,
+                    }
+                    result["ml_signal"] = _ml_out
+                    _set_cache(f"ml_signal:{sym}", _ml_out, _TTL_TECHNICAL, "advisor")
+                else:
+                    result["ml_signal"] = None
     except Exception as e:
         errors.append(f"ml_signal: {e}")
         result["ml_signal"] = None
