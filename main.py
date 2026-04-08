@@ -6252,6 +6252,546 @@ def admin_batch_status(user=Depends(get_current_user)):
     return {"status": "no batch run recorded"}
 
 
+# ---------------------------------------------------------------------------
+# Endpoints: Watchlist CRUD
+# ---------------------------------------------------------------------------
+
+class WatchlistRequest(BaseModel):
+    name: str = "My Watchlist"
+    symbols: list[str] = []
+
+
+@app.get("/watchlists")
+def list_watchlists(user=Depends(get_current_user)):
+    from models import Watchlist
+    db = SessionLocal()
+    try:
+        wls = db.query(Watchlist).filter(Watchlist.user_id == str(user.get("user_id", 0))).all()
+        return [{"id": w.id, "name": w.name, "symbols": w.symbols or [],
+                 "created_at": str(w.created_at), "updated_at": str(w.updated_at)} for w in wls]
+    finally:
+        db.close()
+
+
+@app.post("/watchlists")
+def create_watchlist(req: WatchlistRequest, user=Depends(get_current_user)):
+    from models import Watchlist
+    db = SessionLocal()
+    try:
+        wl = Watchlist(id=str(uuid.uuid4())[:8], user_id=str(user.get("user_id", 0)),
+                       name=req.name, symbols=req.symbols)
+        db.add(wl)
+        db.commit()
+        return {"id": wl.id, "name": wl.name, "symbols": wl.symbols}
+    finally:
+        db.close()
+
+
+@app.put("/watchlists/{wl_id}")
+def update_watchlist(wl_id: str, req: WatchlistRequest, user=Depends(get_current_user)):
+    from models import Watchlist
+    db = SessionLocal()
+    try:
+        wl = db.query(Watchlist).filter(Watchlist.id == wl_id).first()
+        if not wl:
+            raise HTTPException(status_code=404, detail="Watchlist not found")
+        wl.name = req.name
+        wl.symbols = req.symbols
+        db.commit()
+        return {"id": wl.id, "name": wl.name, "symbols": wl.symbols}
+    finally:
+        db.close()
+
+
+@app.delete("/watchlists/{wl_id}")
+def delete_watchlist(wl_id: str, user=Depends(get_current_user)):
+    from models import Watchlist
+    db = SessionLocal()
+    try:
+        wl = db.query(Watchlist).filter(Watchlist.id == wl_id).first()
+        if wl:
+            db.delete(wl)
+            db.commit()
+        return {"deleted": True}
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: Earnings Calendar
+# ---------------------------------------------------------------------------
+
+@app.get("/calendar/earnings")
+def earnings_calendar(days: int = 30):
+    """Aggregate upcoming earnings dates from all cached ticker snapshots."""
+    from datetime import datetime, timedelta
+    db = SessionLocal()
+    try:
+        from models import CacheEntry
+        import json as _json
+        rows = db.query(CacheEntry).filter(
+            CacheEntry.key.like("ticker:snapshot:%"),
+            CacheEntry.expires_at > datetime.utcnow(),
+        ).all()
+        events = []
+        cutoff = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%d")
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        for row in rows:
+            try:
+                snap = _json.loads(row.value_json)
+                ed = snap.get("next_earnings")
+                if ed and today <= ed <= cutoff:
+                    events.append({
+                        "symbol": snap.get("symbol", row.key.split(":")[-1]),
+                        "name": snap.get("name", ""),
+                        "date": ed,
+                        "sector": snap.get("sector", ""),
+                        "market_cap": snap.get("market_cap"),
+                        "eps_ttm": snap.get("eps_ttm"),
+                        "last_surprise": snap.get("last_eps_surprise"),
+                        "streak": snap.get("earnings_streak", 0),
+                    })
+            except Exception:
+                pass
+        events.sort(key=lambda e: e["date"])
+        return {"events": events, "count": len(events), "days": days}
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: Stock Screener
+# ---------------------------------------------------------------------------
+
+class ScreenerRequest(BaseModel):
+    min_market_cap: Optional[float] = None     # billions
+    max_market_cap: Optional[float] = None
+    min_pe: Optional[float] = None
+    max_pe: Optional[float] = None
+    min_pb: Optional[float] = None
+    max_pb: Optional[float] = None
+    min_dividend_yield: Optional[float] = None  # percent
+    min_rsi: Optional[float] = None
+    max_rsi: Optional[float] = None
+    min_revenue_growth: Optional[float] = None  # percent
+    min_roe: Optional[float] = None
+    sector: Optional[str] = None
+    signal_label: Optional[str] = None          # STRONG BUY, BUY, NEUTRAL, SELL
+    above_ma50: Optional[bool] = None
+    above_ma200: Optional[bool] = None
+    min_short_ratio: Optional[float] = None
+    sort_by: str = "market_cap"
+    sort_dir: str = "desc"
+    limit: int = 100
+
+
+@app.post("/screener")
+def stock_screener(req: ScreenerRequest):
+    """Screen all cached tickers against filter criteria."""
+    from datetime import datetime
+    db = SessionLocal()
+    try:
+        from models import CacheEntry
+        import json as _json
+        rows = db.query(CacheEntry).filter(
+            CacheEntry.key.like("ticker:snapshot:%"),
+            CacheEntry.expires_at > datetime.utcnow(),
+        ).all()
+        results = []
+        for row in rows:
+            try:
+                s = _json.loads(row.value_json)
+            except Exception:
+                continue
+            # Apply filters
+            if req.min_market_cap and (s.get("market_cap") or 0) < req.min_market_cap:
+                continue
+            if req.max_market_cap and (s.get("market_cap") or float("inf")) > req.max_market_cap:
+                continue
+            if req.min_pe and (s.get("pe_ratio") is None or s["pe_ratio"] < req.min_pe):
+                continue
+            if req.max_pe and (s.get("pe_ratio") is not None and s["pe_ratio"] > req.max_pe):
+                continue
+            if req.min_pb and (s.get("pb_ratio") is None or s["pb_ratio"] < req.min_pb):
+                continue
+            if req.max_pb and (s.get("pb_ratio") is not None and s["pb_ratio"] > req.max_pb):
+                continue
+            if req.min_dividend_yield and (s.get("dividend_yield") or 0) < req.min_dividend_yield:
+                continue
+            if req.min_rsi and (s.get("rsi_14") is None or s["rsi_14"] < req.min_rsi):
+                continue
+            if req.max_rsi and (s.get("rsi_14") is not None and s["rsi_14"] > req.max_rsi):
+                continue
+            if req.min_revenue_growth and (s.get("revenue_growth") or -999) < req.min_revenue_growth:
+                continue
+            if req.min_roe and (s.get("roe") or -999) < req.min_roe:
+                continue
+            if req.sector and s.get("sector", "").lower() != req.sector.lower():
+                continue
+            if req.signal_label and s.get("signal_label", "").upper() != req.signal_label.upper():
+                continue
+            if req.above_ma50 is not None and s.get("above_ma50") != req.above_ma50:
+                continue
+            if req.above_ma200 is not None and s.get("above_ma200") != req.above_ma200:
+                continue
+            if req.min_short_ratio and (s.get("short_ratio") or 0) < req.min_short_ratio:
+                continue
+            results.append(s)
+        # Sort
+        reverse = req.sort_dir == "desc"
+        results.sort(key=lambda x: x.get(req.sort_by) or 0, reverse=reverse)
+        return {"results": results[:req.limit], "total_matches": len(results), "scanned": len(rows)}
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: Peer Comparison
+# ---------------------------------------------------------------------------
+
+class PeerCompareRequest(BaseModel):
+    symbols: list[str]
+
+
+@app.post("/peers/compare")
+def peer_comparison(req: PeerCompareRequest):
+    """Side-by-side comparison of 2-10 tickers on key metrics."""
+    if len(req.symbols) < 2 or len(req.symbols) > 10:
+        raise HTTPException(status_code=400, detail="Provide 2-10 symbols")
+    peers = []
+    for sym in req.symbols:
+        snap = _get_cache(f"ticker:snapshot:{sym.upper()}")
+        if snap:
+            peers.append(snap)
+        else:
+            peers.append({"symbol": sym.upper(), "error": "No cached data"})
+    metrics = ["price", "market_cap", "pe_ratio", "forward_pe", "pb_ratio", "ev_ebitda",
+               "dividend_yield", "revenue_growth", "eps_growth", "gross_margin", "operating_margin",
+               "net_margin", "roe", "roa", "debt_to_equity", "rsi_14", "beta",
+               "short_ratio", "short_pct_float", "val_score", "signal_score",
+               "change_1d_pct", "change_1m_pct", "change_ytd_pct", "target_upside"]
+    return {"peers": peers, "metrics": metrics}
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: Correlation Matrix
+# ---------------------------------------------------------------------------
+
+class CorrelationRequest(BaseModel):
+    symbols: list[str]
+    period_days: int = 252
+
+
+@app.post("/correlation/matrix")
+def correlation_matrix(req: CorrelationRequest):
+    """Compute NxN Pearson correlation matrix from cached OHLCV."""
+    import numpy as np
+    from datetime import datetime, timedelta
+
+    if len(req.symbols) < 2 or len(req.symbols) > 50:
+        raise HTTPException(status_code=400, detail="Provide 2-50 symbols")
+
+    syms = [s.upper() for s in req.symbols]
+    start_date = (datetime.utcnow() - timedelta(days=req.period_days)).strftime("%Y-%m-%d")
+
+    # Read from ohlcv_daily
+    db = SessionLocal()
+    try:
+        from sqlalchemy import text
+        returns_map = {}
+        for sym in syms:
+            rows = db.execute(
+                text("SELECT date, close FROM ohlcv_daily WHERE symbol = :sym AND date >= :start ORDER BY date"),
+                {"sym": sym, "start": start_date},
+            ).fetchall()
+            if len(rows) >= 20:
+                closes = [float(r[1]) for r in rows]
+                rets = [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes))]
+                returns_map[sym] = rets
+
+        if len(returns_map) < 2:
+            raise HTTPException(status_code=400, detail="Insufficient OHLCV data for correlation")
+
+        # Align lengths
+        min_len = min(len(v) for v in returns_map.values())
+        aligned = {k: v[-min_len:] for k, v in returns_map.items()}
+        symbols_used = list(aligned.keys())
+        matrix = np.corrcoef([aligned[s] for s in symbols_used])
+
+        return {
+            "symbols": symbols_used,
+            "matrix": [[round(float(matrix[i][j]), 4) for j in range(len(symbols_used))]
+                        for i in range(len(symbols_used))],
+            "period_days": req.period_days,
+            "bars_used": min_len,
+        }
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: CSV Export
+# ---------------------------------------------------------------------------
+
+@app.get("/export/alpha")
+def export_alpha_csv():
+    """Export Alpha opportunities as CSV."""
+    from fastapi.responses import StreamingResponse
+    import io
+    cached = _get_cache("alpha:opportunities")
+    if not cached:
+        raise HTTPException(status_code=404, detail="No Alpha data cached")
+    opps = cached.get("opportunities", [])
+    buf = io.StringIO()
+    if opps:
+        headers = ["symbol", "display_name", "alpha_score", "confidence", "status",
+                    "opportunity_type", "bias", "posture", "sector"]
+        buf.write(",".join(headers) + "\n")
+        for o in opps:
+            row = [str(o.get(h, "")) for h in headers]
+            buf.write(",".join(row) + "\n")
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=alpha_opportunities.csv"},
+    )
+
+
+@app.get("/export/screener")
+def export_screener_csv(sector: Optional[str] = None, signal_label: Optional[str] = None):
+    """Export screener results as CSV."""
+    from fastapi.responses import StreamingResponse
+    import io
+    req = ScreenerRequest(sector=sector, signal_label=signal_label, limit=5000)
+    result = stock_screener(req)
+    buf = io.StringIO()
+    tickers = result.get("results", [])
+    if tickers:
+        headers = ["symbol", "name", "sector", "price", "market_cap", "pe_ratio", "pb_ratio",
+                    "dividend_yield", "rsi_14", "revenue_growth", "roe", "signal_score", "signal_label",
+                    "change_1d_pct", "change_1m_pct", "change_ytd_pct", "short_ratio"]
+        buf.write(",".join(headers) + "\n")
+        for t in tickers:
+            row = [str(t.get(h, "")) for h in headers]
+            buf.write(",".join(row) + "\n")
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=screener_results.csv"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: Options Unusual Activity
+# ---------------------------------------------------------------------------
+
+@app.get("/options/unusual")
+def options_unusual_activity(min_vol_oi_ratio: float = 3.0, limit: int = 50):
+    """Scan all cached options chains for unusual volume activity."""
+    from datetime import datetime
+    db = SessionLocal()
+    try:
+        from models import CacheEntry
+        import json as _json
+        rows = db.query(CacheEntry).filter(
+            CacheEntry.key.like("options:chain:%"),
+            CacheEntry.expires_at > datetime.utcnow(),
+        ).all()
+        unusual = []
+        for row in rows:
+            try:
+                contracts = _json.loads(row.value_json)
+                sym = row.key.replace("options:chain:", "")
+                for c in contracts:
+                    vol = c.get("volume") or 0
+                    oi = c.get("open_interest") or 1
+                    if oi > 0 and vol > 0 and vol / oi >= min_vol_oi_ratio:
+                        unusual.append({
+                            "symbol": sym,
+                            "strike": c.get("strike"),
+                            "expiration": c.get("expiration"),
+                            "option_type": c.get("option_type"),
+                            "volume": vol,
+                            "open_interest": oi,
+                            "vol_oi_ratio": round(vol / oi, 1),
+                            "implied_vol": c.get("implied_vol"),
+                            "bid": c.get("bid"),
+                            "ask": c.get("ask"),
+                            "delta": c.get("delta"),
+                        })
+            except Exception:
+                pass
+        unusual.sort(key=lambda x: x.get("vol_oi_ratio", 0), reverse=True)
+        return {"unusual": unusual[:limit], "total_found": len(unusual), "chains_scanned": len(rows)}
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: Insider Trading (SEC Form 4)
+# ---------------------------------------------------------------------------
+
+@app.get("/insider/{symbol}")
+def insider_trading(symbol: str):
+    """Fetch recent insider transactions from SEC EDGAR Form 4 filings."""
+    sym = symbol.upper()
+    cache_key = f"insider:{sym}"
+    cached = _get_cache(cache_key)
+    if cached:
+        return cached
+
+    try:
+        from extended_universe import get_edgar_cik_map
+        cik_map = get_edgar_cik_map()
+        cik = cik_map.get(sym)
+        if not cik:
+            return {"symbol": sym, "transactions": [], "error": "CIK not found"}
+
+        import requests as _req
+        headers = {"User-Agent": "QuantEngine/2.0 research@picador.app"}
+        url = f"https://data.sec.gov/submissions/CIK{str(cik).zfill(10)}.json"
+        r = _req.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+
+        filings = data.get("filings", {}).get("recent", {})
+        forms = filings.get("form", [])
+        dates = filings.get("filingDate", [])
+        descriptions = filings.get("primaryDocDescription", [])
+
+        transactions = []
+        for i, form in enumerate(forms):
+            if form == "4" and i < len(dates):
+                transactions.append({
+                    "date": dates[i] if i < len(dates) else None,
+                    "form": form,
+                    "description": descriptions[i] if i < len(descriptions) else "",
+                })
+                if len(transactions) >= 20:
+                    break
+
+        result = {"symbol": sym, "transactions": transactions, "cik": cik}
+        _set_cache(cache_key, result, _TTL_FINANCIALS, "insider")
+        return result
+    except Exception as e:
+        return {"symbol": sym, "transactions": [], "error": _sanitize_error(e)}
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: Institutional Ownership (13F)
+# ---------------------------------------------------------------------------
+
+@app.get("/institutional/{symbol}")
+def institutional_ownership(symbol: str):
+    """Fetch institutional ownership data from SEC 13F filings."""
+    sym = symbol.upper()
+    cache_key = f"institutional:{sym}"
+    cached = _get_cache(cache_key)
+    if cached:
+        return cached
+
+    try:
+        from extended_universe import get_edgar_cik_map
+        cik_map = get_edgar_cik_map()
+        cik = cik_map.get(sym)
+        if not cik:
+            return {"symbol": sym, "holders": [], "error": "CIK not found"}
+
+        import requests as _req
+        headers = {"User-Agent": "QuantEngine/2.0 research@picador.app"}
+        # Use SEC EDGAR company facts for ownership data
+        url = f"https://data.sec.gov/submissions/CIK{str(cik).zfill(10)}.json"
+        r = _req.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+
+        filings = data.get("filings", {}).get("recent", {})
+        forms = filings.get("form", [])
+        dates = filings.get("filingDate", [])
+
+        # Count institutional filings (SC 13G, 13F-HR)
+        inst_filings = []
+        for i, form in enumerate(forms):
+            if form in ("SC 13G", "SC 13G/A", "13F-HR", "13F-HR/A") and i < len(dates):
+                inst_filings.append({
+                    "date": dates[i],
+                    "form": form,
+                })
+                if len(inst_filings) >= 20:
+                    break
+
+        # Get basic institutional info from yfinance if available
+        inst_info = {}
+        try:
+            import yfinance as _yf3
+            info = _get_cache(f"ticker:info:{sym}")
+            if not info:
+                info = _yf3.Ticker(sym).info or {}
+            inst_info = {
+                "institution_pct": info.get("heldPercentInstitutions"),
+                "insider_pct": info.get("heldPercentInsiders"),
+                "float_shares": info.get("floatShares"),
+                "shares_outstanding": info.get("sharesOutstanding"),
+            }
+        except Exception:
+            pass
+
+        result = {"symbol": sym, "filings": inst_filings, "ownership": inst_info, "cik": cik}
+        _set_cache(cache_key, result, _TTL_FINANCIALS, "institutional")
+        return result
+    except Exception as e:
+        return {"symbol": sym, "filings": [], "ownership": {}, "error": _sanitize_error(e)}
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: Event / Catalyst Calendar
+# ---------------------------------------------------------------------------
+
+@app.get("/calendar/events")
+def event_calendar(days: int = 30):
+    """Unified calendar combining earnings, FOMC, options expiry, dividends."""
+    from datetime import datetime, timedelta
+    events = []
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    cutoff = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%d")
+
+    # 1. Earnings (from cached ticker snapshots)
+    try:
+        ec = earnings_calendar(days=days)
+        for e in ec.get("events", []):
+            events.append({
+                "date": e["date"], "type": "earnings", "symbol": e["symbol"],
+                "name": e.get("name", ""), "detail": f"EPS streak: {e.get('streak', 0)}",
+            })
+    except Exception:
+        pass
+
+    # 2. FOMC dates (known schedule)
+    fomc_2026 = ["2026-01-28", "2026-03-18", "2026-05-06", "2026-06-17",
+                  "2026-07-29", "2026-09-16", "2026-11-04", "2026-12-16"]
+    for d in fomc_2026:
+        if today <= d <= cutoff:
+            events.append({"date": d, "type": "fomc", "symbol": "FED", "name": "FOMC Meeting", "detail": "Interest rate decision"})
+
+    # 3. Monthly options expiry (3rd Friday)
+    import calendar
+    now = datetime.utcnow()
+    for month_offset in range(3):
+        m = now.month + month_offset
+        y = now.year + (m - 1) // 12
+        m = ((m - 1) % 12) + 1
+        c = calendar.monthcalendar(y, m)
+        fridays = [week[4] for week in c if week[4] != 0]
+        if len(fridays) >= 3:
+            expiry = f"{y}-{m:02d}-{fridays[2]:02d}"
+            if today <= expiry <= cutoff:
+                events.append({"date": expiry, "type": "opex", "symbol": "OPEX",
+                              "name": "Monthly Options Expiry", "detail": "Standard monthly expiration"})
+
+    events.sort(key=lambda e: e["date"])
+    return {"events": events, "count": len(events), "days": days}
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8001))

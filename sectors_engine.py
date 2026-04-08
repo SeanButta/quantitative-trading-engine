@@ -190,6 +190,11 @@ class TickerSnapshot:
     target_upside:     Optional[float] = None   # % upside to mean target
     recommendation:    str             = ""     # strongBuy/buy/hold/sell/strongSell
 
+    # Short interest
+    short_ratio:       Optional[float] = None   # days to cover
+    short_pct_float:   Optional[float] = None   # % of float shorted
+    shares_short:      Optional[float] = None   # total shares short
+
     # Earnings
     next_earnings:     Optional[str]   = None   # YYYY-MM-DD
     last_eps_surprise: Optional[float] = None   # % surprise (positive = beat)
@@ -421,6 +426,11 @@ class SectorProvider:
             snap.ev_ebitda       = self._sf(info.get("enterpriseToEbitda"))
             snap.peg_ratio       = self._sf(info.get("pegRatio"))
             snap.dividend_yield  = self._sf(info.get("dividendYield"), pct=True)
+
+            # ── Short interest ──────────────────────────────────────────
+            snap.short_ratio     = self._sf(info.get("shortRatio"))
+            snap.short_pct_float = self._sf(info.get("shortPercentOfFloat"), pct=True)
+            snap.shares_short    = self._sf(info.get("sharesShort"))
 
             # ── Fundamentals ─────────────────────────────────────────────
             snap.revenue_ttm     = self._sf(info.get("totalRevenue"), 1e9)
