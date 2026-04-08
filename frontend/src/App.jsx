@@ -1446,7 +1446,7 @@ function BacktestView() {
           <ChartPanel title="Backtest — Equity Curve" defaultHeight={220}>
           {(h) => (
           <ResponsiveContainer width="100%" height={h}>
-            <AreaChart data={chartData} margin={{top:4,right:4,left:50,bottom:4}}>
+            <AreaChart data={chartData} margin={{top:4,right:20,left:50,bottom:4}}>
               <defs>
                 <linearGradient id="gE" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor={C.grn} stopOpacity={0.28}/>
@@ -1473,7 +1473,7 @@ function BacktestView() {
             <ChartPanel title="Backtest — Rolling Metrics" defaultHeight={200}>
             {(h)=>(
             <ResponsiveContainer width="100%" height={h}>
-              <ComposedChart data={rollingData} margin={{top:4,right:4,left:50,bottom:4}}>
+              <ComposedChart data={rollingData} margin={{top:4,right:20,left:50,bottom:4}}>
                 <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
                 <XAxis dataKey="yr" tick={{fill:C.mut,fontSize:9,fontFamily:"monospace"}} tickLine={false} axisLine={false}/>
                 <YAxis yAxisId="sh" tick={{fill:C.mut,fontSize:9,fontFamily:"monospace"}} tickLine={false} axisLine={false}
@@ -6528,7 +6528,7 @@ function MCFanChart({ fanData }) {
     <ChartPanel title="Monte Carlo Fan Chart · 500 Paths" defaultHeight={240}>
     {(h) => (
     <ResponsiveContainer width="100%" height={h}>
-      <ComposedChart data={d} margin={{top:6,right:10,bottom:20,left:55}}>
+      <ComposedChart data={d} margin={{top:6,right:20,bottom:20,left:55}}>
         <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
         <XAxis dataKey="day" tick={{fill:C.mut,fontSize:9}}
           label={{value:"Trading Days",fill:C.mut,fontSize:9,position:"insideBottom",offset:-4}}/>
@@ -6616,7 +6616,7 @@ function StackedHoldingsChart({ perTickerSeries, tickers }) {
     <ChartPanel title="Holdings Contribution Over Time" defaultHeight={240}>
     {(h) => (
     <ResponsiveContainer width="100%" height={h}>
-      <AreaChart data={perTickerSeries} margin={{top:4,right:6,bottom:4,left:55}}>
+      <AreaChart data={perTickerSeries} margin={{top:4,right:20,bottom:4,left:55}}>
         <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
         <XAxis dataKey="date" tick={{fill:C.mut,fontSize:8}} tickFormatter={d=>d.slice(0,7)}/>
         <YAxis
@@ -7064,7 +7064,7 @@ function PortfolioView() {
                 <ChartPanel title="" defaultHeight={220}>
                   {(h)=>(
                     <ResponsiveContainer width="100%" height={h}>
-                      <AreaChart data={pts} margin={{top:4,right:6,bottom:4,left:55}}>
+                      <AreaChart data={pts} margin={{top:4,right:20,bottom:4,left:55}}>
                         <defs>
                           <linearGradient id="perfGrad" x1="0" y1="0" x2="0" y2="1">
                             <stop offset="5%"  stopColor={lineCol} stopOpacity={0.18}/>
@@ -7115,7 +7115,7 @@ function PortfolioView() {
               {(h) => (
               <ResponsiveContainer width="100%" height={h}>
                 <AreaChart data={results.historical.filter((_,i,a)=>i%Math.max(1,Math.floor(a.length/150))===0)}
-                  margin={{top:4,right:6,bottom:4,left:55}}>
+                  margin={{top:4,right:20,bottom:4,left:55}}>
                   <CartesianGrid strokeDasharray="3 3" stroke={C.bdr}/>
                   <XAxis dataKey="date" tick={{fill:C.mut,fontSize:8}} tickFormatter={d=>d.slice(0,7)}/>
                   <YAxis tickFormatter={v=>`${((v-1)*100).toFixed(0)}%`} tick={{fill:C.mut,fontSize:9}} tickLine={false}
@@ -7770,10 +7770,10 @@ function TechnicalView() {
     }}>{label}</button>
   );
 
-  const CM = {top:0,right:8,bottom:0,left:0};
+  const CM = {top:0,right:20,bottom:0,left:0};
   const xTickFmt = d => { if (!d) return ""; const p = d.split("-"); if (p.length < 2) return d; const mo = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][parseInt(p[1],10)-1]||p[1]; return `${mo} '${p[0].slice(2)}`; };
   const xTickInterval = Math.max(1, Math.ceil(cd.length / 8) - 1);
-  const xAx = {dataKey:"date",type:"category",height:TV_X_AX_H,tick:{fill:"#787b86",fontSize:8,fontFamily:"monospace"},tickLine:false,axisLine:{stroke:"#2a2e39"},interval:xTickInterval,tickFormatter:xTickFmt,padding:{left:4,right:4}};
+  const xAx = {dataKey:"date",type:"category",height:TV_X_AX_H,tick:{fill:"#787b86",fontSize:8,fontFamily:"monospace"},tickLine:false,axisLine:{stroke:"#2a2e39"},interval:xTickInterval,tickFormatter:xTickFmt,padding:{left:6,right:20}};
   const yAx = {type:"number",domain:yDomain,orientation:"right",width:TV_Y_AX_W,tick:{fill:"#787b86",fontSize:9,fontFamily:"monospace"},tickLine:false,axisLine:false,tickFormatter:v=>v.toFixed(0),allowDataOverflow:false,label:{value:`${sym} ($)`,angle:90,position:"insideRight",offset:16,style:{fontFamily:"monospace",fontSize:8,fill:"#787b86",textAnchor:"middle"}}};
   const subYAx = (dm,tks,fmt) => ({type:"number",domain:dm,orientation:"right",width:TV_Y_AX_W,ticks:tks,tick:{fill:"#787b86",fontSize:8,fontFamily:"monospace"},tickLine:false,axisLine:false,tickFormatter:fmt||(v=>v.toFixed(0))});
 
@@ -10027,7 +10027,7 @@ function PairsCompareChart({ comparisonSeries, symbols, pairs }) {
       <ChartPanel title="Price Comparison" defaultHeight={290}>
         {(h)=>(
           <ResponsiveContainer width="100%" height={h}>
-            <ComposedChart data={chartData} margin={{top:4,right:14,bottom:4,left:44}}>
+            <ComposedChart data={chartData} margin={{top:4,right:20,bottom:4,left:44}}>
               <defs>
                 {(symbols||[]).map((s,i)=>{
                   const safeId = s.replace(/[^a-zA-Z0-9]/g,"_");
@@ -10497,7 +10497,7 @@ function PairsView() {
                   <ChartPanel title={`${p.symbol_a}/${p.symbol_b} · Spread Z-Score`} defaultHeight={180}>
                   {(h)=>(
                   <ResponsiveContainer width="100%" height={h}>
-                    <ComposedChart data={p.spread_series} margin={{top:4,right:12,bottom:4,left:40}}>
+                    <ComposedChart data={p.spread_series} margin={{top:4,right:20,bottom:4,left:40}}>
                       <XAxis dataKey="timestamp" tick={{fill:C.mut,fontSize:8}} tickLine={false}
                         tickFormatter={v=>v?.slice(5,10)||""}/>
                       <YAxis tick={{fill:C.mut,fontSize:8}} tickLine={false} axisLine={false}
