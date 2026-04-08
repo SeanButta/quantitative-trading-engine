@@ -25,6 +25,25 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 DEFAULT_MODEL = os.getenv("AI_MODEL", "claude-sonnet-4-20250514")
 
+# Tiered model selection for productization
+MODELS = {
+    "free":    "claude-haiku-4-20250514",      # $0.001/call — 95% quality, 10x cheaper
+    "pro":     "claude-sonnet-4-20250514",    # $0.014/call — full institutional quality
+    "premium": "claude-sonnet-4-20250514",      # $0.075/call — best reasoning (overkill for synthesis)
+}
+
+# Cost per million tokens by model
+MODEL_COSTS = {
+    "claude-haiku-4-20250514":     {"input": 0.25,  "output": 1.25},
+    "claude-sonnet-4-20250514":  {"input": 3.00,  "output": 15.00},
+    "claude-sonnet-4-20250514":    {"input": 15.00, "output": 75.00},
+}
+
+
+def get_model_for_tier(tier: str = "free") -> str:
+    """Get the appropriate model for a user's subscription tier."""
+    return MODELS.get(tier, MODELS["free"])
+
 
 def synthesize_daily_brief(brief_data: dict, model: str = None) -> Optional[dict]:
     """
@@ -62,14 +81,9 @@ def synthesize_daily_brief(brief_data: dict, model: str = None) -> Optional[dict
         input_tokens = response.usage.input_tokens
         output_tokens = response.usage.output_tokens
 
-        # Cost calculation (Claude 3.5 Sonnet pricing)
-        cost_per_input = 3.00 / 1_000_000   # $3/M input tokens
-        cost_per_output = 15.00 / 1_000_000  # $15/M output tokens
-        if "haiku" in model.lower():
-            cost_per_input = 0.25 / 1_000_000
-            cost_per_output = 1.25 / 1_000_000
-
-        cost = input_tokens * cost_per_input + output_tokens * cost_per_output
+        # Cost calculation — model-specific pricing
+        costs = MODEL_COSTS.get(model, {"input": 3.00, "output": 15.00})
+        cost = input_tokens * costs["input"] / 1_000_000 + output_tokens * costs["output"] / 1_000_000
 
         # Extract key takeaways and risks from the narrative
         lines = narrative.split("\n")
@@ -125,12 +139,8 @@ def synthesize_ticker_thesis(ticker_data: dict, model: str = None) -> Optional[d
         narrative = response.content[0].text
         input_tokens = response.usage.input_tokens
         output_tokens = response.usage.output_tokens
-        cost_per_input = 3.00 / 1_000_000
-        cost_per_output = 15.00 / 1_000_000
-        if "haiku" in model.lower():
-            cost_per_input = 0.25 / 1_000_000
-            cost_per_output = 1.25 / 1_000_000
-        cost = input_tokens * cost_per_input + output_tokens * cost_per_output
+        costs = MODEL_COSTS.get(model, {"input": 3.00, "output": 15.00})
+        cost = input_tokens * costs["input"] / 1_000_000 + output_tokens * costs["output"] / 1_000_000
 
         return {
             "thesis": narrative,

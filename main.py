@@ -7273,20 +7273,19 @@ def daily_brief(user=Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 
 @app.post("/daily-brief/narrative")
-def daily_brief_narrative(user=Depends(get_current_user)):
-    """Generate AI-synthesized morning note from daily brief data. Costs ~$0.01/call."""
-    cache_key = f"daily_brief_narrative:{datetime.utcnow().strftime('%Y-%m-%d')}"
+def daily_brief_narrative(tier: str = "free", user=Depends(get_current_user)):
+    """Generate AI-synthesized morning note. Tier: free (Haiku ~$0.001), pro (Sonnet ~$0.014)."""
+    cache_key = f"daily_brief_narrative:{datetime.utcnow().strftime('%Y-%m-%d')}:{tier}"
     cached = _get_cache(cache_key)
     if cached:
         return cached
 
-    # Get the structured brief first
     brief = daily_brief(user)
 
-    from ai_synthesis import synthesize_daily_brief
-    result = synthesize_daily_brief(brief)
+    from ai_synthesis import synthesize_daily_brief, get_model_for_tier
+    model = get_model_for_tier(tier)
+    result = synthesize_daily_brief(brief, model=model)
     if result and result.get("narrative"):
-        # Cache for 4 hours (narrative doesn't change frequently)
         _set_cache(cache_key, result, 14400, "ai_synthesis")
     return result or {"narrative": None, "error": "AI synthesis unavailable — set ANTHROPIC_API_KEY"}
 
