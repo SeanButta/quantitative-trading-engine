@@ -55,16 +55,28 @@ app = FastAPI(
     version="1.0.0",
 )
 
+_CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173,http://localhost:8001").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
 # Compress responses ≥ 1 KB — reduces bandwidth 60-80 % for large JSON payloads
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+# Security headers — prevent XSS, clickjacking, MIME-sniffing
+@app.middleware("http")
+async def security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
 
 # ---------------------------------------------------------------------------
 # Rate limiting (slowapi) — protects expensive endpoints from abuse
@@ -253,6 +265,35 @@ SECTORS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Default universe
 DEFAULT_SYMBOLS = ["SPY", "QQQ", "IWM", "TLT", "GLD"]
+
+
+# ---------------------------------------------------------------------------
+# Security helpers
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+_SAFE_ID_RE = _re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
+
+
+def _safe_path(base_dir: Path, user_param: str, suffix: str = "") -> Path:
+    """Resolve a user-supplied path component safely, preventing directory traversal."""
+    if not _SAFE_ID_RE.match(user_param):
+        raise HTTPException(status_code=400, detail="Invalid identifier — only alphanumeric, dash, underscore allowed")
+    resolved = (base_dir / f"{user_param}{suffix}").resolve()
+    if not str(resolved).startswith(str(base_dir.resolve())):
+        raise HTTPException(status_code=400, detail="Path traversal detected")
+    return resolved
+
+
+def _sanitize_error(e: Exception) -> str:
+    """Return a safe error message without exposing internals."""
+    msg = str(e)
+    # Strip file paths, SQL queries, tracebacks
+    if any(kw in msg.lower() for kw in ["traceback", "file ", "/users/", "sqlalchemy", "sqlite", "postgres"]):
+        return "An internal error occurred. Please try again."
+    # Truncate long messages
+    return msg[:200] if len(msg) <= 200 else msg[:200] + "..."
 
 # ---------------------------------------------------------------------------
 # Data Provider (DB-cached, swappable upstream)
@@ -733,7 +774,8 @@ def data_status(project_id: str):
 # ---------------------------------------------------------------------------
 
 @app.post("/projects/{project_id}/features/compute")
-def compute_features(project_id: str, req: ComputeFeaturesRequest):
+@limiter.limit("5/minute")
+def compute_features(request: Request, project_id: str, req: ComputeFeaturesRequest):
     try:
         _load_quant_modules()
         from data_ingestion import DataStore
@@ -857,7 +899,8 @@ def explore_conditional_prob(project_id: str, req: ConditionalProbExplorerReques
 # ---------------------------------------------------------------------------
 
 @app.post("/projects/{project_id}/runs/backtest")
-def run_backtest(project_id: str, req: RunBacktestRequest, background_tasks: BackgroundTasks,
+@limiter.limit("3/minute")
+def run_backtest(request: Request, project_id: str, req: RunBacktestRequest, background_tasks: BackgroundTasks,
                  _user: dict = Depends(get_current_user)):
     db = SessionLocal()
     try:
@@ -904,7 +947,8 @@ def run_backtest(project_id: str, req: RunBacktestRequest, background_tasks: Bac
 
 
 @app.post("/projects/{project_id}/runs/walkforward")
-def run_walkforward(project_id: str, req: RunWalkForwardRequest,
+@limiter.limit("3/minute")
+def run_walkforward(request: Request, project_id: str, req: RunWalkForwardRequest,
                     _user: dict = Depends(get_current_user)):
     db = SessionLocal()
     try:
@@ -6106,7 +6150,9 @@ _ingestion = _IngestionScheduler(provider, SessionLocal)
 
 
 @app.post("/admin/precompute")
+@limiter.limit("2/minute")
 def admin_precompute(
+    request: Request,
     background_tasks: BackgroundTasks,
     symbols: Optional[list[str]] = None,
     user=Depends(get_optional_user),
@@ -6177,7 +6223,8 @@ def admin_ingest_status(user=Depends(get_optional_user)):
 
 
 @app.post("/admin/overnight-batch")
-def admin_overnight_batch(background_tasks: BackgroundTasks, user=Depends(get_optional_user)):
+@limiter.limit("1/minute")
+def admin_overnight_batch(request: Request, background_tasks: BackgroundTasks, user=Depends(get_optional_user)):
     """Trigger the full overnight batch pre-computation pipeline."""
     from overnight_batch import run_overnight_batch
     def _run():

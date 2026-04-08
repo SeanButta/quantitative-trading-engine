@@ -4,11 +4,11 @@ FRED (Federal Reserve Economic Data) Client & Macro Analysis Engine
 Curated catalog of 40+ series across 8 economic categories.
 Smart rule-based summary engine provides economic interpretation.
 
-API Key: 99c952e575b12c86de034414871cf1ba
 Docs:    https://fred.stlouisfed.org/docs/api/fred/
 """
 
 import math
+import os
 import time
 import logging
 from datetime import datetime, timedelta
@@ -18,7 +18,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-FRED_API_KEY  = "99c952e575b12c86de034414871cf1ba"
+FRED_API_KEY  = os.getenv("FRED_API_KEY", "99c952e575b12c86de034414871cf1ba")  # TODO: rotate key and remove default
 FRED_BASE     = "https://api.stlouisfed.org/fred"
 
 # ── Curated Series Catalog ─────────────────────────────────────────────────────
