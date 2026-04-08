@@ -7269,6 +7269,91 @@ def daily_brief(user=Depends(get_current_user)):
 
 
 # ---------------------------------------------------------------------------
+# Endpoints: AI Synthesis (Claude API)
+# ---------------------------------------------------------------------------
+
+@app.post("/daily-brief/narrative")
+def daily_brief_narrative(user=Depends(get_current_user)):
+    """Generate AI-synthesized morning note from daily brief data. Costs ~$0.01/call."""
+    cache_key = f"daily_brief_narrative:{datetime.utcnow().strftime('%Y-%m-%d')}"
+    cached = _get_cache(cache_key)
+    if cached:
+        return cached
+
+    # Get the structured brief first
+    brief = daily_brief(user)
+
+    from ai_synthesis import synthesize_daily_brief
+    result = synthesize_daily_brief(brief)
+    if result and result.get("narrative"):
+        # Cache for 4 hours (narrative doesn't change frequently)
+        _set_cache(cache_key, result, 14400, "ai_synthesis")
+    return result or {"narrative": None, "error": "AI synthesis unavailable — set ANTHROPIC_API_KEY"}
+
+
+@app.post("/ai/ticker-thesis/{symbol}")
+def ai_ticker_thesis(symbol: str, user=Depends(get_current_user)):
+    """Generate AI investment thesis for a ticker. Costs ~$0.01/call."""
+    sym = symbol.upper()
+    cache_key = f"ai_thesis:{sym}"
+    cached = _get_cache(cache_key)
+    if cached:
+        return cached
+
+    # Get ticker data from advisor
+    from ai_synthesis import synthesize_ticker_thesis
+    try:
+        # Build ticker data from cached sources
+        ticker_data = {"symbol": sym}
+        fund_cached = _get_cache(f"fundamentals:{sym}")
+        if fund_cached:
+            ticker_data["fundamentals"] = fund_cached
+        ta_cached = _get_cache(f"ta:{sym}:1y:1d")
+        if ta_cached:
+            ticker_data["technical"] = {
+                "rsi": (ta_cached.get("rsi") or [None])[-1],
+                "above_ma50": ta_cached.get("current_price", 0) > (ta_cached.get("sma", {}).get("50", [0])[-1] or 0) if ta_cached.get("sma", {}).get("50") else None,
+                "ta_bias": ta_cached.get("god_mode", {}).get("direction") if ta_cached.get("god_mode") else None,
+            }
+        sent_cached = _get_cache(f"sentiment:{sym}:24")
+        if sent_cached:
+            ticker_data["sentiment"] = sent_cached
+
+        result = synthesize_ticker_thesis(ticker_data)
+        if result and result.get("thesis"):
+            _set_cache(cache_key, result, 43200, "ai_synthesis")  # 12h cache
+        return result or {"thesis": None, "error": "AI synthesis unavailable — set ANTHROPIC_API_KEY"}
+    except Exception as e:
+        return {"thesis": None, "error": _sanitize_error(e)}
+
+
+@app.get("/ai/usage")
+def ai_usage_stats(user=Depends(get_current_user)):
+    """Return AI API usage statistics and cost tracking."""
+    db = SessionLocal()
+    try:
+        from models import CacheEntry
+        rows = db.query(CacheEntry).filter(CacheEntry.source == "ai_synthesis").all()
+        total_cost = 0
+        total_calls = len(rows)
+        for r in rows:
+            try:
+                data = json.loads(r.value_json)
+                total_cost += data.get("cost_usd", 0)
+            except Exception:
+                pass
+        return {
+            "total_calls": total_calls,
+            "total_cost_usd": round(total_cost, 4),
+            "avg_cost_per_call": round(total_cost / max(total_calls, 1), 5),
+            "model": os.getenv("AI_MODEL", "claude-sonnet-4-20250514"),
+            "api_key_set": bool(os.getenv("ANTHROPIC_API_KEY")),
+        }
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Endpoints: Risk Dashboard
 # ---------------------------------------------------------------------------
 
