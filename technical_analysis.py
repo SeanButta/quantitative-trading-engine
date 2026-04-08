@@ -539,9 +539,9 @@ def fetch_and_compute(
 ) -> dict:
     """
     Fetch OHLCV then compute all indicators.
-    Checks ohlcv_daily DB table first — only falls back to yfinance on miss.
+    Checks ohlcv_daily DB table first — only falls back to data provider on miss.
+    Supports both yfinance and Polygon via DATA_PROVIDER env var.
     """
-    import yfinance as yf
 
     # ── Resolve synthetic intervals ──────────────────────────────────────────
     fetch_interval = interval
@@ -557,11 +557,18 @@ def fetch_and_compute(
         if hist is not None:
             from_db = True
 
-    # ── Fallback to yfinance ─────────────────────────────────────────────────
+    # ── Fallback to data provider (yfinance or Polygon) ────────────────────
     if hist is None:
-        ticker = yf.Ticker(symbol)
-        hist   = ticker.history(period=period, interval=fetch_interval, auto_adjust=True)
-        if hist.empty:
+        try:
+            from data_providers import get_provider
+            _provider = get_provider()
+            hist = _provider.fetch_history(symbol, period=period, interval=fetch_interval)
+        except Exception:
+            # Ultimate fallback: direct yfinance if provider fails
+            import yfinance as yf
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period=period, interval=fetch_interval, auto_adjust=True)
+        if hist is None or hist.empty:
             raise ValueError(
                 f"No data returned for symbol={symbol!r} period={period} "
                 f"interval={fetch_interval}"
@@ -590,6 +597,16 @@ def fetch_and_compute(
     prev_close    = float(hist["close"].iloc[-2]) if len(hist) > 1 else current_price
     if not from_db:
         try:
+            from data_providers import get_provider as _gp2
+            _prov = _gp2()
+            quote = _prov.fetch_quote(symbol)
+            if quote.get("lastPrice"):
+                current_price = float(quote["lastPrice"])
+                prev_close = float(quote.get("previousClose") or prev_close)
+        except Exception:
+            pass
+        try:
+            import yfinance as yf
             ticker_obj    = yf.Ticker(symbol)
             info          = ticker_obj.fast_info
             current_price = float(info.last_price or current_price)

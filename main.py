@@ -298,11 +298,12 @@ def _sanitize_error(e: Exception) -> str:
 # ---------------------------------------------------------------------------
 # Data Provider (DB-cached, swappable upstream)
 # ---------------------------------------------------------------------------
-from data_providers import YFinanceProvider as _YFProvider
+from data_providers import get_provider as _get_data_provider
 from db_cache_provider import DBCachedProvider as _DBCachedProvider
 
-_upstream_provider = _YFProvider()
+_upstream_provider = _get_data_provider()  # reads DATA_PROVIDER env var (yfinance or polygon)
 provider = _DBCachedProvider(_upstream_provider, SessionLocal)
+logger.info("Data provider: %s", _upstream_provider.name)
 
 
 # ---------------------------------------------------------------------------
