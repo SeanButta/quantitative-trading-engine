@@ -12509,6 +12509,201 @@ function ScreenerView() {
   );
 }
 
+// ── CompareView ──────────────────────────────────────────────────────────────
+function CompareView() {
+  const C = useC();
+  const [input, setInput] = useState("AAPL, MSFT, GOOGL");
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const run = () => {
+    const syms = input.split(/[,\s]+/).map(s=>s.trim().toUpperCase()).filter(Boolean);
+    if (syms.length < 2) return;
+    setLoading(true);
+    fetch("/api/peers/compare", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({symbols:syms}) })
+      .then(r=>r.json()).then(d=>{setData(d);setLoading(false);}).catch(()=>setLoading(false));
+  };
+  useEffect(()=>{run();},[]);
+  const cc = v => v==null?C.mut:v>=0?C.grn:C.red;
+  const fmt = (v,dec=1) => v!=null?(typeof v==="number"?v.toFixed(dec):v):"—";
+  const metricLabels = {"price":"Price","market_cap":"Mkt Cap (B)","pe_ratio":"P/E","forward_pe":"Fwd P/E","pb_ratio":"P/B","ev_ebitda":"EV/EBITDA",
+    "dividend_yield":"Div %","revenue_growth":"Rev Growth %","eps_growth":"EPS Growth %","gross_margin":"Gross Margin %","operating_margin":"Op Margin %",
+    "net_margin":"Net Margin %","roe":"ROE %","roa":"ROA %","debt_to_equity":"D/E","rsi_14":"RSI","beta":"Beta",
+    "short_ratio":"Short Ratio","short_pct_float":"Short %","val_score":"Val Score","signal_score":"Signal Score",
+    "change_1d_pct":"1D %","change_1m_pct":"1M %","change_ytd_pct":"YTD %","target_upside":"Target Upside %"};
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div><Lbl>Peer Comparison</Lbl><div style={mono(10,C.mut)}>Side-by-side fundamental and technical comparison</div></div>
+      <Card>
+        <div style={{display:"flex",gap:8}}>
+          <input value={input} onChange={e=>setInput(e.target.value.toUpperCase())} onKeyDown={e=>e.key==="Enter"&&run()}
+            placeholder="AAPL, MSFT, GOOGL" style={{flex:1,padding:"7px 11px",borderRadius:8,background:C.dim,border:`1px solid ${C.sky}60`,color:C.txt,fontFamily:"monospace",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+          <button onClick={run} disabled={loading} style={{padding:"7px 16px",borderRadius:8,border:"none",background:C.sky,color:"#000",...mono(11,"#000",700),cursor:"pointer"}}>{loading?"Loading...":"Compare"}</button>
+        </div>
+      </Card>
+      {data?.peers && (
+        <Card>
+          <ScrollTable>
+          <table style={{width:"100%",borderCollapse:"collapse",fontFamily:"monospace"}}>
+            <thead><tr style={{background:C.dim}}>
+              <th style={{...mono(8,C.mut,700),padding:"5px 10px",borderBottom:`1px solid ${C.bdr}`,textAlign:"left"}}>Metric</th>
+              {data.peers.map(p=><th key={p.symbol} style={{...mono(10,C.headingTxt,700),padding:"5px 10px",borderBottom:`1px solid ${C.bdr}`,textAlign:"right"}}>{p.symbol}</th>)}
+            </tr></thead>
+            <tbody>
+              {(data.metrics||[]).map(m=>{
+                const vals = data.peers.map(p=>p[m]);
+                const numVals = vals.filter(v=>typeof v==="number");
+                const best = numVals.length? (m.includes("debt")||m.includes("short")?Math.min(...numVals):Math.max(...numVals)) : null;
+                return (
+                  <tr key={m}>
+                    <td style={{...mono(9,C.mut,600),padding:"5px 10px",borderBottom:`1px solid ${C.bdr}20`}}>{metricLabels[m]||m}</td>
+                    {data.peers.map(p=>{
+                      const v=p[m]; const isBest=v===best&&numVals.length>1;
+                      return <td key={p.symbol} style={{...mono(10,isBest?C.grn:C.txt,isBest?700:400),padding:"5px 10px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right",
+                        background:isBest?C.grn+"08":"transparent"}}>{fmt(v)}</td>;
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          </ScrollTable>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ── ThesisTrackerView ────────────────────────────────────────────────────────
+function ThesisTrackerView() {
+  const C = useC();
+  const [theses, setTheses] = useState([]);
+  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useState({symbol:"",direction:"long",thesis:"",entry_price:"",target_price:"",stop_price:"",invalidation:"",timeframe:"medium",confidence:50,tags:""});
+  const [filter, setFilter] = useState("active");
+
+  const load = () => { fetch("/api/theses").then(r=>r.json()).then(setTheses).catch(()=>{}); };
+  useEffect(()=>{load();},[]);
+
+  const submit = () => {
+    const body = {...form, entry_price:form.entry_price?parseFloat(form.entry_price):null, target_price:form.target_price?parseFloat(form.target_price):null,
+      stop_price:form.stop_price?parseFloat(form.stop_price):null, confidence:parseInt(form.confidence), tags:form.tags?form.tags.split(",").map(t=>t.trim()):[]};
+    fetch("/api/theses",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})
+      .then(r=>r.json()).then(()=>{load();setShowForm(false);setForm({symbol:"",direction:"long",thesis:"",entry_price:"",target_price:"",stop_price:"",invalidation:"",timeframe:"medium",confidence:50,tags:""});}).catch(()=>{});
+  };
+
+  const updateStatus = (id,status) => { fetch(`/api/theses/${id}?status=${status}`,{method:"PUT"}).then(()=>load()).catch(()=>{}); };
+  const filtered = filter==="all"?theses:theses.filter(t=>t.status===filter);
+  const cc = v => v==null?C.mut:v>=0?C.grn:C.red;
+  const statusCol = s => ({"active":C.sky,"won":C.grn,"lost":C.red,"invalidated":C.amb,"closed":C.mut})[s]||C.mut;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div><Lbl>Thesis Tracker</Lbl><div style={mono(10,C.mut)}>Track your investment theses, invalidation criteria, and outcomes</div></div>
+        <button onClick={()=>setShowForm(!showForm)} style={{padding:"7px 16px",borderRadius:8,border:"none",background:C.grn,color:"#000",...mono(11,"#000",700),cursor:"pointer"}}>{showForm?"Cancel":"+ New Thesis"}</button>
+      </div>
+
+      {showForm && (
+        <Card accent={C.grn}>
+          <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"repeat(3,1fr)",gap:10,marginBottom:12}}>
+            {[["Symbol","symbol","AAPL"],["Entry Price","entry_price","$150"],["Target Price","target_price","$180"],["Stop Price","stop_price","$140"],["Invalidation","invalidation","Breaks below 200-day MA"]].map(([l,k,ph])=>(
+              <div key={k}><div style={{...mono(8,C.mut,600),marginBottom:3}}>{l.toUpperCase()}</div>
+                <input value={form[k]} onChange={e=>setForm(p=>({...p,[k]:e.target.value}))} placeholder={ph}
+                  style={{width:"100%",padding:"5px 8px",borderRadius:5,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:11,boxSizing:"border-box",outline:"none"}}/>
+              </div>
+            ))}
+            <div><div style={{...mono(8,C.mut,600),marginBottom:3}}>DIRECTION</div>
+              <select value={form.direction} onChange={e=>setForm(p=>({...p,direction:e.target.value}))}
+                style={{width:"100%",padding:"5px 8px",borderRadius:5,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:11}}>
+                <option value="long">Long</option><option value="short">Short</option>
+              </select>
+            </div>
+          </div>
+          <div style={{marginBottom:10}}><div style={{...mono(8,C.mut,600),marginBottom:3}}>THESIS (why are you entering?)</div>
+            <textarea value={form.thesis} onChange={e=>setForm(p=>({...p,thesis:e.target.value}))} placeholder="Earnings catalyst + valuation discount + momentum breakout..."
+              rows={3} style={{width:"100%",padding:"8px",borderRadius:6,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:11,boxSizing:"border-box",outline:"none",resize:"vertical"}}/>
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <div><div style={{...mono(8,C.mut,600),marginBottom:3}}>CONFIDENCE</div><input type="range" min="0" max="100" value={form.confidence} onChange={e=>setForm(p=>({...p,confidence:e.target.value}))} style={{width:120}}/><span style={mono(10,C.txt)}> {form.confidence}%</span></div>
+            <div><div style={{...mono(8,C.mut,600),marginBottom:3}}>TAGS</div><input value={form.tags} onChange={e=>setForm(p=>({...p,tags:e.target.value}))} placeholder="momentum, value, earnings" style={{padding:"5px 8px",borderRadius:5,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:11,outline:"none"}}/></div>
+            <button onClick={submit} style={{marginLeft:"auto",padding:"8px 20px",borderRadius:8,border:"none",background:C.grn,color:"#000",...mono(11,"#000",700),cursor:"pointer"}}>Save Thesis</button>
+          </div>
+        </Card>
+      )}
+
+      <div style={{display:"flex",gap:6}}>
+        {[["all","All"],["active","Active"],["won","Won"],["lost","Lost"],["invalidated","Invalidated"]].map(([k,l])=>(
+          <Pill key={k} label={`${l} (${k==="all"?theses.length:theses.filter(t=>t.status===k).length})`} active={filter===k} onClick={()=>setFilter(k)}/>
+        ))}
+      </div>
+
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {filtered.length===0 && <Card><div style={mono(10,C.mut)}>No theses yet. Click "+ New Thesis" to track your first investment idea.</div></Card>}
+        {filtered.map(t=>(
+          <Card key={t.id} accent={statusCol(t.status)}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+              <div>
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <span style={mono(14,C.headingTxt,700)}>{t.symbol}</span>
+                  <Tag color={t.direction==="long"?C.grn:C.red}>{t.direction.toUpperCase()}</Tag>
+                  <Tag color={statusCol(t.status)}>{t.status}</Tag>
+                  {t.tags?.map((tag,j)=><span key={j} style={{...mono(7,C.sky),padding:"1px 5px",borderRadius:3,background:C.sky+"12"}}>{tag}</span>)}
+                </div>
+                <div style={{...mono(10,C.txt),marginTop:6,lineHeight:1.6}}>{t.thesis}</div>
+              </div>
+              <div style={{display:"flex",gap:4,flexShrink:0}}>
+                {t.status==="active" && <>
+                  <button onClick={()=>updateStatus(t.id,"won")} style={{...mono(8,C.grn),padding:"3px 8px",borderRadius:4,border:`1px solid ${C.grn}30`,background:C.grn+"10",cursor:"pointer"}}>Won ✓</button>
+                  <button onClick={()=>updateStatus(t.id,"lost")} style={{...mono(8,C.red),padding:"3px 8px",borderRadius:4,border:`1px solid ${C.red}30`,background:C.red+"10",cursor:"pointer"}}>Lost ✗</button>
+                  <button onClick={()=>updateStatus(t.id,"invalidated")} style={{...mono(8,C.amb),padding:"3px 8px",borderRadius:4,border:`1px solid ${C.amb}30`,background:C.amb+"10",cursor:"pointer"}}>Invalidated</button>
+                </>}
+              </div>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+              <div style={{padding:"4px 8px",borderRadius:6,background:C.dim}}><div style={mono(7,C.mut)}>ENTRY</div><div style={mono(11,C.txt,700)}>{t.entry_price?`$${t.entry_price}`:"—"}</div></div>
+              <div style={{padding:"4px 8px",borderRadius:6,background:C.dim}}><div style={mono(7,C.mut)}>TARGET</div><div style={mono(11,C.grn,700)}>{t.target_price?`$${t.target_price}`:"—"}</div></div>
+              <div style={{padding:"4px 8px",borderRadius:6,background:C.dim}}><div style={mono(7,C.mut)}>STOP</div><div style={mono(11,C.red,700)}>{t.stop_price?`$${t.stop_price}`:"—"}</div></div>
+              <div style={{padding:"4px 8px",borderRadius:6,background:C.dim}}><div style={mono(7,C.mut)}>CONFIDENCE</div><div style={mono(11,C.txt,700)}>{t.confidence}%</div></div>
+            </div>
+            {t.invalidation && <div style={{...mono(9,C.amb),marginTop:6}}>Invalidates if: {t.invalidation}</div>}
+            <div style={{...mono(8,C.mut),marginTop:4}}>Created {t.created_at?.slice(0,10)}</div>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── DailyBriefView ───────────────────────────────────────────────────────────
+function DailyBriefView() {
+  const C = useC();
+  const [data, setData] = useState(null);
+  useEffect(()=>{fetch("/api/daily-brief").then(r=>r.json()).then(setData).catch(()=>{});},[]);
+  const cc = v => v==null?C.mut:v>=0?C.grn:C.red;
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div><Lbl>Daily Brief</Lbl><div style={mono(10,C.mut)}>Personalized morning summary based on your watchlist</div></div>
+      {data ? (<>
+        {data.summary?.length>0 && <Card accent={C.sky}><div style={{...mono(11,C.headingTxt,700),marginBottom:8}}>MARKET SNAPSHOT</div>
+          {data.summary.map((s,i)=><div key={i} style={mono(10,C.txt)}>• {s}</div>)}</Card>}
+        {data.movers?.length>0 && <Card accent={C.amb}><div style={{...mono(11,C.headingTxt,700),marginBottom:8}}>BIG MOVERS IN YOUR WATCHLIST</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+            {data.movers.map(m=><div key={m.symbol} style={{padding:"8px 12px",borderRadius:8,background:C.dim,border:`1px solid ${cc(m.change)}25`}}>
+              <span style={mono(12,C.headingTxt,700)}>{m.symbol}</span>
+              <span style={{...mono(12,cc(m.change),700),marginLeft:8}}>{m.change>=0?"+":""}{m.change?.toFixed(1)}%</span>
+              {m.price && <span style={{...mono(9,C.mut),marginLeft:6}}>${m.price.toFixed(2)}</span>}
+            </div>)}
+          </div></Card>}
+        {data.alerts?.length>0 && <Card accent={C.red}><div style={{...mono(11,C.headingTxt,700),marginBottom:8}}>ALERTS</div>
+          {data.alerts.map((a,i)=><div key={i} style={{...mono(10,C.txt),padding:"4px 0"}}>⚠ {a.message}</div>)}</Card>}
+        {data.earnings_today?.length>0 && <Card accent={C.amb}><div style={{...mono(11,C.headingTxt,700),marginBottom:8}}>EARNINGS TODAY</div>
+          {data.earnings_today.map(e=><Tag key={e.symbol} color={C.amb}>{e.symbol}</Tag>)}</Card>}
+        {!data.movers?.length && !data.alerts?.length && <Card><div style={mono(10,C.mut)}>No significant activity in your watchlist today. Add tickers to your Watchlist for personalized alerts.</div></Card>}
+      </>) : <Card><div style={mono(10,C.mut)}>Loading daily brief...</div></Card>}
+    </div>
+  );
+}
+
 // ── EarningsCalendarView ─────────────────────────────────────────────────────
 function EarningsCalendarView() {
   const C = useC();
@@ -12627,14 +12822,17 @@ const NAV=[
   // TOOLS
   {id:"_tools", l:"TOOLS", section:true},
   {id:"screener",  l:"Screener",     I:Filter},
+  {id:"compare",   l:"Compare",      I:BarChart3},
   {id:"watchlist", l:"Watchlist",    I:Star},
   {id:"calendar",  l:"Calendar",     I:Calendar},
+  {id:"brief",     l:"Daily Brief",  I:Newspaper},
   // DECISION
   {id:"_decision", l:"DECISION", section:true},
   {id:"alpha",     l:"Alpha",        I:Target},
   // EXECUTION
   {id:"_execution",l:"EXECUTION", section:true},
   {id:"portfolio", l:"Portfolio",    I:Briefcase},
+  {id:"theses",    l:"Thesis Tracker", I:BookOpen},
   {id:"paper",     l:"Paper",        I:BookOpen},
   // RESEARCH
   {id:"_research", l:"RESEARCH", section:true},
@@ -14131,8 +14329,11 @@ function AppShell() {
     signals:   <SignalsView/>,
     pairs:     <PairsView/>,
     screener:  <ScreenerView/>,
+    compare:   <CompareView/>,
     watchlist: <WatchlistView onNav={(v)=>{setDetailSym(null);setView(v);}}/>,
     calendar:  <EarningsCalendarView/>,
+    brief:     <DailyBriefView/>,
+    theses:    <ThesisTrackerView/>,
     alpha:     <AlphaView onNav={(v)=>{setDetailSym(null);setView(v);}}/>,
     portfolio: <PortfolioHubView/>,
     paper:     <PaperTradingView/>,

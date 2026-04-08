@@ -6885,6 +6885,356 @@ def factor_exposure(symbol: str, period_days: int = 252):
         return {"symbol": symbol.upper(), "error": _sanitize_error(e), "factors": {}}
 
 
+# ---------------------------------------------------------------------------
+# Endpoints: Thesis Tracker (Trade Journal)
+# ---------------------------------------------------------------------------
+
+class ThesisRequest(BaseModel):
+    symbol: str
+    direction: str = "long"
+    thesis: str
+    entry_price: Optional[float] = None
+    target_price: Optional[float] = None
+    stop_price: Optional[float] = None
+    invalidation: Optional[str] = None
+    timeframe: str = "medium"
+    confidence: int = 50
+    tags: list[str] = []
+
+
+@app.get("/theses")
+def list_theses(status: Optional[str] = None, user=Depends(get_current_user)):
+    from models import TradeThesis
+    db = SessionLocal()
+    try:
+        q = db.query(TradeThesis).filter(TradeThesis.user_id == str(user.get("user_id", 0)))
+        if status:
+            q = q.filter(TradeThesis.status == status)
+        theses = q.order_by(TradeThesis.created_at.desc()).all()
+        return [{"id": t.id, "symbol": t.symbol, "direction": t.direction, "thesis": t.thesis,
+                 "entry_price": t.entry_price, "target_price": t.target_price, "stop_price": t.stop_price,
+                 "invalidation": t.invalidation, "timeframe": t.timeframe, "confidence": t.confidence,
+                 "status": t.status, "outcome_notes": t.outcome_notes, "tags": t.tags or [],
+                 "created_at": str(t.created_at), "updated_at": str(t.updated_at),
+                 "closed_at": str(t.closed_at) if t.closed_at else None} for t in theses]
+    finally:
+        db.close()
+
+
+@app.post("/theses")
+def create_thesis(req: ThesisRequest, user=Depends(get_current_user)):
+    from models import TradeThesis
+    db = SessionLocal()
+    try:
+        t = TradeThesis(
+            id=str(uuid.uuid4())[:8], user_id=str(user.get("user_id", 0)),
+            symbol=req.symbol.upper(), direction=req.direction, thesis=req.thesis,
+            entry_price=req.entry_price, target_price=req.target_price, stop_price=req.stop_price,
+            invalidation=req.invalidation, timeframe=req.timeframe, confidence=req.confidence,
+            tags=req.tags,
+        )
+        db.add(t)
+        db.commit()
+        return {"id": t.id, "symbol": t.symbol, "status": "active"}
+    finally:
+        db.close()
+
+
+@app.put("/theses/{thesis_id}")
+def update_thesis(thesis_id: str, status: Optional[str] = None, outcome_notes: Optional[str] = None,
+                  user=Depends(get_current_user)):
+    from models import TradeThesis
+    db = SessionLocal()
+    try:
+        t = db.query(TradeThesis).filter(TradeThesis.id == thesis_id).first()
+        if not t:
+            raise HTTPException(status_code=404, detail="Thesis not found")
+        if status:
+            t.status = status
+            if status in ("won", "lost", "invalidated", "closed"):
+                t.closed_at = datetime.utcnow()
+        if outcome_notes:
+            t.outcome_notes = outcome_notes
+        db.commit()
+        return {"id": t.id, "status": t.status}
+    finally:
+        db.close()
+
+
+@app.delete("/theses/{thesis_id}")
+def delete_thesis(thesis_id: str, user=Depends(get_current_user)):
+    from models import TradeThesis
+    db = SessionLocal()
+    try:
+        t = db.query(TradeThesis).filter(TradeThesis.id == thesis_id).first()
+        if t:
+            db.delete(t)
+            db.commit()
+        return {"deleted": True}
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: Trade Planner
+# ---------------------------------------------------------------------------
+
+@app.get("/trade-plan/{symbol}")
+def trade_plan(symbol: str, direction: str = "long", risk_pct: float = 2.0):
+    """Generate a trade plan with position sizing, entry, stop, and targets."""
+    sym = symbol.upper()
+    cache_key = f"trade_plan:{sym}:{direction}"
+    cached = _get_cache(cache_key)
+    if cached:
+        return cached
+
+    # Get TA data for support/resistance levels
+    ta = _get_cache(f"ta:{sym}:1y:1d")
+    snap = _get_cache(f"ticker:snapshot:{sym}")
+
+    price = None
+    if ta:
+        price = ta.get("current_price")
+    elif snap:
+        price = snap.get("price")
+
+    if not price:
+        return {"symbol": sym, "error": "No price data available"}
+
+    atr = None
+    rsi = None
+    sma50 = None
+    sma200 = None
+    if ta:
+        atr_list = ta.get("atr", [])
+        atr = atr_list[-1] if atr_list and atr_list[-1] is not None else None
+        rsi_list = ta.get("rsi", [])
+        rsi = rsi_list[-1] if rsi_list and rsi_list[-1] is not None else None
+        sma = ta.get("sma", {})
+        sma50_list = sma.get("50", [])
+        sma200_list = sma.get("200", [])
+        sma50 = sma50_list[-1] if sma50_list and sma50_list[-1] is not None else None
+        sma200 = sma200_list[-1] if sma200_list and sma200_list[-1] is not None else None
+
+    # Position sizing via ATR
+    atr_val = atr or price * 0.02  # fallback: 2% of price
+    stop_distance = atr_val * 2  # 2x ATR stop
+
+    if direction == "long":
+        entry = round(price, 2)
+        stop = round(price - stop_distance, 2)
+        target1 = round(price + stop_distance * 2, 2)  # 1:2 R:R
+        target2 = round(price + stop_distance * 3, 2)  # 1:3 R:R
+    else:
+        entry = round(price, 2)
+        stop = round(price + stop_distance, 2)
+        target1 = round(price - stop_distance * 2, 2)
+        target2 = round(price - stop_distance * 3, 2)
+
+    risk_per_share = abs(entry - stop)
+    # Kelly criterion simplified: position size = (win_rate * avg_win - loss_rate * avg_loss) / avg_win
+    # Simplified: risk_pct% of portfolio per trade
+    portfolio_size = 100000  # default $100K
+    position_size = round(portfolio_size * (risk_pct / 100) / max(risk_per_share, 0.01))
+    position_value = round(position_size * price, 2)
+
+    result = {
+        "symbol": sym,
+        "direction": direction,
+        "current_price": price,
+        "entry": entry,
+        "stop_loss": stop,
+        "target_1": target1,
+        "target_2": target2,
+        "risk_per_share": round(risk_per_share, 2),
+        "reward_risk_1": round(abs(target1 - entry) / max(risk_per_share, 0.01), 1),
+        "reward_risk_2": round(abs(target2 - entry) / max(risk_per_share, 0.01), 1),
+        "position_size_shares": position_size,
+        "position_value": position_value,
+        "atr": round(atr_val, 2) if atr_val else None,
+        "rsi": round(rsi, 1) if rsi else None,
+        "support_levels": [round(sma200, 2)] if sma200 else [],
+        "resistance_levels": [],
+        "notes": [],
+    }
+
+    # Add contextual notes
+    if rsi and rsi > 70:
+        result["notes"].append("RSI is overbought — consider waiting for pullback before entry")
+    if rsi and rsi < 30:
+        result["notes"].append("RSI is oversold — may be near a bounce")
+    if sma50 and sma200:
+        if sma50 > sma200:
+            result["notes"].append("Golden cross active (SMA50 > SMA200) — bullish structure")
+        else:
+            result["notes"].append("Death cross active (SMA50 < SMA200) — bearish structure")
+    if snap:
+        if snap.get("val_label") == "UNDERVALUED":
+            result["notes"].append("Valuation: undervalued vs sector peers")
+        if snap.get("altman_label") == "DISTRESS":
+            result["notes"].append("⚠ Altman Z-Score indicates financial distress")
+
+    _set_cache(cache_key, result, 3600, "trade_plan")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: Daily Brief
+# ---------------------------------------------------------------------------
+
+@app.get("/daily-brief")
+def daily_brief(user=Depends(get_current_user)):
+    """Generate a personalized daily brief based on watchlist."""
+    # Get user's watchlist
+    watchlist_symbols = []
+    try:
+        from models import Watchlist
+        db = SessionLocal()
+        wls = db.query(Watchlist).filter(Watchlist.user_id == str(user.get("user_id", 0))).all()
+        for wl in wls:
+            watchlist_symbols.extend(wl.symbols or [])
+        db.close()
+    except Exception:
+        pass
+
+    if not watchlist_symbols:
+        watchlist_symbols = ["SPY", "QQQ", "AAPL", "TSLA", "NVDA"]
+
+    brief = {"date": datetime.utcnow().strftime("%Y-%m-%d"), "watchlist": watchlist_symbols, "movers": [], "alerts": [], "earnings_today": [], "summary": []}
+
+    # Check each watchlist ticker
+    for sym in watchlist_symbols[:20]:
+        snap = _get_cache(f"ticker:snapshot:{sym}")
+        if not snap:
+            continue
+
+        chg = snap.get("change_1d_pct")
+        if chg is not None and abs(chg) > 2:
+            brief["movers"].append({"symbol": sym, "change": chg, "price": snap.get("price")})
+
+        # Check if earnings today
+        ed = snap.get("next_earnings")
+        if ed and ed == datetime.utcnow().strftime("%Y-%m-%d"):
+            brief["earnings_today"].append({"symbol": sym, "date": ed})
+
+        # Check RSI extremes
+        rsi = snap.get("rsi_14")
+        if rsi and (rsi > 75 or rsi < 25):
+            brief["alerts"].append({"symbol": sym, "type": "rsi", "value": rsi,
+                                     "message": f"{sym} RSI at {rsi:.0f} — {'overbought' if rsi > 75 else 'oversold'}"})
+
+        # Check valuation
+        if snap.get("val_label") == "UNDERVALUED" and chg and chg < -2:
+            brief["alerts"].append({"symbol": sym, "type": "value_dip",
+                                     "message": f"{sym} undervalued and down {chg:.1f}% today — potential opportunity"})
+
+    brief["movers"].sort(key=lambda x: abs(x.get("change", 0)), reverse=True)
+
+    # Market summary
+    mkt = _get_cache("market:overview")
+    if mkt:
+        adv = sum(1 for s in (mkt.get("sectors") or []) if (s.get("change_pct") or 0) >= 0)
+        brief["summary"].append(f"Market: {adv}/{len(mkt.get('sectors',[]))} sectors advancing")
+        if mkt.get("vix", {}).get("value"):
+            brief["summary"].append(f"VIX: {mkt['vix']['value']:.1f}")
+
+    return brief
+
+
+# ---------------------------------------------------------------------------
+# Endpoints: Risk Dashboard
+# ---------------------------------------------------------------------------
+
+@app.post("/risk/dashboard")
+def risk_dashboard(symbols: list[str], weights: Optional[list[float]] = None):
+    """Portfolio-level risk dashboard with factor exposure, tail risk, and concentration."""
+    import numpy as np
+    if not symbols:
+        raise HTTPException(status_code=400, detail="Provide at least 1 symbol")
+    if weights is None:
+        weights = [1.0 / len(symbols)] * len(symbols)
+
+    syms = [s.upper() for s in symbols]
+    result = {"symbols": syms, "weights": weights}
+
+    # Factor exposure
+    try:
+        from factor_engine import compute_factor_exposure
+        factor_profiles = {}
+        for sym in syms:
+            fe = compute_factor_exposure(sym, period_days=252)
+            if fe and fe.get("factors"):
+                factor_profiles[sym] = fe
+        result["factor_exposure"] = factor_profiles
+
+        # Portfolio-level factor betas (weighted average)
+        if factor_profiles:
+            portfolio_factors = {}
+            for fname in ["Market", "Size", "Value", "Momentum"]:
+                weighted_beta = sum(
+                    weights[i] * factor_profiles.get(syms[i], {}).get("factors", {}).get(fname, {}).get("beta", 0)
+                    for i in range(len(syms)) if syms[i] in factor_profiles
+                )
+                portfolio_factors[fname] = round(weighted_beta, 3)
+            result["portfolio_factors"] = portfolio_factors
+    except Exception:
+        result["factor_exposure"] = {}
+        result["portfolio_factors"] = {}
+
+    # Sector concentration
+    sector_weights = {}
+    for i, sym in enumerate(syms):
+        snap = _get_cache(f"ticker:snapshot:{sym}")
+        sector = (snap.get("sector") or "Unknown") if snap else "Unknown"
+        sector_weights[sector] = sector_weights.get(sector, 0) + weights[i]
+    result["sector_concentration"] = {k: round(v * 100, 1) for k, v in sorted(sector_weights.items(), key=lambda x: -x[1])}
+
+    # Concentration risk (HHI)
+    hhi = sum(w ** 2 for w in weights)
+    result["hhi"] = round(hhi, 4)
+    result["concentration"] = "High" if hhi > 0.25 else ("Moderate" if hhi > 0.1 else "Low")
+
+    # Correlation matrix
+    try:
+        from sqlalchemy import text
+        db = SessionLocal()
+        start_date = (datetime.utcnow() - timedelta(days=252)).strftime("%Y-%m-%d")
+        returns_data = {}
+        for sym in syms:
+            rows = db.execute(
+                text("SELECT close FROM ohlcv_daily WHERE symbol = :s AND date >= :d ORDER BY date"),
+                {"s": sym, "d": start_date},
+            ).fetchall()
+            if len(rows) >= 20:
+                closes = [float(r[0]) for r in rows]
+                returns_data[sym] = [closes[i]/closes[i-1]-1 for i in range(1, len(closes))]
+        db.close()
+
+        if len(returns_data) >= 2:
+            min_len = min(len(v) for v in returns_data.values())
+            aligned = {k: v[-min_len:] for k, v in returns_data.items()}
+            rets_matrix = np.array([aligned[s] for s in syms if s in aligned])
+            if rets_matrix.shape[0] >= 2:
+                corr = np.corrcoef(rets_matrix)
+                result["avg_correlation"] = round(float(np.mean(corr[np.triu_indices_from(corr, k=1)])), 3)
+
+                # Portfolio volatility
+                cov = np.cov(rets_matrix)
+                w = np.array([weights[i] for i, s in enumerate(syms) if s in aligned])
+                w = w[:cov.shape[0]]
+                port_var = float(w @ cov @ w)
+                result["portfolio_vol_annual"] = round(float(np.sqrt(port_var * 252) * 100), 1)
+
+                # VaR 95%
+                port_rets = rets_matrix.T @ w
+                var_95 = round(float(np.percentile(port_rets, 5) * 100), 2)
+                result["var_95_daily"] = var_95
+    except Exception:
+        pass
+
+    return result
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8001))
