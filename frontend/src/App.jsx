@@ -12379,7 +12379,7 @@ function ScreenerView() {
                     <td style={{...mono(8,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`}}>{t.sector}</td>
                     <td style={{...mono(8,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.industry||"—"}</td>
                     <td style={{...mono(10,C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.price!=null?`$${t.price.toFixed(2)}`:"—"}</td>
-                    <td style={{...mono(9,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.market_cap?`$${(t.market_cap/1e9).toFixed(1)}B`:"—"}</td>
+                    <td style={{...mono(9,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.market_cap?(t.market_cap>=1000?`$${(t.market_cap/1000).toFixed(1)}T`:t.market_cap>=1?`$${t.market_cap.toFixed(0)}B`:`$${(t.market_cap*1000).toFixed(0)}M`):"—"}</td>
                     <td style={{...mono(10,C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.pe_ratio?.toFixed(1)||"—"}</td>
                     <td style={{...mono(10,C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.pb_ratio?.toFixed(1)||"—"}</td>
                     <td style={{...mono(10,C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.dividend_yield?.toFixed(1)||"—"}</td>
