@@ -12388,7 +12388,7 @@ function ScreenerView() {
                   <tr key={t.symbol||i} style={{background:i%2===0?"transparent":C.dim+"60"}}>
                     <td style={{padding:"5px 6px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"center",cursor:"pointer"}}
                       onClick={()=>toggleWatchlist(t.symbol)} title={watchlist.includes(t.symbol)?"Remove from Watchlist":"Add to Watchlist"}>
-                      <span style={{fontSize:14,color:watchlist.includes(t.symbol)?C.amb:C.bdr,transition:"color .15s"}}>
+                      <span style={{fontSize:14,color:watchlist.includes(t.symbol)?C.amb:"#888899",opacity:watchlist.includes(t.symbol)?1:0.7,transition:"color .15s"}}>
                         {watchlist.includes(t.symbol)?"★":"☆"}
                       </span>
                     </td>
