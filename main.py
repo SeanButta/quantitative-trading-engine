@@ -5187,6 +5187,32 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
             if _trailing_eps and _book_value and _trailing_eps > 0 and _book_value > 0:
                 import math as _math
                 _graham_number = round(_math.sqrt(22.5 * _trailing_eps * _book_value), 2)
+            # DCF fair value (10-year discounted FCF + terminal value)
+            _dcf_value = None
+            _dcf_upside = None
+            _ddm_value = None
+            try:
+                import math as _math2
+                _fcf = _info.get("freeCashflow")
+                _shares = _info.get("sharesOutstanding")
+                if _fcf and _shares and _fcf > 0 and _shares > 0:
+                    _fcf_ps = _fcf / _shares
+                    _g = min(max(_info.get("revenueGrowth") or 0.05, 0.02), 0.25)
+                    _d = 0.10  # WACC proxy
+                    _tg = 0.025  # terminal growth
+                    _dcf_sum = sum(_fcf_ps * (1 + _g) ** yr / (1 + _d) ** yr for yr in range(1, 11))
+                    _term = _fcf_ps * (1 + _g) ** 10 * (1 + _tg) / (_d - _tg)
+                    _dcf_value = round(_dcf_sum + _term / (1 + _d) ** 10, 2)
+                    if _price and float(_price) > 0:
+                        _dcf_upside = round((_dcf_value - float(_price)) / float(_price) * 100, 1)
+                # Dividend Discount Model
+                _div_rate = _info.get("dividendRate")
+                if _div_rate and _div_rate > 0:
+                    _dg = min(max(_info.get("revenueGrowth") or 0.03, 0.01), 0.08)
+                    if 0.10 > _dg:
+                        _ddm_value = round(_div_rate * (1 + _dg) / (0.10 - _dg), 2)
+            except Exception:
+                pass
             _fund_obj = {
                 "symbol":          sym,
                 "pe_ratio":        _sf(_info.get("trailingPE")),
@@ -5197,6 +5223,10 @@ def trade_advisor(request: Request, req: TradeAdvisorRequest, _user=Depends(get_
                 "trailing_eps":    _trailing_eps,
                 "book_value":      _book_value,
                 "graham_number":   _graham_number,
+                # DCF fair value (10-year discounted FCF + terminal)
+                "dcf_value":       _dcf_value,
+                "dcf_upside":      _dcf_upside,
+                "ddm_value":       _ddm_value,
                 "market_cap":      _info.get("marketCap"),
                 "beta":            _sf(_info.get("beta")),
                 "div_yield":       _pct(_info.get("dividendYield")),

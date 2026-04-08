@@ -9690,8 +9690,8 @@ function TradeAdvisorView() {
             <MetricCard label="PEG" value={fmtNum(f.peg_ratio)} color={f.peg_ratio != null ? (f.peg_ratio < 1 ? C.grn : f.peg_ratio > 2 ? C.red : C.amb) : C.mut} />
           </div>
 
-          {/* Analyst targets + intrinsic value */}
-          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : "1fr 1fr", gap:12}}>
+          {/* Analyst targets + DCF + intrinsic value */}
+          <div style={{display:"grid", gridTemplateColumns: C.isMobile ? "1fr" : "1fr 1fr 1fr", gap:12}}>
             <div style={{padding:"12px 14px", borderRadius:10, background:C.dim, border:`1px solid ${C.bdr}`}}>
               <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:8}}>ANALYST PRICE TARGETS</div>
               {f.analyst_target_low != null && f.analyst_target_high != null && (
@@ -9719,6 +9719,40 @@ function TradeAdvisorView() {
               )}
             </div>
 
+            {/* DCF Fair Value */}
+            <div style={{padding:"12px 14px", borderRadius:10, background:C.dim, border:`1px solid ${C.bdr}`}}>
+              <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:8}}>DCF FAIR VALUE</div>
+              {f.dcf_value != null && f.dcf_value > 0 ? (
+                <div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                    <span style={mono(9, C.mut)}>10-Year DCF</span>
+                    <span style={mono(16, C.headingTxt, 700)}>${f.dcf_value?.toFixed(0) || "—"}</span>
+                  </div>
+                  {price && f.dcf_upside != null && <div style={{...mono(9, f.dcf_upside > 0 ? C.grn : C.red), marginTop:6}}>
+                    {f.dcf_upside > 0
+                      ? `${f.dcf_upside.toFixed(0)}% upside — undervalued by DCF`
+                      : `${Math.abs(f.dcf_upside).toFixed(0)}% downside — overvalued by DCF`}
+                  </div>}
+                  <div style={{...mono(8, C.mut), marginTop:4}}>Based on projected free cash flow</div>
+                </div>
+              ) : (
+                <div>
+                  {f.ddm_value != null && f.ddm_value > 0 ? (
+                    <div>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline"}}>
+                        <span style={mono(9, C.mut)}>Dividend Model</span>
+                        <span style={mono(16, C.headingTxt, 700)}>${f.ddm_value?.toFixed(0)}</span>
+                      </div>
+                      {price && <div style={{...mono(9, f.ddm_value > price ? C.grn : C.red), marginTop:6}}>
+                        {f.ddm_value > price ? "Undervalued by dividend model" : "Overvalued by dividend model"}
+                      </div>}
+                    </div>
+                  ) : <div style={mono(10, C.mut)}>Insufficient cash flow data for DCF estimate</div>}
+                </div>
+              )}
+            </div>
+
+            {/* Graham Number */}
             <div style={{padding:"12px 14px", borderRadius:10, background:C.dim, border:`1px solid ${C.bdr}`}}>
               <div style={{...mono(8, C.mut, 600), letterSpacing:"0.08em", textTransform:"uppercase", marginBottom:8}}>INTRINSIC VALUE</div>
               {f.graham_number != null && f.graham_number > 0 ? (

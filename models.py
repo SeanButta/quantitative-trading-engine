@@ -134,6 +134,30 @@ class Watchlist(Base):
     user = relationship("User", back_populates="watchlists")
 
 
+class TradeThesis(Base):
+    """Track investment theses with invalidation criteria and outcome monitoring."""
+    __tablename__ = "trade_theses"
+
+    id              = Column(String, primary_key=True)
+    user_id         = Column(String, default="0", index=True)
+    symbol          = Column(String, nullable=False, index=True)
+    direction       = Column(String, default="long")                # long / short
+    thesis          = Column(String, nullable=False)                 # why you're entering
+    entry_price     = Column(Float, nullable=True)
+    entry_date      = Column(String, nullable=True)
+    target_price    = Column(Float, nullable=True)
+    stop_price      = Column(Float, nullable=True)
+    invalidation    = Column(String, nullable=True)                  # what kills the thesis
+    timeframe       = Column(String, default="medium")               # short / medium / long
+    confidence      = Column(Integer, default=50)                    # 0-100
+    status          = Column(String, default="active")               # active / won / lost / invalidated / closed
+    outcome_notes   = Column(String, nullable=True)
+    tags            = Column(JSON, default=list)                     # e.g. ["momentum", "value", "earnings"]
+    created_at      = Column(DateTime, default=datetime.utcnow)
+    updated_at      = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    closed_at       = Column(DateTime, nullable=True)
+
+
 # ===========================================================================
 # EXISTING: Projects / Strategies / Runs
 # ===========================================================================
