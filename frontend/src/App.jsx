@@ -11,7 +11,8 @@ import {
   FlaskConical, Sun, Moon, Activity, Briefcase, TrendingUp, Settings,
   Database, Search, ChevronDown, ChevronUp, Plus, X, BookOpen,
   TrendingDown, AlertCircle, Eye, Maximize2, Minimize2,
-  Compass, Shuffle, Network, Layers, Shield, Cpu, Newspaper, Lock, Unlock, Menu, DollarSign
+  Compass, Shuffle, Network, Layers, Shield, Cpu, Newspaper, Lock, Unlock, Menu, DollarSign,
+  Filter, Calendar, Download, Star, Users, BarChart3
 } from "lucide-react";
 
 // ── Theme tokens ─────────────────────────────────────────
@@ -12227,6 +12228,208 @@ function SectorsView() {
 }
 
 // ── App ─────────────────────────────────────────────────
+// ── ScreenerView ─────────────────────────────────────────────────────────────
+function ScreenerView() {
+  const C = useC();
+  const [results, setResults] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [filters, setFilters] = useState({ max_pe: "", min_roe: "", sector: "", above_ma50: "", min_dividend_yield: "", max_rsi: "", sort_by: "market_cap", limit: 100 });
+  const run = () => {
+    setLoading(true);
+    const body = {};
+    if (filters.max_pe) body.max_pe = parseFloat(filters.max_pe);
+    if (filters.min_roe) body.min_roe = parseFloat(filters.min_roe);
+    if (filters.sector) body.sector = filters.sector;
+    if (filters.above_ma50 === "true") body.above_ma50 = true;
+    if (filters.above_ma50 === "false") body.above_ma50 = false;
+    if (filters.min_dividend_yield) body.min_dividend_yield = parseFloat(filters.min_dividend_yield);
+    if (filters.max_rsi) body.max_rsi = parseFloat(filters.max_rsi);
+    body.sort_by = filters.sort_by;
+    body.limit = filters.limit;
+    fetch("/api/screener", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(r => r.json()).then(d => { setResults(d); setLoading(false); }).catch(() => setLoading(false));
+  };
+  useEffect(() => { run(); }, []);
+  const cc = v => v == null ? C.mut : v >= 0 ? C.grn : C.red;
+  const fp = v => v != null ? (v >= 0 ? "+" : "") + v.toFixed(1) + "%" : "—";
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div><Lbl>Stock Screener</Lbl><div style={mono(10,C.mut)}>Filter and rank the full universe by fundamentals, technicals, and valuation</div></div>
+      <Card>
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"1fr":"repeat(4,1fr)",gap:10,marginBottom:12}}>
+          {[["Max P/E","max_pe","e.g. 20"],["Min ROE %","min_roe","e.g. 10"],["Min Div Yield %","min_dividend_yield","e.g. 2"],["Max RSI","max_rsi","e.g. 70"]].map(([label,key,ph])=>(
+            <div key={key}>
+              <div style={{...mono(8,C.mut,600),letterSpacing:"0.06em",marginBottom:4}}>{label.toUpperCase()}</div>
+              <input value={filters[key]} onChange={e=>setFilters(p=>({...p,[key]:e.target.value}))} placeholder={ph}
+                style={{width:"100%",padding:"6px 10px",borderRadius:6,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:12,boxSizing:"border-box",outline:"none"}}/>
+            </div>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+          <select value={filters.above_ma50} onChange={e=>setFilters(p=>({...p,above_ma50:e.target.value}))}
+            style={{padding:"6px 10px",borderRadius:6,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:11}}>
+            <option value="">MA50: Any</option><option value="true">Above MA50</option><option value="false">Below MA50</option>
+          </select>
+          <select value={filters.sort_by} onChange={e=>setFilters(p=>({...p,sort_by:e.target.value}))}
+            style={{padding:"6px 10px",borderRadius:6,border:`1px solid ${C.bdr}`,background:C.dim,color:C.txt,fontFamily:"monospace",fontSize:11}}>
+            <option value="market_cap">Sort: Market Cap</option><option value="pe_ratio">Sort: P/E</option><option value="rsi_14">Sort: RSI</option>
+            <option value="change_1d_pct">Sort: 1D Change</option><option value="change_ytd_pct">Sort: YTD</option><option value="dividend_yield">Sort: Dividend</option>
+            <option value="signal_score">Sort: Signal Score</option>
+          </select>
+          <button onClick={run} disabled={loading}
+            style={{padding:"6px 16px",borderRadius:8,border:"none",background:C.sky,color:"#000",...mono(11,"#000",700),cursor:"pointer"}}>
+            {loading ? "Scanning..." : "Screen"}
+          </button>
+          <a href="/api/export/screener" target="_blank" style={{...mono(9,C.mut),textDecoration:"none"}}>
+            <Download size={12}/> CSV
+          </a>
+        </div>
+      </Card>
+      {results && (
+        <Card>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+            <Lbl>{results.total_matches} matches from {results.scanned} tickers</Lbl>
+          </div>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontFamily:"monospace"}}>
+              <thead><tr style={{background:C.dim}}>
+                {["Symbol","Name","Sector","Price","Mkt Cap","P/E","P/B","Div%","RSI","1D","1M","YTD","Signal"].map(h=>(
+                  <th key={h} style={{...mono(8,C.mut,700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}`,textAlign:"right",whiteSpace:"nowrap"}}>{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {(results.results||[]).map((t,i)=>(
+                  <tr key={t.symbol||i} style={{background:i%2===0?"transparent":C.dim+"60"}}>
+                    <td style={{...mono(11,C.headingTxt,700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`}}>{t.symbol}</td>
+                    <td style={{...mono(9,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.name}</td>
+                    <td style={{...mono(8,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`}}>{t.sector}</td>
+                    <td style={{...mono(10,C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.price!=null?`$${t.price.toFixed(2)}`:"—"}</td>
+                    <td style={{...mono(9,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.market_cap?`$${(t.market_cap/1e9).toFixed(1)}B`:"—"}</td>
+                    <td style={{...mono(10,C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.pe_ratio?.toFixed(1)||"—"}</td>
+                    <td style={{...mono(10,C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.pb_ratio?.toFixed(1)||"—"}</td>
+                    <td style={{...mono(10,C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.dividend_yield?.toFixed(1)||"—"}</td>
+                    <td style={{...mono(10,t.rsi_14>70?C.red:t.rsi_14<30?C.grn:C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.rsi_14?.toFixed(0)||"—"}</td>
+                    <td style={{...mono(10,cc(t.change_1d_pct),700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{fp(t.change_1d_pct)}</td>
+                    <td style={{...mono(10,cc(t.change_1m_pct),700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{fp(t.change_1m_pct)}</td>
+                    <td style={{...mono(10,cc(t.change_ytd_pct),700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{fp(t.change_ytd_pct)}</td>
+                    <td style={{padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>
+                      {t.signal_label && <Tag color={t.signal_label.includes("BUY")?C.grn:t.signal_label.includes("SELL")?C.red:C.amb}>{t.signal_label}</Tag>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ── EarningsCalendarView ─────────────────────────────────────────────────────
+function EarningsCalendarView() {
+  const C = useC();
+  const [data, setData] = useState(null);
+  const [days, setDays] = useState(14);
+  useEffect(() => {
+    fetch(`/api/calendar/events?days=${days}`).then(r=>r.json()).then(setData).catch(()=>{});
+  }, [days]);
+  const cc = v => v == null ? C.mut : v >= 0 ? C.grn : C.red;
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:8}}>
+        <div><Lbl>Event Calendar</Lbl><div style={mono(10,C.mut)}>Earnings, FOMC, options expiry, and market events</div></div>
+        <div style={{display:"flex",gap:4}}>
+          {[7,14,30,60].map(d=>(
+            <button key={d} onClick={()=>setDays(d)}
+              style={{...mono(10,days===d?"#000":C.mut,days===d?700:400),padding:"5px 12px",borderRadius:6,
+                border:`1px solid ${days===d?C.sky:C.bdr}`,background:days===d?C.sky:C.dim,cursor:"pointer"}}>{d}d</button>
+          ))}
+        </div>
+      </div>
+      {data && (
+        <Card>
+          <div style={{...mono(9,C.mut),marginBottom:10}}>{data.count} events in next {days} days</div>
+          {/* Group by date */}
+          {Object.entries((data.events||[]).reduce((acc,e)=>{(acc[e.date]=acc[e.date]||[]).push(e);return acc;},{})).map(([date,events])=>(
+            <div key={date} style={{marginBottom:14}}>
+              <div style={{...mono(10,C.headingTxt,700),marginBottom:6,paddingBottom:4,borderBottom:`1px solid ${C.bdr}`}}>{date} · {new Date(date+"T12:00:00").toLocaleDateString("en-US",{weekday:"long"})}</div>
+              <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                {events.map((e,i)=>{
+                  const col = e.type==="earnings"?C.amb:e.type==="fomc"?C.red:e.type==="opex"?C.pur:C.sky;
+                  return (
+                    <div key={i} style={{padding:"6px 10px",borderRadius:8,background:col+"10",border:`1px solid ${col}25`,minWidth:100}}>
+                      <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                        <Tag color={col}>{e.type.toUpperCase()}</Tag>
+                        <span style={mono(11,C.headingTxt,700)}>{e.symbol}</span>
+                      </div>
+                      {e.name && <div style={mono(8,C.mut)}>{e.name}</div>}
+                      {e.detail && <div style={mono(8,C.mut)}>{e.detail}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </Card>
+      )}
+    </div>
+  );
+}
+
+// ── WatchlistView ────────────────────────────────────────────────────────────
+function WatchlistView({onNav}) {
+  const C = useC();
+  const [symbols, setSymbols] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("watchlist_symbols")) || ["SPY","QQQ","AAPL","TSLA","NVDA"]; } catch { return ["SPY","QQQ","AAPL","TSLA","NVDA"]; }
+  });
+  const [input, setInput] = useState("");
+  const [snapshots, setSnapshots] = useState({});
+
+  useEffect(() => { try { localStorage.setItem("watchlist_symbols", JSON.stringify(symbols)); } catch {} }, [symbols]);
+
+  useEffect(() => {
+    symbols.forEach(sym => {
+      fetch(`/api/market/price/${sym}?period=5d`).then(r=>r.ok?r.json():null).then(d=>{
+        if(d?.data?.length) setSnapshots(prev=>({...prev,[sym]:d.data[d.data.length-1]}));
+      }).catch(()=>{});
+    });
+  }, [symbols]);
+
+  const addSym = () => {
+    const sym = input.trim().toUpperCase();
+    if (sym && !symbols.includes(sym)) { setSymbols(prev => [...prev, sym]); setInput(""); }
+  };
+  const removeSym = sym => setSymbols(prev => prev.filter(s => s !== sym));
+  const cc = v => v == null ? C.mut : v >= 0 ? C.grn : C.red;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+      <div><Lbl>Watchlist</Lbl><div style={mono(10,C.mut)}>Track your favorite tickers across the platform</div></div>
+      <Card>
+        <div style={{display:"flex",gap:8,marginBottom:14}}>
+          <input value={input} onChange={e=>setInput(e.target.value.toUpperCase())} onKeyDown={e=>e.key==="Enter"&&addSym()}
+            placeholder="Add ticker..." style={{flex:1,padding:"7px 11px",borderRadius:8,background:C.dim,border:`1px solid ${C.grn}60`,color:C.txt,fontFamily:"monospace",fontSize:13,outline:"none",boxSizing:"border-box"}}/>
+          <button onClick={addSym} style={{padding:"7px 16px",borderRadius:8,border:"none",background:C.grn,color:"#000",...mono(11,"#000",700),cursor:"pointer"}}>+ Add</button>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          {symbols.map(sym => {
+            const snap = snapshots[sym];
+            return (
+              <div key={sym} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderRadius:10,background:C.dim,border:`1px solid ${C.bdr}`}}>
+                <span style={mono(13,C.headingTxt,700)}>{sym}</span>
+                <span style={mono(14,C.txt,600)}>{snap?`$${snap.close?.toFixed(2)}`:"—"}</span>
+                <div style={{flex:1}}/>
+                <button onClick={()=>removeSym(sym)} style={{...mono(9,C.red),background:"transparent",border:"none",cursor:"pointer",padding:"2px 6px"}}>✕</button>
+              </div>
+            );
+          })}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 const NAV=[
   // ANALYSIS
   {id:"_analysis", l:"ANALYSIS", section:true},
@@ -12238,6 +12441,11 @@ const NAV=[
   {id:"signals",   l:"Quant",        I:Zap},
   {id:"pairs",     l:"Pairs",        I:Shuffle},
   {id:"advisor",   l:"Fundamentals", I:Compass},
+  // TOOLS
+  {id:"_tools", l:"TOOLS", section:true},
+  {id:"screener",  l:"Screener",     I:Filter},
+  {id:"watchlist", l:"Watchlist",    I:Star},
+  {id:"calendar",  l:"Calendar",     I:Calendar},
   // DECISION
   {id:"_decision", l:"DECISION", section:true},
   {id:"alpha",     l:"Alpha",        I:Target},
@@ -13739,6 +13947,9 @@ function AppShell() {
     sectors:   <SectorsView/>,
     signals:   <SignalsView/>,
     pairs:     <PairsView/>,
+    screener:  <ScreenerView/>,
+    watchlist: <WatchlistView onNav={(v)=>{setDetailSym(null);setView(v);}}/>,
+    calendar:  <EarningsCalendarView/>,
     alpha:     <AlphaView onNav={(v)=>{setDetailSym(null);setView(v);}}/>,
     portfolio: <PortfolioHubView/>,
     paper:     <PaperTradingView/>,
