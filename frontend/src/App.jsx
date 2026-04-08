@@ -9364,8 +9364,8 @@ function TradeAdvisorView() {
   const [data,    setData]    = useState(null);
   const [err,     setErr]     = useState(null);
 
-  const run = () => {
-    const sym = input.trim().toUpperCase();
+  const run = (sym_override) => {
+    const sym = (sym_override || input).trim().toUpperCase();
     if (!sym) return;
     setLoading(true); setData(null); setErr(null);
     fetch("/api/advisor", {
@@ -9377,6 +9377,9 @@ function TradeAdvisorView() {
       .then(d => { setData(d); setLoading(false); })
       .catch(e => { setErr(String(e)); setLoading(false); });
   };
+
+  // Auto-analyze default symbol on mount
+  useEffect(() => { run("SPY"); }, []);
 
   const dCol = d => d === "bullish" ? C.grn : d === "bearish" ? C.red : C.amb;
 
