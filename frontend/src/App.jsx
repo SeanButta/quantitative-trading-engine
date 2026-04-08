@@ -12233,7 +12233,7 @@ function ScreenerView() {
   const C = useC();
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [filters, setFilters] = useState({ max_pe: "", min_pe: "", min_roe: "", max_pb: "", min_dividend_yield: "", min_rsi: "", max_rsi: "", min_market_cap: "", max_market_cap: "", min_revenue_growth: "", min_eps_growth: "", min_net_margin: "", min_gross_margin: "", min_beta: "", max_beta: "", min_short_pct_float: "", min_change_ytd: "", sector: "", signal_label: "", above_ma50: "", above_ma200: "", sort_by: "market_cap", limit: 500 });
+  const [filters, setFilters] = useState({ max_pe: "", min_pe: "", min_roe: "", max_pb: "", min_dividend_yield: "", min_rsi: "", max_rsi: "", min_market_cap: "", max_market_cap: "", min_revenue_growth: "", min_eps_growth: "", min_net_margin: "", min_gross_margin: "", min_beta: "", max_beta: "", min_short_pct_float: "", min_change_ytd: "", sector: "", industry: "", signal_label: "", val_label: "", above_ma50: "", above_ma200: "", sort_by: "market_cap", limit: 500 });
   const [showMore, setShowMore] = useState(false);
   const [sortCol, setSortCol] = useState("market_cap");
   const [sortDir, setSortDir] = useState(-1); // -1 = desc, 1 = asc
@@ -12247,6 +12247,7 @@ function ScreenerView() {
     numFields.forEach(k => { if (filters[k]) body[k] = parseFloat(filters[k]); });
     // String filters
     if (filters.sector) body.sector = filters.sector;
+    if (filters.industry) body.industry = filters.industry;
     if (filters.signal_label) body.signal_label = filters.signal_label;
     if (filters.val_label) body.val_label = filters.val_label;
     // Boolean filters
@@ -12267,8 +12268,8 @@ function ScreenerView() {
       <div><Lbl>Stock Screener</Lbl><div style={mono(10,C.mut)}>Filter and rank the full universe by fundamentals, technicals, and valuation</div></div>
       <Card>
         {/* Row 1: Core filters */}
-        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(6,1fr)",gap:8,marginBottom:10}}>
-          {[["Max P/E","max_pe","20"],["Min P/E","min_pe","5"],["Max P/B","max_pb","3"],["Min ROE %","min_roe","10"],["Min Div %","min_dividend_yield","2"],["Max RSI","max_rsi","70"]].map(([label,key,ph])=>(
+        <div style={{display:"grid",gridTemplateColumns:C.isMobile?"repeat(2,1fr)":"repeat(8,1fr)",gap:8,marginBottom:10}}>
+          {[["Sector","sector","e.g. Energy"],["Industry","industry","e.g. Semicon"],["Max P/E","max_pe","20"],["Min P/E","min_pe","5"],["Max P/B","max_pb","3"],["Min ROE %","min_roe","10"],["Min Div %","min_dividend_yield","2"],["Max RSI","max_rsi","70"]].map(([label,key,ph])=>(
             <div key={key}>
               <div style={{...mono(7,C.mut,600),letterSpacing:"0.05em",marginBottom:3}}>{label.toUpperCase()}</div>
               <input value={filters[key]} onChange={e=>setFilters(p=>({...p,[key]:e.target.value}))} placeholder={ph}
@@ -12344,7 +12345,7 @@ function ScreenerView() {
           <div style={{overflowX:"auto"}}>
             <table style={{width:"100%",borderCollapse:"collapse",fontFamily:"monospace"}}>
               <thead><tr style={{background:C.dim}}>
-                {[["Symbol","symbol"],["Name","name"],["Sector","sector"],["Price","price"],["Mkt Cap","market_cap"],
+                {[["Symbol","symbol"],["Name","name"],["Sector","sector"],["Industry","industry"],["Price","price"],["Mkt Cap","market_cap"],
                   ["P/E","pe_ratio"],["P/B","pb_ratio"],["Div%","dividend_yield"],["RSI","rsi_14"],
                   ["ROE","roe"],["Short%","short_pct_float"],["Value","val_score"],
                   ["1D","change_1d_pct"],["1M","change_1m_pct"],["YTD","change_ytd_pct"],["Signal","signal_score"]].map(([label,key])=>{
@@ -12376,6 +12377,7 @@ function ScreenerView() {
                     <td style={{...mono(11,C.headingTxt,700),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`}}>{t.symbol}</td>
                     <td style={{...mono(9,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,maxWidth:140,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.name}</td>
                     <td style={{...mono(8,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`}}>{t.sector}</td>
+                    <td style={{...mono(8,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,maxWidth:120,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.industry||"—"}</td>
                     <td style={{...mono(10,C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.price!=null?`$${t.price.toFixed(2)}`:"—"}</td>
                     <td style={{...mono(9,C.mut),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.market_cap?`$${(t.market_cap/1e9).toFixed(1)}B`:"—"}</td>
                     <td style={{...mono(10,C.txt),padding:"5px 8px",borderBottom:`1px solid ${C.bdr}20`,textAlign:"right"}}>{t.pe_ratio?.toFixed(1)||"—"}</td>

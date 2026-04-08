@@ -190,6 +190,9 @@ class TickerSnapshot:
     target_upside:     Optional[float] = None   # % upside to mean target
     recommendation:    str             = ""     # strongBuy/buy/hold/sell/strongSell
 
+    # Industry classification
+    industry:          Optional[str]   = None   # yfinance industry (e.g. "Auto Manufacturers")
+
     # Short interest
     short_ratio:       Optional[float] = None   # days to cover
     short_pct_float:   Optional[float] = None   # % of float shorted
@@ -356,6 +359,11 @@ class SectorProvider:
                 logger.debug("Info cache hit for %s", symbol)
 
             snap.name = (info.get("shortName") or info.get("longName") or symbol)[:40]
+            snap.industry = info.get("industry")
+            # Use yfinance sector if more specific than the GICS sector passed in
+            _yf_sector = info.get("sector")
+            if _yf_sector and _yf_sector != snap.sector:
+                snap.sector = _yf_sector
 
             # ── Price from info ──────────────────────────────────────────
             snap.price      = self._sf(info.get("currentPrice") or info.get("regularMarketPrice"))

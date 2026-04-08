@@ -6381,6 +6381,7 @@ class ScreenerRequest(BaseModel):
     min_net_margin: Optional[float] = None      # percent
     min_gross_margin: Optional[float] = None    # percent
     sector: Optional[str] = None
+    industry: Optional[str] = None               # e.g. "Auto Manufacturers", "Semiconductors"
     signal_label: Optional[str] = None          # STRONG BUY, BUY, NEUTRAL, SELL
     val_label: Optional[str] = None              # UNDERVALUED, FAIR, OVERVALUED
     min_val_score: Optional[float] = None        # -2 to +2 (positive = undervalued)
@@ -6439,7 +6440,9 @@ def stock_screener(req: ScreenerRequest):
                 continue
             if req.min_roe and (s.get("roe") or -999) < req.min_roe:
                 continue
-            if req.sector and s.get("sector", "").lower() != req.sector.lower():
+            if req.sector and req.sector.lower() not in (s.get("sector") or "").lower():
+                continue
+            if req.industry and req.industry.lower() not in (s.get("industry") or "").lower():
                 continue
             if req.signal_label and s.get("signal_label", "").upper() != req.signal_label.upper():
                 continue
