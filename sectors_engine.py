@@ -286,15 +286,69 @@ class SectorProvider:
     # Single ticker fetch
     # ------------------------------------------------------------------
 
+    def _read_cached_info(self, symbol: str):
+        """Read cached ticker info dict from DB. Returns dict or None."""
+        try:
+            from sqlalchemy import create_engine, text
+            from pathlib import Path
+            import json
+            db_path = Path(__file__).parent / "quant_engine.db"
+            if not db_path.exists():
+                return None
+            eng = create_engine(f"sqlite:///{db_path}", echo=False)
+            with eng.connect() as conn:
+                row = conn.execute(
+                    text("SELECT value_json, expires_at FROM cache_entries WHERE key = :k"),
+                    {"k": f"ticker:info:{symbol.upper()}"},
+                ).fetchone()
+            if row and row[0]:
+                from datetime import datetime
+                expires = datetime.fromisoformat(row[1]) if row[1] else None
+                if expires and expires > datetime.utcnow():
+                    return json.loads(row[0])
+            return None
+        except Exception:
+            return None
+
+    def _write_cached_info(self, symbol: str, info: dict) -> None:
+        """Write ticker info dict to DB cache with 24h TTL."""
+        try:
+            from sqlalchemy import create_engine, text
+            from pathlib import Path
+            import json
+            from datetime import datetime, timedelta
+            db_path = Path(__file__).parent / "quant_engine.db"
+            eng = create_engine(f"sqlite:///{db_path}", echo=False)
+            val = json.dumps(info, default=str)
+            expires = (datetime.utcnow() + timedelta(hours=24)).isoformat()
+            with eng.connect() as conn:
+                conn.execute(
+                    text("INSERT OR REPLACE INTO cache_entries (key, value_json, expires_at, created_at, refreshed_at, source, size_bytes) "
+                         "VALUES (:k, :v, :e, :now, :now, 'sectors_engine', :sz)"),
+                    {"k": f"ticker:info:{symbol.upper()}", "v": val, "e": expires,
+                     "now": datetime.utcnow().isoformat(), "sz": len(val)},
+                )
+                conn.commit()
+        except Exception:
+            pass
+
     def fetch_ticker(self, symbol: str, sector: str) -> TickerSnapshot:
         snap = TickerSnapshot(symbol=symbol, name=symbol, sector=sector)
         try:
-            t   = yf.Ticker(symbol)
-            info = {}
-            try:
-                info = t.info or {}
-            except Exception:
-                pass
+            # ── Try cached info first ───────────────────────────────────
+            info = self._read_cached_info(symbol)
+            t = None
+            if info is None:
+                t   = yf.Ticker(symbol)
+                try:
+                    info = t.info or {}
+                except Exception:
+                    info = {}
+                # Cache for future reads
+                if info:
+                    self._write_cached_info(symbol, info)
+            else:
+                logger.debug("Info cache hit for %s", symbol)
 
             snap.name = (info.get("shortName") or info.get("longName") or symbol)[:40]
 
@@ -317,11 +371,27 @@ class SectorProvider:
             if snap.volume and snap.avg_volume and snap.avg_volume > 0:
                 snap.volume_vs_avg = round(snap.volume / snap.avg_volume, 2)
 
-            # ── Historical returns + technicals ─────────────────────────
+            # ── Historical returns + technicals (DB-first) ─────────────
             try:
-                hist = t.history(period="1y", interval="1d", auto_adjust=True)
+                from technical_analysis import _load_ohlcv_from_db
+                hist = _load_ohlcv_from_db(symbol, "1y", "1d")
+                if hist is None and t is not None:
+                    hist = t.history(period="1y", interval="1d", auto_adjust=True)
+                    if hist is not None and not hist.empty:
+                        hist.columns = [str(c).lower() for c in hist.columns]
+                        from technical_analysis import _write_ohlcv_to_db
+                        _write_ohlcv_to_db(symbol, hist)
+                elif hist is None:
+                    t = yf.Ticker(symbol)
+                    hist = t.history(period="1y", interval="1d", auto_adjust=True)
+                    if hist is not None and not hist.empty:
+                        hist.columns = [str(c).lower() for c in hist.columns]
+                        from technical_analysis import _write_ohlcv_to_db
+                        _write_ohlcv_to_db(symbol, hist)
                 if hist is not None and len(hist) > 5:
-                    closes = hist["Close"].dropna().tolist()
+                    # Handle both capitalized (yfinance) and lowercase (DB) column names
+                    _close_col = "close" if "close" in hist.columns else "Close"
+                    closes = hist[_close_col].dropna().tolist()
                     snap.change_1w_pct  = self._pct_change(closes, 5)
                     snap.change_1m_pct  = self._pct_change(closes, 21)
                     snap.change_3m_pct  = self._pct_change(closes, 63)

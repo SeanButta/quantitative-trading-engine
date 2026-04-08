@@ -325,6 +325,85 @@ def _resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# DB-first OHLCV layer — eliminates redundant yfinance calls
+# ---------------------------------------------------------------------------
+
+_PERIOD_DAYS = {
+    "1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "2y": 730, "3y": 1095,
+    "5y": 1825, "10y": 3650, "max": 7300, "5d": 5, "1d": 1, "ytd": 365,
+}
+
+
+def _load_ohlcv_from_db(symbol: str, period: str = "1y", interval: str = "1d"):
+    """
+    Try to load OHLCV from the ohlcv_daily DB table.
+    Returns a pandas DataFrame in yfinance .history() format, or None if insufficient data.
+    Only works for daily interval.
+    """
+    if interval != "1d":
+        return None
+
+    import pandas as pd
+    from datetime import datetime, timedelta
+
+    days = _PERIOD_DAYS.get(period, 365)
+    start_date = (datetime.utcnow() - timedelta(days=days)).date()
+
+    try:
+        from sqlalchemy import create_engine, text
+        from pathlib import Path
+        db_path = Path(__file__).parent / "quant_engine.db"
+        if not db_path.exists():
+            return None
+        engine = create_engine(f"sqlite:///{db_path}", echo=False)
+        with engine.connect() as conn:
+            rows = conn.execute(
+                text("SELECT date, open, high, low, close, volume FROM ohlcv_daily "
+                     "WHERE symbol = :sym AND date >= :start ORDER BY date"),
+                {"sym": symbol.upper(), "start": str(start_date)},
+            ).fetchall()
+        if not rows or len(rows) < 20:
+            return None
+        df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume"])
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date")
+        df = df.astype(float)
+        logger.info("OHLCV DB hit for %s: %d bars (period=%s)", symbol, len(df), period)
+        return df
+    except Exception as exc:
+        logger.debug("OHLCV DB read failed for %s: %s", symbol, exc)
+        return None
+
+
+def _write_ohlcv_to_db(symbol: str, hist) -> None:
+    """Write new OHLCV bars to ohlcv_daily table (upsert)."""
+    try:
+        from sqlalchemy import create_engine, text
+        from pathlib import Path
+        from datetime import datetime
+        db_path = Path(__file__).parent / "quant_engine.db"
+        engine = create_engine(f"sqlite:///{db_path}", echo=False)
+        with engine.connect() as conn:
+            for idx, row in hist.iterrows():
+                dt = idx.date() if hasattr(idx, 'date') else idx
+                conn.execute(
+                    text("INSERT OR REPLACE INTO ohlcv_daily (symbol, date, open, high, low, close, volume, provider, fetched_at) "
+                         "VALUES (:sym, :dt, :o, :h, :l, :c, :v, 'yfinance', :now)"),
+                    {"sym": symbol.upper(), "dt": str(dt),
+                     "o": float(row.get("open", row.get("Open", 0))),
+                     "h": float(row.get("high", row.get("High", 0))),
+                     "l": float(row.get("low", row.get("Low", 0))),
+                     "c": float(row.get("close", row.get("Close", 0))),
+                     "v": float(row.get("volume", row.get("Volume", 0))),
+                     "now": datetime.utcnow().isoformat()},
+                )
+            conn.commit()
+        logger.debug("Wrote %d OHLCV bars to DB for %s", len(hist), symbol)
+    except Exception as exc:
+        logger.debug("OHLCV DB write failed for %s: %s", symbol, exc)
+
+
+# ---------------------------------------------------------------------------
 # Convenience: fetch from yfinance + compute
 # ---------------------------------------------------------------------------
 
@@ -335,12 +414,8 @@ def fetch_and_compute(
     **indicator_params,
 ) -> dict:
     """
-    Fetch OHLCV from yfinance then compute all indicators.
-
-    Supports native yfinance intervals (1d, 1wk, 1mo, 1h, …) plus synthetic
-    intraday intervals 4h and 8h (fetched as 1h, resampled via pandas).
-
-    Returns the full indicator dict plus top-level metadata.
+    Fetch OHLCV then compute all indicators.
+    Checks ohlcv_daily DB table first — only falls back to yfinance on miss.
     """
     import yfinance as yf
 
@@ -350,14 +425,26 @@ def fetch_and_compute(
     if interval in _SYNTHETIC_INTERVALS:
         fetch_interval, resample_rule = _SYNTHETIC_INTERVALS[interval]
 
-    ticker = yf.Ticker(symbol)
-    hist   = ticker.history(period=period, interval=fetch_interval, auto_adjust=True)
+    # ── Try DB-first for daily data ──────────────────────────────────────────
+    hist = None
+    from_db = False
+    if fetch_interval == "1d":
+        hist = _load_ohlcv_from_db(symbol, period, "1d")
+        if hist is not None:
+            from_db = True
 
-    if hist.empty:
-        raise ValueError(
-            f"No data returned for symbol={symbol!r} period={period} "
-            f"interval={fetch_interval}"
-        )
+    # ── Fallback to yfinance ─────────────────────────────────────────────────
+    if hist is None:
+        ticker = yf.Ticker(symbol)
+        hist   = ticker.history(period=period, interval=fetch_interval, auto_adjust=True)
+        if hist.empty:
+            raise ValueError(
+                f"No data returned for symbol={symbol!r} period={period} "
+                f"interval={fetch_interval}"
+            )
+        # Persist to DB for future reads
+        if fetch_interval == "1d":
+            _write_ohlcv_to_db(symbol, hist)
 
     # Normalise index timezone
     if hist.index.tz is not None:
@@ -375,13 +462,16 @@ def fetch_and_compute(
             )
 
     # ── Latest price / change ────────────────────────────────────────────────
-    try:
-        info          = ticker.fast_info
-        current_price = float(info.last_price or hist["close"].iloc[-1])
-        prev_close    = float(info.previous_close or hist["close"].iloc[-2])
-    except Exception:
-        current_price = float(hist["close"].iloc[-1])
-        prev_close    = float(hist["close"].iloc[-2]) if len(hist) > 1 else current_price
+    current_price = float(hist["close"].iloc[-1])
+    prev_close    = float(hist["close"].iloc[-2]) if len(hist) > 1 else current_price
+    if not from_db:
+        try:
+            ticker_obj    = yf.Ticker(symbol)
+            info          = ticker_obj.fast_info
+            current_price = float(info.last_price or current_price)
+            prev_close    = float(info.previous_close or prev_close)
+        except Exception:
+            pass
 
     change     = current_price - prev_close
     change_pct = (change / prev_close * 100) if prev_close else 0.0

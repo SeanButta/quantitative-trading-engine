@@ -294,15 +294,15 @@ def get_db():
 # latency never hits users after initial warm-up.
 # ---------------------------------------------------------------------------
 
-_TTL_MARKET_PRICE    = 300        #  5 min
-_TTL_MARKET_OVERVIEW = 300        #  5 min
-_TTL_TECHNICAL       = 900        # 15 min
-_TTL_NEWS_FEED       = 1800       # 30 min
+_TTL_MARKET_PRICE    = 300        #  5 min  (real-time — keep short)
+_TTL_MARKET_OVERVIEW = 300        #  5 min  (real-time — keep short)
+_TTL_TECHNICAL       = 43200      # 12 hours (overnight batch + 3x intraday refresh)
+_TTL_NEWS_FEED       = 1800       # 30 min  (news is time-sensitive)
 _TTL_FEEDS           = 1800       # 30 min
-_TTL_SENTIMENT       = 3600       #  1 hour
-_TTL_OPTIONS         = 3600       #  1 hour
-_TTL_SECTORS         = 7200       #  2 hours
-_TTL_MACRO           = 21600      #  6 hours
+_TTL_SENTIMENT       = 14400      #  4 hours (overnight batch, refreshed intraday)
+_TTL_OPTIONS         = 14400      #  4 hours (overnight batch)
+_TTL_SECTORS         = 43200      # 12 hours (overnight batch)
+_TTL_MACRO           = 86400      # 24 hours (overnight batch)
 _TTL_FINANCIALS      = 86400      # 24 hours
 _TTL_SEC             = 86400      # 24 hours
 
@@ -1281,6 +1281,12 @@ def options_greeks_summary(symbol: str, expiration: Optional[str] = None):
 def options_analytics(symbol: str, expiration: Optional[str] = None):
     """Advanced analytics for a symbol: IVR, HV20/30, GEX per strike, Max Pain, ΔOI.
     NOTE: Must be defined before /options/{symbol}/{expiration} to avoid route shadowing."""
+    # Cache-first: check for pre-computed analytics
+    _cache_key = f"options_analytics:{symbol.upper()}:{expiration or 'all'}"
+    _cached = _get_cache(_cache_key)
+    if _cached:
+        return _cached
+
     import yfinance as yf
     import polars as pl
     from options_feed import OptionsStore, compute_analytics
@@ -1307,19 +1313,31 @@ def options_analytics(symbol: str, expiration: Optional[str] = None):
 
     price_history: list[dict] = []
     try:
-        hist = yf.Ticker(symbol.upper()).history(period="1y")
-        if not hist.empty:
-            price_history = [{"close": float(row["Close"])} for _, row in hist.iterrows()]
+        from technical_analysis import _load_ohlcv_from_db
+        _ph = _load_ohlcv_from_db(symbol.upper(), "1y", "1d")
+        if _ph is not None:
+            price_history = [{"close": float(row["close"])} for _, row in _ph.iterrows()]
+        else:
+            hist = yf.Ticker(symbol.upper()).history(period="1y")
+            if not hist.empty:
+                price_history = [{"close": float(row["Close"])} for _, row in hist.iterrows()]
     except Exception:
         pass
 
     analytics = compute_analytics(symbol.upper(), df, df_prev, spot, price_history)
-    return _sanitize(analytics)
+    _result = _sanitize(analytics)
+    _set_cache(_cache_key, _result, _TTL_OPTIONS, "options_analytics")
+    return _result
 
 
 @app.get("/options/{symbol}/advanced")
 def options_advanced(symbol: str):
     """Term structure, 25Δ skew, rolling HV trend, liquidity stats, and earnings catalyst."""
+    # Cache-first
+    _adv_cache_key = f"options_advanced:{symbol.upper()}"
+    _adv_cached = _get_cache(_adv_cache_key)
+    if _adv_cached:
+        return _adv_cached
     import yfinance as yf
     import polars as pl
     from options_feed import OptionsStore, compute_term_structure, compute_hv_trend
@@ -1334,14 +1352,24 @@ def options_advanced(symbol: str):
     price_history: list[dict] = []
     earnings_date: str | None = None
     try:
-        ticker = yf.Ticker(symbol.upper())
-        hist   = ticker.history(period="1y")
-        if not hist.empty:
+        # DB-first for price history
+        from technical_analysis import _load_ohlcv_from_db
+        _ph_db = _load_ohlcv_from_db(symbol.upper(), "1y", "1d")
+        if _ph_db is not None:
             price_history = [
-                {"close": float(row["Close"]), "date": str(idx.date())}
-                for idx, row in hist.iterrows()
+                {"close": float(row["close"]), "date": str(idx.date()) if hasattr(idx, 'date') else str(idx)}
+                for idx, row in _ph_db.iterrows()
             ]
+        else:
+            ticker = yf.Ticker(symbol.upper())
+            hist   = ticker.history(period="1y")
+            if not hist.empty:
+                price_history = [
+                    {"close": float(row["Close"]), "date": str(idx.date())}
+                    for idx, row in hist.iterrows()
+                ]
         try:
+            ticker = yf.Ticker(symbol.upper()) if '_ph_db' not in dir() or _ph_db is None else yf.Ticker(symbol.upper())
             cal = ticker.calendar
             if cal is not None:
                 if hasattr(cal, "columns") and "Earnings Date" in cal.columns:
@@ -1377,7 +1405,7 @@ def options_advanced(symbol: str):
                 "liquid_1000":  int(exp_df.filter(pl.col("open_interest") >= 1000).shape[0]),
             }
 
-    return _sanitize({
+    _adv_result = _sanitize({
         "symbol":          symbol.upper(),
         "spot":            spot,
         "term_structure":  term_structure,
@@ -1385,6 +1413,8 @@ def options_advanced(symbol: str):
         "liquidity_stats": liq_stats,
         "earnings_date":   earnings_date,
     })
+    _set_cache(_adv_cache_key, _adv_result, _TTL_OPTIONS, "options_advanced")
+    return _adv_result
 
 
 @app.post("/options/{symbol}/signal")
@@ -5873,6 +5903,23 @@ def _warmer_loop() -> None:
             except Exception as e:
                 logger.warning("Warmer ✗ alpha_precompute: %s", e)
 
+        # ── Intraday refresh: 3x during US market hours ──
+        # Runs at ~9:45 AM, 12:00 PM, 3:30 PM ET (13:45, 16:00, 19:30 UTC)
+        import datetime as _dtmod
+        _utc_hour = _dtmod.datetime.utcnow().hour
+        _utc_min  = _dtmod.datetime.utcnow().minute
+        _intraday_windows = [(13, 45), (16, 0), (19, 30)]  # UTC hours for ET market windows
+        _intraday_key = f"intraday:{_utc_hour}:{_utc_min // 30}"
+        if any(abs(_utc_hour * 60 + _utc_min - (h * 60 + m)) < 15 for h, m in _intraday_windows):
+            if _get_cache(_intraday_key) is None:
+                _set_cache(_intraday_key, True, 1800, "warmer:intraday")  # debounce 30 min
+                try:
+                    from overnight_batch import run_intraday_refresh
+                    _ir = run_intraday_refresh(SessionLocal)
+                    logger.info("Warmer ✓ intraday_refresh (%.1fs)", _ir.get("total_elapsed", 0))
+                except Exception as e:
+                    logger.warning("Warmer ✗ intraday_refresh: %s", e)
+
         if now - last["extended_universe"] >= schedules["extended_universe"]:
             last["extended_universe"] = now
             try:
@@ -6085,6 +6132,35 @@ def admin_ingest_sec(
 def admin_ingest_status(user=Depends(get_optional_user)):
     """Return ingestion status: row counts and last-updated timestamps."""
     return _ingestion.get_ingestion_status()
+
+
+@app.post("/admin/overnight-batch")
+def admin_overnight_batch(background_tasks: BackgroundTasks, user=Depends(get_optional_user)):
+    """Trigger the full overnight batch pre-computation pipeline."""
+    from overnight_batch import run_overnight_batch
+    def _run():
+        run_overnight_batch(SessionLocal)
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "Overnight batch launched in background"}
+
+
+@app.post("/admin/intraday-refresh")
+def admin_intraday_refresh(background_tasks: BackgroundTasks, user=Depends(get_optional_user)):
+    """Trigger lightweight intraday refresh (prices + TA for core symbols)."""
+    from overnight_batch import run_intraday_refresh
+    def _run():
+        run_intraday_refresh(SessionLocal)
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "Intraday refresh launched in background"}
+
+
+@app.get("/admin/batch/status")
+def admin_batch_status(user=Depends(get_optional_user)):
+    """Return status of last overnight batch run."""
+    cached = _get_cache("batch:last_run")
+    if cached:
+        return cached
+    return {"status": "no batch run recorded"}
 
 
 if __name__ == "__main__":

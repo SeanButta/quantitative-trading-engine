@@ -77,14 +77,14 @@ def db_cache_set(session_factory, cache_key: str, value: dict, ttl_seconds: int,
 # TTL Constants (seconds)
 # ---------------------------------------------------------------------------
 
-TTL_TA = 4 * 3600          # 4 hours — TA doesn't change intraday much
-TTL_SENTIMENT = 2 * 3600   # 2 hours
-TTL_MARKET_OVERVIEW = 300  # 5 minutes
-TTL_FUNDAMENTALS = 24 * 3600  # 24 hours
-TTL_ADVISOR = 4 * 3600     # 4 hours
-TTL_DOMAIN_SCORES = 4 * 3600  # 4 hours
-TTL_ALPHA = 4 * 3600       # 4 hours
-TTL_MARKET_PRICE = 900     # 15 minutes
+TTL_TA = 43200             # 12 hours — overnight batch + 3x intraday refresh
+TTL_SENTIMENT = 14400      # 4 hours — overnight batch
+TTL_MARKET_OVERVIEW = 300  # 5 minutes — real-time
+TTL_FUNDAMENTALS = 86400   # 24 hours — overnight batch
+TTL_ADVISOR = 43200        # 12 hours
+TTL_DOMAIN_SCORES = 43200  # 12 hours — overnight batch
+TTL_ALPHA = 43200          # 12 hours — overnight batch
+TTL_MARKET_PRICE = 300     # 5 minutes — real-time
 
 
 # ---------------------------------------------------------------------------
