@@ -177,6 +177,39 @@ function Pill({label,active,onClick}) {
   const C = useC();
   return <button onClick={onClick} style={{...mono(10,active?C.grn:C.mut,600),border:`1px solid ${active?C.grn+"50":C.bdr}`,background:active?C.grnBg:"transparent",borderRadius:6,padding:"4px 11px",cursor:"pointer",transition:"all .15s"}}>{label.replace(/_/g," ")}</button>;
 }
+function ScrollTable({children}) {
+  const C = useC();
+  const ref = useRef(null);
+  const [canScroll, setCanScroll] = useState(false);
+  const [scrolledRight, setScrolledRight] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const check = () => {
+      setCanScroll(el.scrollWidth > el.clientWidth + 4);
+      setScrolledRight(el.scrollLeft + el.clientWidth >= el.scrollWidth - 4);
+    };
+    check();
+    el.addEventListener("scroll", check);
+    const ro = new ResizeObserver(check);
+    ro.observe(el);
+    return () => { el.removeEventListener("scroll", check); ro.disconnect(); };
+  }, [children]);
+  return (
+    <div style={{position:"relative"}}>
+      <div ref={ref} style={{overflowX:"auto"}}>
+        {children}
+      </div>
+      {canScroll && !scrolledRight && (
+        <div style={{position:"absolute",top:0,right:0,bottom:0,width:40,
+          background:`linear-gradient(90deg, transparent, ${C.surf})`,
+          pointerEvents:"none",display:"flex",alignItems:"center",justifyContent:"flex-end",paddingRight:6}}>
+          <span style={{...mono(10,C.mut),opacity:0.7,writingMode:"vertical-rl",textOrientation:"mixed",letterSpacing:1}}>scroll →</span>
+        </div>
+      )}
+    </div>
+  );
+}
 function KV({k,v,vc}) {
   const C = useC();
   return <div style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:`1px solid ${C.bdr}`}}><span style={mono(9,C.mut)}>{k}</span><span style={mono(11,vc||C.txt,700)}>{v}</span></div>;
@@ -12353,7 +12386,7 @@ function ScreenerView() {
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
             <Lbl>{results.total_matches} matches from {results.scanned} tickers</Lbl>
           </div>
-          <div style={{overflowX:"auto"}}>
+          <ScrollTable>
             <table style={{width:"100%",borderCollapse:"collapse",fontFamily:"monospace"}}>
               <thead><tr style={{background:C.dim}}>
                 <th style={{...mono(8,C.amb,700),padding:"5px 6px",borderBottom:`1px solid ${C.bdr}`,width:28,textAlign:"center"}} title="Add to Watchlist">★</th>
@@ -12419,7 +12452,7 @@ function ScreenerView() {
                 ))}
               </tbody>
             </table>
-          </div>
+          </ScrollTable>
         </Card>
       )}
     </div>
