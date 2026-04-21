@@ -232,7 +232,8 @@ class YFinanceProvider(DataProvider):
         ticker = yf.Ticker(symbol)
         try:
             return list(ticker.options)
-        except Exception:
+        except Exception as e:
+            logger.warning("fetch_options_expirations failed for %s: %s", symbol, e)
             return []
 
     def fetch_options_chain(
