@@ -32,7 +32,7 @@ try:
 except ImportError:
     _SLOWAPI_OK = False
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import sessionmaker, Session, joinedload
 
 # Add project root to path (flat structure)
 _ROOT = str(Path(__file__).parent)
@@ -1008,11 +1008,18 @@ def list_runs():
     """Return all runs (newest first), with project context attached."""
     db = SessionLocal()
     try:
-        runs = db.query(Run).order_by(Run.created_at.desc()).limit(100).all()
+        # joinedload avoids the N+1 fetch-per-run against the projects table
+        runs = (
+            db.query(Run)
+            .options(joinedload(Run.project))
+            .order_by(Run.created_at.desc())
+            .limit(100)
+            .all()
+        )
         result = []
         for r in runs:
             d = _run_to_dict(r)
-            project = db.query(Project).filter(Project.id == r.project_id).first()
+            project = r.project
             if project:
                 d["project_name"] = project.name
                 d["symbols"] = project.symbols
@@ -6219,6 +6226,8 @@ def on_startup() -> None:
             "CREATE INDEX IF NOT EXISTS ix_macro_series_sid_date ON macro_series (series_id, date DESC)",
             "CREATE INDEX IF NOT EXISTS ix_sec_filings_cik_filed ON sec_filings (cik, filed_date DESC)",
             "CREATE INDEX IF NOT EXISTS ix_fundamentals_symbol ON fundamentals (symbol, period_end DESC)",
+            # Hot path: /alpha/opportunities fetches latest DomainOutput per (symbol, domain)
+            "CREATE INDEX IF NOT EXISTS ix_domain_outputs_symbol_domain_ts ON domain_outputs (symbol, domain, timestamp DESC)",
         ]
         for _sql in _schema_migrations:
             try:

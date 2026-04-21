@@ -18,7 +18,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-FRED_API_KEY  = os.getenv("FRED_API_KEY", "99c952e575b12c86de034414871cf1ba")  # TODO: rotate key and remove default
+FRED_API_KEY  = os.getenv("FRED_API_KEY", "").strip()
 FRED_BASE     = "https://api.stlouisfed.org/fred"
 
 # ── Curated Series Catalog ─────────────────────────────────────────────────────
@@ -147,6 +147,12 @@ class FREDClient:
         self._cache[key] = (val, time.time())
 
     def _get(self, endpoint: str, params: dict) -> dict:
+        if not self.api_key:
+            raise RuntimeError(
+                "FRED_API_KEY is not set. Obtain a free key from "
+                "https://fred.stlouisfed.org/docs/api/api_key.html and set "
+                "the FRED_API_KEY environment variable."
+            )
         cache_key = f"{endpoint}|{tuple(sorted(params.items()))}"
         cached = self._cache_get(cache_key)
         if cached is not None:

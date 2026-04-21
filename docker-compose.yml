@@ -83,7 +83,7 @@ services:
         condition: service_healthy
     volumes:
       - ./runs:/app/runs       # persist sector/options/artifact cache across restarts
-    command: uvicorn main:app --host 0.0.0.0 --port 8001 --workers 2
+    command: sh -c "uvicorn main:app --host 0.0.0.0 --port 8001 --workers ${WORKERS:-2}"
 
   # ---------------------------------------------------------------------------
   # Celery Worker (optional — comment out if you don't need async job queue)

@@ -27,7 +27,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean, Column, Date, DateTime, Float, ForeignKey,
-    Integer, JSON, PrimaryKeyConstraint, String, Text,
+    Index, Integer, JSON, PrimaryKeyConstraint, String, Text,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -712,6 +712,10 @@ class DomainOutput(Base):
     drivers_json  = Column(JSON, nullable=True)
     risks_json    = Column(JSON, nullable=True)
     timestamp     = Column(DateTime, nullable=False, index=True)
+
+    __table_args__ = (
+        Index("ix_domain_outputs_symbol_domain_ts", "symbol", "domain", "timestamp"),
+    )
 
 
 class AlphaRanking(Base):

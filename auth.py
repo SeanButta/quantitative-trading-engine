@@ -24,11 +24,12 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 # ---------------------------------------------------------------------------
-# Demo Mode — set to False to re-enable auth
+# Demo Mode — set DEMO_MODE=true to disable auth (for local dev / demos only)
 # ---------------------------------------------------------------------------
 # When True: all protected endpoints accept any/no token and return a demo user.
-# Set DEMO_MODE=false in environment for production.
-DEMO_MODE: bool = os.getenv("DEMO_MODE", "true").lower() in ("true", "1", "yes")
+# Defaults to False so production deployments enforce authentication by
+# default.  Opt-in explicitly via DEMO_MODE=true for demos or local dev.
+DEMO_MODE: bool = os.getenv("DEMO_MODE", "false").lower() in ("true", "1", "yes")
 
 _DEMO_USER = {"sub": "demo@picador.app", "email": "demo@picador.app",
               "tier": "free", "display_name": "Demo", "user_id": 0}

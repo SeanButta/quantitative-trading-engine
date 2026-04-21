@@ -19,4 +19,6 @@ RUN mkdir -p runs/artifacts runs/data runs/options runs/sectors runs/sec_cache
 
 EXPOSE 8001
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001", "--workers", "2"]
+# Worker count is env-driven so deployments can tune without a new image.
+# Default is 2 — production can override with WORKERS=N (see railway.json).
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8001} --workers ${WORKERS:-2}"]
