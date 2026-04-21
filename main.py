@@ -413,6 +413,78 @@ def _set_cache(key: str, value: Any, ttl_seconds: int, source: str = "") -> None
         db.close()
 
 
+def _set_cache_bulk(items: list[tuple[str, Any, int, str]]) -> int:
+    """
+    Upsert many (key, value, ttl_seconds, source) rows in a single DB session
+    and single commit.  Intended for cache-warmer hot loops that would
+    otherwise open one session per key (e.g. per-ticker snapshot writes).
+
+    Returns the number of rows successfully written.  Individual row
+    serialisation failures are skipped silently; the whole batch is rolled
+    back on DB errors to preserve atomicity.
+    """
+    if not items:
+        return 0
+    db = SessionLocal()
+    written = 0
+    try:
+        now = datetime.utcnow()
+        keys = [k for (k, _v, _t, _s) in items]
+        existing = {
+            r.key: r
+            for r in db.query(CacheEntry).filter(CacheEntry.key.in_(keys)).all()
+        }
+        for key, value, ttl_seconds, source in items:
+            try:
+                serialized = json.dumps(value, default=str)
+            except Exception:
+                continue
+            expires_at = now + timedelta(seconds=ttl_seconds)
+            row = existing.get(key)
+            if row is not None:
+                row.value_json   = serialized
+                row.expires_at   = expires_at
+                row.refreshed_at = now
+                row.size_bytes   = len(serialized)
+                row.source       = source or row.source
+            else:
+                db.add(CacheEntry(
+                    key=key, value_json=serialized, expires_at=expires_at,
+                    created_at=now, refreshed_at=now,
+                    size_bytes=len(serialized), source=source,
+                ))
+            written += 1
+        db.commit()
+        return written
+    except Exception as _e:
+        logger.debug("Cache bulk set error: %s", _e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return 0
+    finally:
+        db.close()
+
+
+def _cache_exists(key: str) -> bool:
+    """Lightweight non-mutating check — returns True if *key* has a live row.
+    Unlike _get_cache, does not deserialise the value or update hit_count,
+    so it's safe to call frequently (e.g. the warmer soft-lock poll)."""
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(CacheEntry.key)
+            .filter(CacheEntry.key == key, CacheEntry.expires_at > datetime.utcnow())
+            .first()
+        )
+        return row is not None
+    except Exception:
+        return False
+    finally:
+        db.close()
+
+
 def _prune_cache() -> int:
     """Delete cache entries that expired more than 24 hours ago. Returns rows deleted."""
     db = SessionLocal()
@@ -3165,11 +3237,82 @@ def alpha_opportunities(bust: Optional[str] = None):
     # Layer 3: Compute from pre-cached domain scores (fast path)
     # Use full universe (S&P 500 + Russell 2000) — all scoring is from cached data
     full_universe = get_full_universe()
+    symbols = [t["symbol"] for t in full_universe]
+
+    # ── Batch-load every DB lookup the per-symbol loop needs ────────────────
+    # Previously: 5 SessionLocal() opens × N symbols = thousands of round-trips.
+    # Now: 4 indexed IN-queries on one session.
+    from models import CachedResult as _CR, DomainOutput as _DO
+    _now = datetime.utcnow()
+
+    _domain_keys    = [f"alpha:domain:{s}"    for s in symbols]
+    _ta_keys        = [f"ta:{s}:1y:1d"        for s in symbols]
+    _snapshot_keys  = [f"ticker:snapshot:{s}" for s in symbols]
+
+    _alpha_domain_cache: dict[str, dict] = {}
+    _ta_cached_results:  dict[str, dict] = {}   # from CachedResult (cached_results)
+    _ta_cache_entries:   dict[str, dict] = {}   # from CacheEntry  (cache_entries)
+    _snapshot_entries:   dict[str, dict] = {}
+    _options_domain:     dict[str, _DO]  = {}
+
+    _bdb = SessionLocal()
+    try:
+        # CachedResult (precompute layer) — covers alpha:domain:* and ta:*:1y:1d
+        for row in (
+            _bdb.query(_CR)
+            .filter(_CR.cache_key.in_(_domain_keys + _ta_keys),
+                    _CR.expires_at > _now)
+            .all()
+        ):
+            try:
+                val = json.loads(row.value_json)
+            except Exception:
+                continue
+            if row.cache_key.startswith("alpha:domain:"):
+                _alpha_domain_cache[row.cache_key[len("alpha:domain:"):]] = val
+            else:
+                # ta:{sym}:1y:1d → symbol is the middle segment
+                _parts = row.cache_key.split(":")
+                if len(_parts) >= 2:
+                    _ta_cached_results[_parts[1]] = val
+
+        # CacheEntry (inline cache layer) — ta:*:1y:1d + ticker:snapshot:*
+        for row in (
+            _bdb.query(CacheEntry)
+            .filter(CacheEntry.key.in_(_ta_keys + _snapshot_keys),
+                    CacheEntry.expires_at > _now)
+            .all()
+        ):
+            try:
+                val = json.loads(row.value_json)
+            except Exception:
+                continue
+            if row.key.startswith("ticker:snapshot:"):
+                _snapshot_entries[row.key[len("ticker:snapshot:"):]] = val
+            else:
+                _parts = row.key.split(":")
+                if len(_parts) >= 2:
+                    _ta_cache_entries[_parts[1]] = val
+
+        # DomainOutput options rows — latest per symbol, uses the new
+        # ix_domain_outputs_symbol_domain_ts index.  Sort descending and
+        # keep the first row we see per symbol.
+        for row in (
+            _bdb.query(_DO)
+            .filter(_DO.symbol.in_(symbols), _DO.domain == "options")
+            .order_by(_DO.symbol, _DO.timestamp.desc())
+            .all()
+        ):
+            if row.symbol not in _options_domain:
+                _options_domain[row.symbol] = row
+    finally:
+        _bdb.close()
+
     results = []
     for ticker in full_universe:
         sym = ticker["symbol"]
         # Try to read pre-computed domain score
-        domain_cached = db_cache_get(SessionLocal, f"alpha:domain:{sym}")
+        domain_cached = _alpha_domain_cache.get(sym)
         if domain_cached and domain_cached.get("alpha_score") is not None:
             domain_cached["display_name"] = ticker["display_name"]
             domain_cached["asset_type"] = ticker["asset_type"]
@@ -3179,7 +3322,7 @@ def alpha_opportunities(bust: Optional[str] = None):
 
         # Intermediate: construct domain signals from cached ticker snapshot + TA
         _intermediate_outputs = []
-        _ta_cached = db_cache_get(SessionLocal, f"ta:{sym}:1y:1d") or _get_cache(f"ta:{sym}:1y:1d")
+        _ta_cached = _ta_cached_results.get(sym) or _ta_cache_entries.get(sym)
         if _ta_cached and _ta_cached.get("god_mode"):
             _gm = _ta_cached["god_mode"]
             _net = _gm.get("net_score", 0)
@@ -3191,7 +3334,7 @@ def alpha_opportunities(bust: Optional[str] = None):
                 "drivers": _gm.get("primary_signals", [])[:2],
                 "risks": [],
             })
-        _ticker_snap = _get_cache(f"ticker:snapshot:{sym}")
+        _ticker_snap = _snapshot_entries.get(sym)
         if _ticker_snap:
             _vs = _ticker_snap.get("val_score")
             if _vs is not None:
@@ -3227,21 +3370,13 @@ def alpha_opportunities(bust: Optional[str] = None):
                         "drivers": _t_drivers,
                         "risks": [],
                     })
-        # Also check for options domain output
-        try:
-            from models import DomainOutput as DO
-            _odb = SessionLocal()
-            try:
-                _lo = _odb.query(DO).filter(DO.symbol == sym, DO.domain == "options").order_by(DO.timestamp.desc()).first()
-                if _lo and _lo.score is not None:
-                    _intermediate_outputs.append({
-                        "domain": "options", "score": _lo.score, "confidence": _lo.confidence or 50,
-                        "bias": _lo.bias or "Neutral", "drivers": _lo.drivers_json or [], "risks": _lo.risks_json or [],
-                    })
-            finally:
-                _odb.close()
-        except Exception:
-            pass
+        # Also check for options domain output (pre-loaded above)
+        _lo = _options_domain.get(sym)
+        if _lo is not None and _lo.score is not None:
+            _intermediate_outputs.append({
+                "domain": "options", "score": _lo.score, "confidence": _lo.confidence or 50,
+                "bias": _lo.bias or "Neutral", "drivers": _lo.drivers_json or [], "risks": _lo.risks_json or [],
+            })
 
         if _intermediate_outputs:
             ranking = rank_opportunity(sym, _intermediate_outputs)
@@ -3309,29 +3444,18 @@ def alpha_opportunities(bust: Optional[str] = None):
         except Exception:
             pass
 
-        # Options domain signal (read from most recent domain_output)
-        try:
-            from models import DomainOutput as DO
-            opt_db = SessionLocal()
-            try:
-                latest_opt = opt_db.query(DO).filter(
-                    DO.symbol == sym,
-                    DO.domain == "options",
-                ).order_by(DO.timestamp.desc()).first()
-                if latest_opt and latest_opt.score is not None:
-                    domain_outputs.append({
-                        "domain": "options",
-                        "score": latest_opt.score,
-                        "confidence": latest_opt.confidence or 50,
-                        "bias": latest_opt.bias or "Neutral",
-                        "setup": latest_opt.setup or "",
-                        "drivers": latest_opt.drivers_json or [],
-                        "risks": latest_opt.risks_json or [],
-                    })
-            finally:
-                opt_db.close()
-        except Exception:
-            pass
+        # Options domain signal from the pre-loaded batch (live fallback still uses it)
+        _lo_fallback = _options_domain.get(sym)
+        if _lo_fallback is not None and _lo_fallback.score is not None:
+            domain_outputs.append({
+                "domain": "options",
+                "score": _lo_fallback.score,
+                "confidence": _lo_fallback.confidence or 50,
+                "bias": _lo_fallback.bias or "Neutral",
+                "setup": _lo_fallback.setup or "",
+                "drivers": _lo_fallback.drivers_json or [],
+                "risks": _lo_fallback.risks_json or [],
+            })
 
         if domain_outputs:
             ranking = rank_opportunity(sym, domain_outputs)
@@ -3755,12 +3879,26 @@ class DrawdownRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 @app.post("/ml/signal")
-def ml_signal(req: MLSignalRequest, project_id: Optional[str] = None):
+@limiter.limit("10/minute")
+def ml_signal(request: Request, req: MLSignalRequest, project_id: Optional[str] = None):
     """
     Run walk-forward GradientBoosting ML signal for a symbol.
     Requires feature data — optionally pass project_id to load from Parquet.
     Falls back to fetching fresh features if no project given.
+
+    Cached 30 min per (symbol, forward_days, train_window, retrain_every,
+    project_id) tuple so repeat requests don't re-fetch 3y of yfinance and
+    re-train the model.
     """
+    _sym = req.symbol.upper()
+    _cache_key = (
+        f"ml_signal:{_sym}:{req.forward_days}:{req.train_window}:"
+        f"{req.retrain_every}:{project_id or '-'}"
+    )
+    _cached = _get_cache(_cache_key)
+    if _cached is not None:
+        return _cached
+
     try:
         import polars as pl
         from ml_signal_engine import MLSignalEngine
@@ -3817,7 +3955,7 @@ def ml_signal(req: MLSignalRequest, project_id: Optional[str] = None):
         )
         result = engine.run(features, req.symbol.upper())
 
-        return _sanitize({
+        _resp = _sanitize({
             "symbol":             result.symbol,
             "timestamp":          str(result.timestamp),
             "p_up":               result.p_up,
@@ -3830,6 +3968,8 @@ def ml_signal(req: MLSignalRequest, project_id: Optional[str] = None):
             "feature_importance": result.feature_importance,
             "blurb":              result.blurb,
         })
+        _set_cache(_cache_key, _resp, 1800, "ml_signal")  # 30-min TTL
+        return _resp
     except HTTPException:
         raise
     except Exception as e:
@@ -5890,6 +6030,75 @@ def _run_warm_cycle() -> None:
             logger.warning("Warmer ✗ ta:%s: %s", sym, e)
 
 
+# ---------------------------------------------------------------------------
+# Warmer leader election
+# ---------------------------------------------------------------------------
+# With multiple uvicorn workers each spawning a warmer daemon, we previously
+# relied on the per-cycle soft-lock to deduplicate DB writes.  That still
+# burned CPU in every follower doing redundant computation.  The leader lease
+# below promotes exactly one worker to run the actual cycle; followers just
+# poll the lease cheaply and wait to take over if the leader dies.
+
+_WARMER_LEADER_KEY = "warmer:leader:v2"
+_WARMER_LEADER_LEASE_SECONDS = 90  # renewed on every loop iteration
+
+
+def _try_become_warmer_leader() -> bool:
+    """Atomically attempt to hold the warmer leader lease.
+    Returns True if this PID now owns the lease (either fresh claim or lease
+    renewal).  Returns False if another live PID owns the lease.
+
+    Race safety: the CacheEntry primary key on `key` means simultaneous
+    INSERTs from two workers can't both succeed — one commits, the other
+    rolls back and returns False.  For the takeover-after-expiry path we
+    still rely on last-writer-wins, but the per-cycle soft-lock downstream
+    keeps duplicate DB work harmless on the rare overlap.
+    """
+    my_pid_str = str(os.getpid())
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        row = db.query(CacheEntry).filter(CacheEntry.key == _WARMER_LEADER_KEY).first()
+        if row is None:
+            # Uncontested: claim it
+            try:
+                db.add(CacheEntry(
+                    key=_WARMER_LEADER_KEY,
+                    value_json=json.dumps(my_pid_str),
+                    expires_at=now + timedelta(seconds=_WARMER_LEADER_LEASE_SECONDS),
+                    created_at=now, refreshed_at=now,
+                    size_bytes=len(my_pid_str) + 2,
+                    source="warmer:leader",
+                ))
+                db.commit()
+                return True
+            except Exception:
+                db.rollback()
+                return False
+        # Row exists
+        try:
+            owner = json.loads(row.value_json)
+        except Exception:
+            owner = None
+        if row.expires_at > now and str(owner) != my_pid_str:
+            return False   # another worker holds a live lease
+        # Either we're the current owner (renew) or the lease expired (take over)
+        row.value_json   = json.dumps(my_pid_str)
+        row.expires_at   = now + timedelta(seconds=_WARMER_LEADER_LEASE_SECONDS)
+        row.refreshed_at = now
+        row.source       = "warmer:leader"
+        db.commit()
+        return True
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        db.close()
+
+
 def _warmer_loop() -> None:
     """
     Daemon thread main loop.  Runs a warm cycle on startup (after a short
@@ -5934,18 +6143,31 @@ def _warmer_loop() -> None:
     except Exception as _r2e:
         logger.warning("Warmer ✗ Russell 2000 fetch: %s", _r2e)
 
+    _logged_follower = False
+
     while True:
         now = time.time()
 
         # ------------------------------------------------------------------
-        # Distributed soft-lock: ensures only one worker process runs the
-        # warmer at a time.  The lock TTL (25 s) expires before the next
-        # 30 s sleep, so no worker is permanently excluded.  In the rare
-        # race where two workers both see no lock, they run the same cycle
-        # simultaneously — harmless, they write identical data to the DB.
+        # Leader election: only one worker runs the actual warming cycle.
+        # Followers poll cheaply (60 s) waiting to take over if the leader
+        # dies.  The inner soft-lock is kept as belt-and-suspenders against
+        # the rare race where two workers transiently both hold the lease.
         # ------------------------------------------------------------------
+        if not _try_become_warmer_leader():
+            if not _logged_follower:
+                logger.info("Cache warmer: this worker is a follower (another worker holds the leader lease)")
+                _logged_follower = True
+            time.sleep(60)
+            continue
+        if _logged_follower:
+            logger.info("Cache warmer: this worker just became leader")
+            _logged_follower = False
+
         _warmer_lock_key = "warmer:cycle:lock"
-        if _get_cache(_warmer_lock_key) is not None:
+        # _cache_exists avoids the hit_count commit that _get_cache does — this
+        # check runs every 30 s on every worker, so it must be cheap.
+        if _cache_exists(_warmer_lock_key):
             time.sleep(30)
             continue
         _set_cache(_warmer_lock_key, os.getpid(), 25, "warmer:lock")
@@ -5963,6 +6185,8 @@ def _warmer_loop() -> None:
             last["ta"] = now
             from alpha_engine import DEFAULT_UNIVERSE as _ALPHA_UNI
             _ta_symbols = list(dict.fromkeys([t["symbol"] for t in _ALPHA_UNI] + ["SPY", "QQQ"]))
+            _ta_batch: list[tuple[str, Any, int, str]] = []
+            _ta_db_batch: list[tuple[str, dict]] = []
             for sym in _ta_symbols:
                 try:
                     from technical_analysis import fetch_and_compute
@@ -5976,15 +6200,18 @@ def _warmer_loop() -> None:
                     except Exception:
                         res["signals"] = []; res["god_mode"] = None
                     _sanitized_ta = _sanitize(res)
-                    _set_cache(f"ta:{sym}:1y:1d", _sanitized_ta, _TTL_TECHNICAL, "warmer:ta")
-                    # Also persist to DB cache so Alpha intermediate layer can read it
-                    try:
-                        db_cache_set(SessionLocal, f"ta:{sym}:1y:1d", _sanitized_ta, 14400, source="warmer:ta")
-                    except Exception:
-                        pass
+                    _ta_batch.append((f"ta:{sym}:1y:1d", _sanitized_ta, _TTL_TECHNICAL, "warmer:ta"))
+                    _ta_db_batch.append((f"ta:{sym}:1y:1d", _sanitized_ta))
                     logger.info("Warmer ✓ ta:%s", sym)
                 except Exception as e:
                     logger.warning("Warmer ✗ ta:%s: %s", sym, e)
+            # One commit for the whole TA batch instead of one per symbol
+            _set_cache_bulk(_ta_batch)
+            for _key, _val in _ta_db_batch:
+                try:
+                    db_cache_set(SessionLocal, _key, _val, 14400, source="warmer:ta")
+                except Exception:
+                    pass
 
         if now - last["feeds"] >= schedules["feeds"]:
             last["feeds"] = now
@@ -6019,30 +6246,43 @@ def _warmer_loop() -> None:
                 import dataclasses as _dc
                 _provider = SectorProvider()
                 _store    = SectorStore(SECTORS_DIR.parent)
+                _sectors_batch: list[tuple[str, Any, int, str]] = []
                 for _sector in list(SECTOR_UNIVERSE.keys()):
                     try:
                         _snap = _provider.fetch_sector(_sector)
                         _store.save(_sector, _snap)
-                        _set_cache(
+                        _sectors_batch.append((
                             f"sector:snapshot:{_sector}",
                             _sanitize(_dc.asdict(_snap)),
                             _TTL_SECTORS,
                             "warmer:sectors",
-                        )
+                        ))
                         # Dual-write: per-ticker snapshot so any endpoint can look up by symbol
                         for _tk in _snap.tickers:
                             try:
-                                _set_cache(f"ticker:snapshot:{_tk.symbol}", _sanitize(_dc.asdict(_tk)), _TTL_SECTORS, "warmer:ticker")
+                                _sectors_batch.append((
+                                    f"ticker:snapshot:{_tk.symbol}",
+                                    _sanitize(_dc.asdict(_tk)),
+                                    _TTL_SECTORS,
+                                    "warmer:ticker",
+                                ))
                             except Exception:
                                 pass
                         logger.info("Warmer ✓ sector:%s (%d tickers)", _sector, len(_snap.tickers))
                     except Exception as _se:
                         logger.warning("Warmer ✗ sector:%s: %s", _sector, _se)
                 try:
-                    _set_cache("sectors:overview", _sanitize(_store.all_summaries()), _TTL_SECTORS, "warmer:sectors")
-                    logger.info("Warmer ✓ sectors:overview")
+                    _sectors_batch.append((
+                        "sectors:overview",
+                        _sanitize(_store.all_summaries()),
+                        _TTL_SECTORS,
+                        "warmer:sectors",
+                    ))
                 except Exception as _ove:
-                    logger.warning("Warmer ✗ sectors:overview: %s", _ove)
+                    logger.warning("Warmer ✗ sectors:overview prep: %s", _ove)
+                # Single-commit write of every sector + ticker snapshot this cycle
+                _n_written = _set_cache_bulk(_sectors_batch)
+                logger.info("Warmer ✓ sectors: wrote %d rows in one batch", _n_written)
             except Exception as e:
                 logger.warning("Warmer ✗ sectors: %s", e)
 
@@ -6059,20 +6299,22 @@ def _warmer_loop() -> None:
                     from options_feed import OptionsProvider, OptionsStore as _OS
                     _oprov  = OptionsProvider()
                     _ostore = _OS(OPTIONS_DIR)
+                    _options_batch: list[tuple[str, Any, int, str]] = []
                     for _sym in _WARMER_OPTIONS_SYMBOLS:
                         try:
                             _df = _oprov.fetch_chain(_sym)
                             if not _df.is_empty():
                                 _ostore.save(_sym, _df)
-                                _set_cache(
+                                _options_batch.append((
                                     f"options:chain:{_sym.upper()}",
                                     _df.to_dicts(),
                                     _TTL_OPTIONS,
                                     "warmer:options",
-                                )
+                                ))
                                 logger.info("Warmer ✓ options:%s (%d rows)", _sym, len(_df))
                         except Exception as _oe:
                             logger.warning("Warmer ✗ options:%s: %s", _sym, _oe)
+                    _set_cache_bulk(_options_batch)
                 except Exception as e:
                     logger.warning("Warmer ✗ options: %s", e)
 
@@ -6145,6 +6387,7 @@ def _warmer_loop() -> None:
 
                     for _batch_start in range(0, len(_r2k_new), _batch_size):
                         _batch = _r2k_new[_batch_start:_batch_start + _batch_size]
+                        _ext_rows: list[tuple[str, Any, int, str]] = []
                         with _TP(max_workers=15) as _ex:
                             _futs = {_ex.submit(_ext_provider.fetch_ticker, _sym.replace(".", "-"), "Small Cap"): _sym for _sym in _batch}
                             for _fut in _ac(_futs):
@@ -6152,12 +6395,19 @@ def _warmer_loop() -> None:
                                 try:
                                     _snap = _fut.result()
                                     if _snap and not _snap.error:
-                                        _set_cache(f"ticker:snapshot:{_snap.symbol}", _sanitize(_dc2.asdict(_snap)), _TTL_SECTORS, "warmer:extended")
+                                        _ext_rows.append((
+                                            f"ticker:snapshot:{_snap.symbol}",
+                                            _sanitize(_dc2.asdict(_snap)),
+                                            _TTL_SECTORS,
+                                            "warmer:extended",
+                                        ))
                                         _ext_done += 1
                                     elif _snap and _snap.error:
                                         _ext_errors += 1
                                 except Exception:
                                     _ext_errors += 1
+                        # One commit per 200-ticker batch instead of 200 individual commits
+                        _set_cache_bulk(_ext_rows)
                         logger.info("Extended universe batch %d–%d done (%d ok, %d err)", _batch_start, _batch_start + len(_batch), _ext_done, _ext_errors)
                         # Brief pause between batches to avoid rate limiting
                         import time as _t2
@@ -7349,7 +7599,8 @@ def daily_brief(user=Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 
 @app.post("/daily-brief/narrative")
-def daily_brief_narrative(tier: str = "free", user=Depends(get_current_user)):
+@limiter.limit("5/minute")
+def daily_brief_narrative(request: Request, tier: str = "free", user=Depends(get_current_user)):
     """Generate AI-synthesized morning note. Tier: free (Haiku ~$0.001), pro (Sonnet ~$0.014)."""
     cache_key = f"daily_brief_narrative:{datetime.utcnow().strftime('%Y-%m-%d')}:{tier}"
     cached = _get_cache(cache_key)
@@ -7367,7 +7618,8 @@ def daily_brief_narrative(tier: str = "free", user=Depends(get_current_user)):
 
 
 @app.post("/ai/ticker-thesis/{symbol}")
-def ai_ticker_thesis(symbol: str, user=Depends(get_current_user)):
+@limiter.limit("10/minute")
+def ai_ticker_thesis(request: Request, symbol: str, user=Depends(get_current_user)):
     """Generate AI investment thesis for a ticker. Costs ~$0.01/call."""
     sym = symbol.upper()
     cache_key = f"ai_thesis:{sym}"
