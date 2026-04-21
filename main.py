@@ -5684,13 +5684,89 @@ async def ws_signals(websocket: WebSocket, symbol: str, interval_seconds: int = 
 # a warm cache — cold-miss latency is never exposed after the first cycle.
 #
 # Schedule (all times are approximate; jitter avoids thundering-herd):
-#   market:overview          every  4.5 min  (TTL = 5 min)
-#   feeds:all                every 28   min  (TTL = 30 min)
-#   sentiment:market:overview every 55   min  (TTL = 60 min)
-#   ta:SPY|QQQ               every 14   min  (TTL = 15 min)
+#   market:overview          every  4.5 min  (TTL =  5 min)
+#   feeds                    every 45   min  (TTL = 30 min)
+#   sentiment:market:overview every 55  min  (TTL =  4 hours)
+#   ta:<universe>            every 60   min  (TTL = 12 hours)
+#   sectors                  every 60   min  (TTL = 12 hours)
 # ---------------------------------------------------------------------------
 
 _warmer_thread: Optional[threading.Thread] = None
+
+
+def _warm_feeds_only() -> None:
+    """
+    Warm only the RSS feed caches.  Used by the scheduled warmer's `feeds`
+    tick — the other data types (market overview, sentiment, ta) have their
+    own independent schedules and don't need to be re-run here.
+    """
+    for cat in ["all", "Markets", "Technology", "Economy", "Earnings", "Commodities"]:
+        try:
+            import re as _re
+            from datetime import timezone as _tz
+            from sentiment_engine import SentimentEngine, EXTENDED_FEEDS
+            engine  = SentimentEngine()
+            now_utc = datetime.utcnow().replace(tzinfo=_tz.utc)
+            cutoff  = now_utc - timedelta(hours=48)
+
+            cats_to_fetch = (
+                list(EXTENDED_FEEDS.keys()) if cat == "all"
+                else [c for c in EXTENDED_FEEDS if c.lower() == cat.lower()]
+            )
+            work = [(c, u) for c in cats_to_fetch for u in EXTENDED_FEEDS.get(c, [])]
+
+            def _fetch_one(cat_url):
+                c, u = cat_url
+                return c, engine._fetch_feed(u)
+
+            fetched = []
+            with ThreadPoolExecutor(max_workers=min(8, len(work) or 1)) as pool:
+                futs = {pool.submit(_fetch_one, cw): cw for cw in work}
+                for fut in as_completed(futs):
+                    try:
+                        fetched.append(fut.result())
+                    except Exception:
+                        pass
+
+            all_articles = []
+            for c, items in fetched:
+                for item in items:
+                    try:
+                        pub = item.published if item.published.tzinfo else item.published.replace(tzinfo=_tz.utc)
+                        if pub < cutoff:
+                            continue
+                        age_s    = max(0, (now_utc - pub).total_seconds())
+                        rel_time = (f"{int(age_s/60)}m ago" if age_s < 3600
+                                    else f"{int(age_s/3600)}h ago" if age_s < 86400
+                                    else f"{int(age_s/86400)}d ago")
+                    except Exception:
+                        rel_time = "recently"
+                    all_articles.append({
+                        "title":   item.title, "summary":  item.summary[:280],
+                        "url":     item.url,   "source":   item.source,
+                        "published": str(item.published), "rel_time": rel_time,
+                        "score":   round(item.normalized_score, 3),
+                        "symbol_mentioned": item.symbol_mentioned,
+                        "tags":    _tag_article(item.title, item.summary), "category": c,
+                    })
+
+            seen: set = set()
+            unique = []
+            for a in all_articles:
+                k = _re.sub(r"[^a-z ]", "", a["title"].lower())[:60]
+                if k not in seen:
+                    seen.add(k)
+                    unique.append(a)
+            unique.sort(key=lambda a: a["published"], reverse=True)
+            page = unique[:80]
+            sc: dict = {}
+            for a in page:
+                sc[a["source"]] = sc.get(a["source"], 0) + 1
+            out = _sanitize({"articles": page, "count": len(page), "category": cat, "source_counts": sc})
+            _set_cache(f"feeds:{cat.lower()}:48", out, _TTL_FEEDS, "warmer:feeds")
+            logger.info("Warmer ✓ feeds:%s (%d articles)", cat, len(page))
+        except Exception as e:
+            logger.warning("Warmer ✗ feeds:%s: %s", cat, e)
 
 
 def _run_warm_cycle() -> None:
@@ -5815,15 +5891,18 @@ def _warmer_loop() -> None:
     import time
 
     # Schedules: {name: (interval_seconds, last_run_timestamp)}
+    # Intervals should be ≤ the corresponding TTL so the cache never expires
+    # between refreshes.  Keep them comfortably below TTL but not so frequent
+    # that we re-fetch upstream data (yfinance, RSS) many times per TTL window.
     schedules = {
-        "market_overview":     270,    # every 4.5 min  (TTL 5 min)
-        "feeds":               1680,   # every 28 min   (TTL 30 min)
-        "sentiment":           3300,   # every 55 min   (TTL 60 min)
-        "ta":                  840,    # every 14 min   (TTL 15 min)
-        "sectors":             1200,   # every 20 min   (TTL 2 hours)
-        "alpha_precompute":    2400,   # every 40 min   (domain scores for Alpha universe)
-        "extended_universe":   14400,  # every 4 hours   (R2000 + non-S&P tickers)
-        "options":             5400,   # every 90 min   (market hours only, TTL 1 hour)
+        "market_overview":     270,    # every  4.5 min (TTL  5 min — real-time)
+        "feeds":               2700,   # every 45   min (TTL 30 min — near-boundary refresh)
+        "sentiment":           3300,   # every 55   min (TTL  4 hours)
+        "ta":                  3600,   # every 60   min (TTL 12 hours — rate-limit sensitive)
+        "sectors":             3600,   # every 60   min (TTL 12 hours)
+        "alpha_precompute":    2400,   # every 40   min (domain scores for Alpha universe)
+        "extended_universe":   14400,  # every  4   hours (R2000 + non-S&P tickers)
+        "options":             5400,   # every 90   min (market hours only, TTL 4 hours)
     }
     last: dict[str, float] = {k: 0.0 for k in schedules}
 
@@ -5902,27 +5981,14 @@ def _warmer_loop() -> None:
 
         if now - last["feeds"] >= schedules["feeds"]:
             last["feeds"] = now
-            # Re-use the existing get_feeds logic by clearing its cache key first
-            # and calling it normally (it will recompute and re-cache)
-            for cat in ["all", "Markets", "Technology", "Economy"]:
-                try:
-                    _run_warm_cycle.__func__ if hasattr(_run_warm_cycle, "__func__") else None
-                    # Directly invalidate stale key so next request recomputes
-                    db = SessionLocal()
-                    try:
-                        db.query(CacheEntry).filter(
-                            CacheEntry.key == f"feeds:{cat.lower()}:48"
-                        ).delete(synchronize_session=False)
-                        db.commit()
-                    finally:
-                        db.close()
-                except Exception:
-                    pass
-            # Run the full warm cycle in the feeds thread
+            # Feeds-only refresh — market overview, sentiment, and ta have
+            # their own dedicated schedules, so there's no need to re-do
+            # that work here.  _warm_feeds_only() overwrites the feeds:*
+            # cache keys in place, no explicit invalidation needed.
             try:
-                _run_warm_cycle()
+                _warm_feeds_only()
             except Exception as e:
-                logger.warning("Warmer ✗ warm_cycle: %s", e)
+                logger.warning("Warmer ✗ feeds: %s", e)
 
         if now - last["sentiment"] >= schedules["sentiment"]:
             last["sentiment"] = now

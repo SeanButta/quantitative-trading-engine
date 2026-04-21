@@ -70,17 +70,13 @@ EXTENDED_FEEDS: dict[str, list[str]] = {
         "https://finance.yahoo.com/rss/topfinstories",
         "https://feeds.marketwatch.com/marketwatch/topstories/",
         "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
-        "https://feeds.reuters.com/reuters/businessNews",
-        "https://feeds.reuters.com/reuters/companyNews",
     ],
     "Technology": [
-        "https://feeds.reuters.com/reuters/technologyNews",
         "https://www.cnbc.com/id/19854910/device/rss/rss.html",    # CNBC Tech
         "https://feeds.a.dj.com/rss/RSSWSJD.xml",                  # WSJ Tech
     ],
     "Economy": [
         "https://www.cnbc.com/id/20910258/device/rss/rss.html",    # CNBC Economy
-        "https://feeds.reuters.com/reuters/economyNews",
         "https://feeds.a.dj.com/rss/RSSOpinion.xml",               # WSJ Opinion/Commentary
     ],
     "Earnings": [
@@ -88,7 +84,6 @@ EXTENDED_FEEDS: dict[str, list[str]] = {
         "https://www.cnbc.com/id/15839069/device/rss/rss.html",    # CNBC Earnings
     ],
     "Commodities": [
-        "https://feeds.reuters.com/reuters/commoditiesNews",
         "https://www.cnbc.com/id/10000664/device/rss/rss.html",    # CNBC Commodities
     ],
 }
