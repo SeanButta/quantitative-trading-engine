@@ -42,8 +42,40 @@ if _ROOT not in sys.path:
 from models import Base, Project, Strategy, Run, OptionsRefreshJob, SignalReadingJob, PortfolioAnalysisJob, DailySummary, SectorRefreshJob, CacheEntry
 from auth import router as _auth_router, get_current_user, get_optional_user
 
-logging.basicConfig(level=logging.INFO)
+# Structured JSON logging — one line per log record, compatible with
+# Datadog / Logtail / Railway Logs.  Toggle off for local dev by setting
+# LOG_FORMAT=plain to get the pre-existing human-readable output.
+if os.getenv("LOG_FORMAT", "json").lower() == "json":
+    from middleware import configure_structured_logging
+    configure_structured_logging(level=logging.INFO)
+else:
+    logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Sentry error tracking — only initialised when SENTRY_DSN is set.  Keeps
+# local dev and unconfigured deploys free of the import cost.
+_SENTRY_DSN = os.getenv("SENTRY_DSN", "").strip()
+if _SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+        sentry_sdk.init(
+            dsn=_SENTRY_DSN,
+            integrations=[StarletteIntegration(), FastApiIntegration()],
+            # Sampling: trace 10 % of requests, send 100 % of errors.  Tune
+            # via SENTRY_TRACES_SAMPLE_RATE if you need more/less.
+            traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1")),
+            environment=os.getenv("SENTRY_ENVIRONMENT", "production"),
+            release=os.getenv("GIT_COMMIT_SHA") or None,
+            # Don't send cookies/query strings — some carry JWTs or FRED keys
+            send_default_pii=False,
+        )
+        logger.info("Sentry initialised (env=%s)", os.getenv("SENTRY_ENVIRONMENT", "production"))
+    except ImportError:
+        logger.warning("SENTRY_DSN set but sentry-sdk not installed; skipping Sentry init")
+    except Exception as _se:
+        logger.warning("Sentry init failed: %s", _se)
 
 # ---------------------------------------------------------------------------
 # App Setup
@@ -77,6 +109,36 @@ async def security_headers(request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     return response
+
+
+# Request body size limit — cheap DoS guard.  Defaults to 5 MB; tune via
+# MAX_REQUEST_BODY_MB env var.  Enforced from the Content-Length header so
+# we reject oversize payloads before buffering them into memory.
+_MAX_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_MB", "5")) * 1024 * 1024
+
+
+@app.middleware("http")
+async def limit_body_size(request, call_next):
+    _cl = request.headers.get("content-length")
+    if _cl:
+        try:
+            if int(_cl) > _MAX_BODY_BYTES:
+                from fastapi.responses import JSONResponse as _JR
+                return _JR(
+                    status_code=413,
+                    content={"detail": f"Request body exceeds {_MAX_BODY_BYTES // (1024*1024)} MB limit"},
+                )
+        except ValueError:
+            pass
+    return await call_next(request)
+
+
+# Observability middleware: attach request IDs, emit structured access logs
+# for every request, and install a safe 500 handler that logs the full
+# traceback server-side but returns a redacted response to the client.
+# See middleware.py for implementation details.
+from middleware import attach_middleware as _attach_obs_middleware
+_attach_obs_middleware(app)
 
 # ---------------------------------------------------------------------------
 # Rate limiting (slowapi) — protects expensive endpoints from abuse
@@ -664,7 +726,7 @@ def health():
 
 
 @app.get("/cache/status")
-def cache_status():
+def cache_status(_user: dict = Depends(get_current_user)):
     """
     Admin endpoint — returns all live cache entries with TTL remaining,
     hit counts, sizes, and source labels.  Useful for confirming the warmer
@@ -681,10 +743,12 @@ def cache_status():
         live = [r for r in rows if r.expires_at > now]
         stale = [r for r in rows if r.expires_at <= now]
         total_bytes = sum(r.size_bytes or 0 for r in live)
+        total_hits = sum(r.hit_count or 0 for r in live)
         return {
             "live_entries":   len(live),
             "stale_entries":  len(stale),
             "total_size_kb":  round(total_bytes / 1024, 1),
+            "total_hits":     total_hits,
             "entries": [
                 {
                     "key":              r.key,
@@ -703,7 +767,8 @@ def cache_status():
 
 
 @app.post("/cache/clear")
-def cache_clear(prefix: str = ""):
+@limiter.limit("5/minute")
+def cache_clear(request: Request, prefix: str = "", _user: dict = Depends(get_current_user)):
     """Admin: delete cache entries whose key starts with *prefix* (empty = clear all)."""
     db = SessionLocal()
     try:
@@ -718,10 +783,44 @@ def cache_clear(prefix: str = ""):
 
 
 @app.post("/cache/warm")
-def cache_warm(background_tasks: BackgroundTasks):
+@limiter.limit("2/minute")
+def cache_warm(request: Request, background_tasks: BackgroundTasks, _user: dict = Depends(get_current_user)):
     """Admin: trigger an immediate full cache warm cycle in the background."""
     background_tasks.add_task(_run_warm_cycle)
     return {"status": "warming", "message": "Full warm cycle queued"}
+
+
+@app.get("/admin/warmer/status")
+def warmer_status(_user: dict = Depends(get_current_user)):
+    """
+    Admin: inspect the cache warmer's published schedule state.
+    Shows which worker is leader, when each scheduled task last ran,
+    when it is next due, and how long ago the leader heartbeat was.
+    Useful for confirming the warmer is actually running in production.
+    """
+    state = _get_cache("warmer:status:v1")
+    if not state:
+        return {
+            "status": "unknown",
+            "detail": "Warmer has not published state yet — either it has not completed "
+                      "a cycle, or no worker currently holds the leader lease.",
+        }
+    now_epoch = _time.time()
+    # Translate raw epoch timestamps into human-readable durations
+    next_run_in = {}
+    for k, next_epoch in (state.get("next_run_epoch") or {}).items():
+        if next_epoch is None:
+            next_run_in[k] = None
+        else:
+            delta = int(next_epoch - now_epoch)
+            next_run_in[k] = f"{delta}s" if delta >= 0 else f"overdue ({-delta}s)"
+    return {
+        "status":          "ok",
+        "leader_pid":      state.get("leader_pid"),
+        "updated_at":      state.get("updated_at"),
+        "schedules_secs":  state.get("schedules"),
+        "next_run_in":     next_run_in,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2225,7 +2324,8 @@ def _run_signal_reading(job_id: str, project_id: str, symbol: str, feat_path: Pa
 # ---------------------------------------------------------------------------
 
 @app.post("/signals/quick")
-def create_quick_signal_reading(req: SignalReadingRequest, background_tasks: BackgroundTasks):
+@limiter.limit("10/minute")
+def create_quick_signal_reading(request: Request, req: SignalReadingRequest, background_tasks: BackgroundTasks):
     """
     Start a quick signal-reading job for any symbol without needing a pre-built project.
     Downloads 3y of price data via yfinance, computes features on-the-fly, then runs
@@ -2596,7 +2696,8 @@ def _strategy_to_dict(s: Strategy) -> dict:
 # ---------------------------------------------------------------------------
 
 @app.get("/market/price/{symbol}")
-def market_price_history(symbol: str, period: str = "3mo"):
+@limiter.limit("30/minute")
+def market_price_history(request: Request, symbol: str, period: str = "3mo"):
     """
     Daily OHLCV for any yfinance-compatible symbol.
     Cached: 5 min for intraday periods, 1 hour for historical periods.
@@ -3982,7 +4083,8 @@ def ml_signal(request: Request, req: MLSignalRequest, project_id: Optional[str] 
 # ---------------------------------------------------------------------------
 
 @app.get("/sentiment/{symbol}")
-def get_sentiment(symbol: str, window_hours: int = 24):
+@limiter.limit("20/minute")
+def get_sentiment(request: Request, symbol: str, window_hours: int = 24):
     """
     Compute rolling news sentiment for a symbol. Cached 1 hour.
     """
@@ -4108,7 +4210,8 @@ def _tag_article(title: str, summary: str) -> list:
 
 
 @app.get("/news/feed")
-def get_news_feed(symbol: str = "market", limit: int = 50, window_hours: int = 48):
+@limiter.limit("30/minute")
+def get_news_feed(request: Request, symbol: str = "market", limit: int = 50, window_hours: int = 48):
     """
     Return tagged, enriched news articles for a symbol or general market news.
     Cached 30 min — articles change slowly relative to request rate.
@@ -4717,7 +4820,8 @@ def refresh_extended_universe(_user=Depends(get_current_user)):
 
 
 @app.get("/sectors/ticker/{symbol}/sec")
-def get_ticker_sec_facts(symbol: str):
+@limiter.limit("10/minute")
+def get_ticker_sec_facts(request: Request, symbol: str):
     """SEC EDGAR XBRL annual financials for a ticker (up to 15 years)."""
     from extended_universe import get_cik_any
     from sec_feed import SecFeed
@@ -4734,7 +4838,8 @@ def get_ticker_sec_facts(symbol: str):
 
 
 @app.get("/sectors/ticker/{symbol}/filings")
-def get_ticker_filings(symbol: str, limit: int = 20):
+@limiter.limit("10/minute")
+def get_ticker_filings(request: Request, symbol: str, limit: int = 20):
     """Recent SEC filings (8-K, 10-K, 10-Q) for a ticker."""
     from extended_universe import get_cik_any
     from sec_feed import SecFeed
@@ -6431,6 +6536,23 @@ def _warmer_loop() -> None:
                     logger.info("Cache pruner removed %d stale rows", n)
             except Exception:
                 pass
+
+        # Publish schedule state so /admin/warmer/status can observe it.
+        # One cache write per cycle is negligible compared to the rest of
+        # the work the loop does.
+        try:
+            _set_cache("warmer:status:v1", {
+                "leader_pid": os.getpid(),
+                "updated_at": datetime.utcnow().isoformat(),
+                "schedules": schedules,
+                "last_run_epoch": {k: v for k, v in last.items()},
+                "next_run_epoch": {
+                    k: (last[k] + schedules[k]) if last[k] else None
+                    for k in schedules
+                },
+            }, 600, "warmer:status")
+        except Exception:
+            pass
 
         time.sleep(30)  # poll every 30 s
 

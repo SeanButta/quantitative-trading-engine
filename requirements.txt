@@ -30,3 +30,6 @@ anthropic==0.86.0                  # Claude AI synthesis (optional)
 websockets>=12.0                   # WebSocket endpoint
 httpx==0.27.2                      # async HTTP (used by some internal calls)
 requests==2.32.5                   # sync HTTP fallback (sec_feed, fred_data)
+
+# ── Observability ─────────────────────────────────────────────────────────────
+sentry-sdk[fastapi]>=2.0.0         # optional: error tracking, only active if SENTRY_DSN set
